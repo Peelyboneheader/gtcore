@@ -59,7 +59,7 @@ def cmd_plan(args):
     vol, title = _load(args.path, args.spacing)
     print("volume %s @ %s mm" % (vol.array.shape, tuple(round(s, 2) for s in vol.spacing)))
     result = reconstruct(vol)
-    run_planner(result, rx_cgy=args.rx)
+    run_planner(result, rx_cgy=args.rx, suggest=bool(args.suggest))
     return 0
 
 
@@ -107,6 +107,9 @@ def main(argv=None):
                      help="phantom voxel size in mm (phantom mode only)")
     pln.add_argument("--rx", type=float, default=6000.0,
                      help="prescription dose in cGy for the isodose levels")
+    pln.add_argument("--suggest", action="store_true",
+                     help="start with the tile configuration inferred from "
+                          "the detected seeds (same as pressing 'g')")
     pln.set_defaults(fn=cmd_plan)
 
     d = sub.add_parser("demo", help="full phantom demo, writes output/ files")

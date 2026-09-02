@@ -14,7 +14,9 @@ From this folder (`gt.bat` wraps the project venv — no activation needed):
 
 ```
 .\gt view  <dicom-folder-or-file>   load a CT, run the pipeline, open the 3D viewer
+.\gt view  <scan> --tiles auto      ... and infer the tile configuration with NO implant count
 .\gt plan  <dicom-folder-or-file>   pipeline + interactive tile planner (drag/drop + isodoses)
+.\gt plan  <scan> --suggest         ... starting from the auto-inferred tiles (planner key 'g')
 .\gt view                           either command, phantom mode (synthetic ground truth)
 .\gt demo                           full phantom demo -> output\ (NRRD, PLY meshes, figures, CSV)
 .\gt test                           run the test suite (206 tests)
@@ -22,7 +24,8 @@ From this folder (`gt.bat` wraps the project venv — no activation needed):
 
 Planner controls: pick on the cavity wall to drop a conformed tile (`h` = half
 tile), `tab` select, arrows translate along the wall, `[` `]` rotate, `x`
-delete, `u` = recompute TG-43 dose, redraw 100/50/25% isodose shells and
+delete, `g` = suggest tiles from the detected seeds (auto count),
+`u` = recompute TG-43 dose, redraw 100/50/25% isodose shells and
 report the cavity-wall area fraction receiving ≥ rx at 5 mm depth.
 
 ## Pipeline (and why the order matters)
@@ -47,6 +50,15 @@ report the cavity-wall area fraction receiving ≥ rx at 5 mm depth.
    with deformation-tolerant gates, exact branch-and-bound assignment for the
    known implant count (full + sliced 2×1 half tiles), per-tile pose +
    residual; everything unassigned is rejected (clips, bone, streaks).
+   **Automatic mode (`n_full_tiles="auto"`, no count):** rigid nominal
+   tile model (`tiles.model`), developable bent-tile fit with the 3 mm
+   seed-offset metric that explains wall-conformed *and* folded tiles
+   (`tiles.deform`), count-free model selection with a per-tile penalty
+   and a score-saturation curve (`tiles.auto`), and a stick-to-surface
+   cross-check when a cavity mesh exists (`tiles.surface`: footprint on
+   the wall, attached / detached verdict). Geometry constants are cited in
+   `gtcore.geometry` (seed plane 3.0 mm from the tissue face). Notes:
+   `docs/autogen-notes.md`.
 6. **`gtcore.dose`** — TG-43U1 line-source engine for IsoRay Proxcelan CS-1
    Rev2 (`engine.TG43Engine`, vectorized `compute_dose_grid` /
    `dose_at_points`, sub-voxel `isodose_surfaces`). The five physics defects
@@ -81,6 +93,7 @@ every stage.
 | Slice-spacing robustness (adaptive params) | recall 1.00 at 1.4/2.1/2.8 mm (fixed params: 0.58/0/0); figure `output/validation_spacing.png` |
 | Real post-op CT (degraded export: 2 mm + gaps) | 4 complete tiles recovered, grid residuals 0.28–0.94 mm |
 | Physical 8-tile printed phantom (157 slices, 1 mm, O-MAR) | **32/32 seeds, 8/8 tiles**, residuals 0.32–1.38 mm; one physically crumpled tile recovered via the count constraint and flagged degraded |
+| **Automatic tile creation, no count** (`scripts/validation_autogen.py`) | synthetic 54/60 exact (30/30 at 0.8 mm; the 6 misses at 1.2 mm are seed-detection misses the counted fit shares), centre 0.12 mm mean, normal 2.4°; printed phantom **8/8 incl. the crumpled tile** (0.46 mm rms, 288° fold, no count fallback); post-op cluster n = 4 by score saturation |
 
 Per-dataset findings and data-quality caveats: `docs/data-notes.md`.
 

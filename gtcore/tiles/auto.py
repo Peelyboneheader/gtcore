@@ -81,7 +81,7 @@ from .fit import (
 from .model import fit_rigid
 
 __all__ = ["LAMBDA_FULL", "LAMBDA_HALF", "ScorePoint", "AutoFitResult",
-           "fit_tiles_auto", "deformable_score"]
+           "fit_tiles_auto", "deformable_score", "to_placed_tiles"]
 
 LAMBDA_FULL = 3.5
 LAMBDA_HALF = LAMBDA_FULL
@@ -103,6 +103,7 @@ LOOSE_E_MAX = 0.10
 LOOSE_AXIS_MAX_DEG = 25.0
 
 _SEARCH_NODE_CAP = 200000
+_OFF_MM = 3.0                   # geometry.SEED_PLANE_OFFSET_MM
 
 
 def deformable_score(fit: DeformableFit) -> float:
@@ -268,6 +269,57 @@ def _deformed_pose(tile_id, idx, centers, fit, cavity_center, degraded):
         center_ras=center, normal_ras=normal, axis_ras=t1,
         residual_mm=fit.rms_mm, degraded=degraded, deform=fit,
     )
+
+
+# ------------------------------------------------------------ planner feed
+def to_placed_tiles(result, centers_ras=None, axes_ras=None):
+    """Turn recovered tiles into planner :class:`~gtcore.interact.PlacedTile`
+    objects (the "suggest tiles" feed): the surface-conformed tile when a
+    cavity mesh was available, otherwise a tile built from the bent-tile
+    fit (seed sheet corners, normal toward the cavity) or, for a plain
+    pose, from the observed seeds.  Every returned tile is an ordinary
+    placed tile: it can be dragged, rotated and deleted like a dropped one.
+    """
+    from ..interact import PlacedTile
+    from .deform import deformed_footprint
+
+    out = []
+    for pose in result.tiles:
+        if pose.surface is not None:
+            out.append(pose.surface.placed)
+            continue
+        idx = list(pose.seed_indices)
+        if centers_ras is not None and axes_ras is not None:
+            seed_c = np.asarray(centers_ras, float)[idx]
+            seed_a = np.asarray(axes_ras, float)[idx]
+        else:
+            seed_c = None
+            seed_a = None
+        if pose.deform is not None:
+            fit = pose.deform
+            n = fit.pose.normal                      # toward the cavity
+            corners = deformed_footprint(fit.pose, fit.params, offset_mm=0.0)
+            if seed_c is None:
+                seed_c = fit.seed_points()
+                from .deform import deformed_seed_axes
+                seed_a = deformed_seed_axes(fit.pose, fit.params)
+            anchor = fit.pose.center - _OFF_MM * n
+            axis = fit.pose.t1
+        else:
+            n = -pose.normal_ras                     # fit.py: away from cavity
+            axis = pose.axis_ras
+            t2 = np.cross(n, axis)
+            cu = 10.0 if pose.kind == "full" else 5.0
+            corners = np.array([pose.center_ras + su * cu * axis + sv * 10.0 * t2
+                                for su, sv in ((-1, -1), (1, -1), (1, 1), (-1, 1))])
+            if seed_c is None:
+                raise ValueError("centers_ras/axes_ras needed for a plain pose")
+            anchor = pose.center_ras - _OFF_MM * n
+        out.append(PlacedTile(kind=pose.kind, center_ras=seed_c.mean(axis=0),
+                              normal_ras=n, axis_ras=axis, seed_centers=seed_c,
+                              seed_axes=seed_a, corners_ras=corners,
+                              anchor_ras=anchor))
+    return out
 
 
 # --------------------------------------------------------------------- main

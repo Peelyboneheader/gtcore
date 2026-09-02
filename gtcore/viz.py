@@ -64,8 +64,17 @@ def show_scene(result: PipelineResult, title: str = "IntraOp GammaTile",
                     color=color, specular=0.8)
     if result.tiles is not None and result.tiles.tiles:
         pts = np.array([tp.center_ras for tp in result.tiles.tiles])
-        labels = ["T%d%s" % (tp.tile_id, " (deg)" if tp.degraded else "")
-                  for tp in result.tiles.tiles]
+        labels = []
+        for tp in result.tiles.tiles:
+            lab = "T%d" % tp.tile_id
+            if tp.degraded:
+                lab += " (crumpled)"
+            if tp.deform is not None and not tp.degraded \
+                    and tp.deform.params.fold_deg > 90.0:
+                lab += " (bent %.0f deg)" % tp.deform.params.fold_deg
+            if tp.surface is not None and not tp.surface.attached:
+                lab += " DETACHED"
+            labels.append(lab)
         pl.add_point_labels(pts, labels, font_size=16, text_color="white",
                             point_size=1, shape_opacity=0.35,
                             always_visible=True)

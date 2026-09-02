@@ -49,6 +49,7 @@ HELP_TEXT = (
     "Ctrl+left-drag a placed tile: grab it and slide it along the wall\n"
     "Tab: cycle selection   arrows: slide tile ~2 mm   [ ]: rotate 10 deg\n"
     "x: delete selected   u: update isodose (100/50/25% rx: red/orange/yellow)\n"
+    "g: suggest tiles from the detected seeds (auto count; then edit them)\n"
     "left-drag rotate, right-drag zoom, middle-drag pan, r: reset camera"
 )
 
@@ -92,6 +93,7 @@ class _PlannerApp:
         self._drag_moves = 0
         self._overlap_pairs: List = []
         self._last_status = ""       # last status text (also for headless tests)
+        self._last_suggestion = None  # AutoFitResult of the last 'g' press
 
         self.pl = pv.Plotter(window_size=(1280, 900), title=title,
                              off_screen=off_screen)
@@ -137,6 +139,7 @@ class _PlannerApp:
             (("Tab",), self._cycle_selection),
             (("x",), self._delete_selected),
             (("u",), self.update_dose),
+            (("g",), self.suggest_tiles),
             (("bracketleft", "["), lambda: self._rotate_selected(-ROTATE_STEP_RAD)),
             (("bracketright", "]"), lambda: self._rotate_selected(+ROTATE_STEP_RAD)),
             (("Up",), lambda: self._translate_selected(0.0, +1.0)),
@@ -423,6 +426,50 @@ class _PlannerApp:
         self._after_change("tile placed (%d on board)" % len(self.tiles))
         return tile
 
+    def suggest_tiles(self):
+        """Infer the implanted configuration from the detected seeds (no
+        count needed) and put the tiles on the board as ordinary placed
+        tiles -- movable, rotatable, deletable -- conformed to the cavity
+        wall when one exists, otherwise as the free bent-tile fits."""
+        from .tiles import fit_tiles_auto, to_placed_tiles
+
+        seeds = self.result.seeds
+        if len(seeds) < 2:
+            self._update_status("suggest: no detected seeds to fit")
+            return []
+        cavity_center = None
+        mesh = self.cavity if (self.cavity is not None
+                               and len(self.cavity.vertices)) else None
+        if mesh is not None:
+            cavity_center = np.asarray(mesh.vertices, float).mean(axis=0)
+        fit = fit_tiles_auto(seeds.centers_ras, seeds.axes_ras,
+                             cavity_center_ras=cavity_center, mesh=mesh)
+        placed = to_placed_tiles(fit, seeds.centers_ras, seeds.axes_ras)
+        for tile in placed:
+            self.tiles.append(tile)
+            self._tile_ids.append(self._next_id)
+            self._next_id += 1
+        self.selected = len(self.tiles) - 1 if placed else self.selected
+        self._last_suggestion = fit
+        notes = []
+        for pose in fit.tiles:
+            tag = "T%d" % (pose.tile_id + 1)
+            if pose.degraded:
+                tag += " crumpled"
+            if pose.surface is not None and not pose.surface.attached:
+                tag += " DETACHED"
+            elif pose.surface is not None and pose.surface.consistent is False:
+                tag += " inconsistent"
+            if len(tag) > 3:
+                notes.append(tag)
+        msg = "suggested %d tile(s): %s" % (len(placed), fit.summary())
+        if notes:
+            msg += "\n  " + ", ".join(notes)
+        if mesh is None:
+            msg += "\n  (no cavity surface: tiles shown as free fits)"
+        self._after_change(msg)
+        return placed
+
     def _toggle_kind(self):
         self.next_kind = "half" if self.next_kind == "full" else "full"
         self._update_status()
@@ -626,9 +673,13 @@ class _PlannerApp:
             pass
 
 
-def run_planner(result: PipelineResult, rx_cgy: float = 6000.0):
-    """Open the interactive planner window (blocking)."""
+def run_planner(result: PipelineResult, rx_cgy: float = 6000.0,
+                suggest: bool = False):
+    """Open the interactive planner window (blocking).  ``suggest`` starts
+    with the auto-inferred tile configuration on the board."""
     app = _PlannerApp(result, rx_cgy=rx_cgy, off_screen=False)
+    if suggest:
+        app.suggest_tiles()
     app.show()
     return app.tiles
 
@@ -642,7 +693,8 @@ def snapshot_planner(result: PipelineResult, actions: Sequence, path: str,
     - a 3-vector: drop a full tile at that cavity point,
     - ``{"point": xyz, "kind": "full"|"half"}``: drop a tile of that kind,
     - ``"update"`` or ``{"update": True}``: run the isodose update (a no-op
-      message if the dose engine is not importable yet).
+      message if the dose engine is not importable yet),
+    - ``"suggest"``: infer tiles from the detected seeds (auto count).
     """
     app = _PlannerApp(result, rx_cgy=rx_cgy, off_screen=True)
     try:
@@ -650,6 +702,8 @@ def snapshot_planner(result: PipelineResult, actions: Sequence, path: str,
             if isinstance(act, str):
                 if act == "update":
                     app.update_dose()
+                elif act == "suggest":
+                    app.suggest_tiles()
                 continue
             if isinstance(act, dict):
                 if act.get("update"):
