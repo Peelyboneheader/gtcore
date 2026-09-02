@@ -46,7 +46,12 @@ def show_scene(result: PipelineResult, title: str = "IntraOp GammaTile",
         if mesh is not None and len(mesh.vertices):
             pl.add_mesh(to_pv(mesh), name=name, **style)
 
-    # seeds: uniform gold, or coloured per fitted tile when a fit exists
+    # seeds: uniform gold, or coloured per fitted tile when a fit exists;
+    # when the implant assessment says NO implant, candidates render gray so
+    # a pre-implant scan's stray dense-bone spots don't masquerade as seeds
+    verdict = (result.implant or {}).get("verdict", "confirmed")
+    no_implant = verdict == "absent"
+    implant_uncertain = verdict == "uncertain"
     tile_of = {}
     if result.tiles is not None:
         for tp in result.tiles.tiles:
@@ -57,8 +62,11 @@ def show_scene(result: PipelineResult, title: str = "IntraOp GammaTile",
     for i, (c, a) in enumerate(zip(result.seeds.centers_ras,
                                    result.seeds.axes_ras)):
         tp = tile_of.get(i)
-        color = palette[tp.tile_id % len(palette)] if tp else \
-            ("gold" if result.tiles is None else "gray")
+        if no_implant:
+            color = "dimgray"
+        else:
+            color = palette[tp.tile_id % len(palette)] if tp else \
+                ("gold" if result.tiles is None else "gray")
         pl.add_mesh(pv.Cylinder(center=c, direction=a, radius=0.6,
                                 height=SEED_LENGTH_MM),
                     color=color, specular=0.8)
@@ -77,7 +85,14 @@ def show_scene(result: PipelineResult, title: str = "IntraOp GammaTile",
         cavity_note = "cavity wall (blue)"
     else:  # no seed prior: the low-HU fallback is ventricles/CSF, not a cavity
         cavity_note = "low-HU spaces, likely ventricles/CSF (blue; no seed prior)"
-    seed_note = ("%d seeds (gold)" % n_seeds) if n_seeds else "no seeds on board"
+    if no_implant:
+        seed_note = ("NO IMPLANT DETECTED (%d stray candidates, gray)"
+                     % n_seeds) if n_seeds else "no seeds on board"
+    elif implant_uncertain:
+        seed_note = ("IMPLANT UNCERTAIN: %d candidates, tile-like but "
+                     "ungrouped (calcifications?)" % n_seeds)
+    else:
+        seed_note = ("%d seeds (gold)" % n_seeds) if n_seeds else "no seeds on board"
     pl.add_text(
         "brain (rose) | skull (ivory) | %s | %s\n"
         "left-drag rotate, right-drag zoom, middle-drag pan, 'r' reset"

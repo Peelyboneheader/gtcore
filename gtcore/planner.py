@@ -86,7 +86,16 @@ class _PlannerApp:
         self.pv = pv
         self.result = result
         self.rx_cgy = float(rx_cgy)
+        # interaction surface: the cavity wall, or -- for phantoms and other
+        # scans without a segmented cavity -- the object/body shell, so tiles
+        # can still be placed, selected and dragged on something real
         self.cavity = result.meshes.get("cavity")
+        self._surface_label = "cavity wall"
+        if self.cavity is None or not len(getattr(self.cavity, "vertices", ())):
+            body = result.meshes.get("body")
+            if body is not None and len(body.vertices):
+                self.cavity = body
+                self._surface_label = "phantom shell (no cavity segmented)"
 
         self.tiles: List[PlacedTile] = []
         self._tile_ids: List[int] = []
@@ -108,6 +117,7 @@ class _PlannerApp:
                              off_screen=off_screen)
         self._build_scene()
         self._bind_interaction()
+        self._adopt_fitted_tiles()
         self._update_status()
 
     # ------------------------------------------------------------- base scene
@@ -124,7 +134,7 @@ class _PlannerApp:
             mesh = self.result.meshes.get(name)
             if mesh is not None and len(mesh.vertices):
                 actor = pl.add_mesh(_to_pv(pv, mesh), name=name, **style)
-                if name == "cavity":
+                if mesh is self.cavity:  # whichever mesh is the pick surface
                     self._cavity_actor = actor
 
         for c, a in zip(self.result.seeds.centers_ras,
@@ -415,6 +425,37 @@ class _PlannerApp:
         self._update_status(extra)
 
     # ------------------------------------------------------------------ tiles
+    def _adopt_fitted_tiles(self):
+        """Import tiles RECOVERED FROM THE SCAN as selectable placed tiles.
+
+        Without this, Tab/drag only touch tiles the user drops by hand and
+        the fitted implant is display-only -- but adjusting the *actual*
+        implant is the whole point of the planner. Each fitted pose is
+        re-conformed onto the interaction surface at its own centre.
+        """
+        fit = getattr(self.result, "tiles", None)
+        if fit is None or not getattr(fit, "tiles", None):
+            return
+        if self.cavity is None or not len(self.cavity.vertices):
+            return
+        adopted = 0
+        for tp in fit.tiles:
+            try:
+                surf, n_in = snap_to_wall(self.cavity, tp.center_ras)
+                tile = conform_tile(self.cavity, surf, n_in, tp.axis_ras,
+                                    kind=tp.kind)
+            except Exception:
+                continue
+            self.tiles.append(tile)
+            self._tile_ids.append(self._next_id)
+            self._next_id += 1
+            adopted += 1
+        if adopted:
+            self.selected = 0
+            self._after_change(
+                "%d fitted tiles adopted from the scan -- Tab selects, "
+                "Ctrl+left-drag moves" % adopted)
+
     def drop_at(self, point_ras, kind: Optional[str] = None):
         """Snap ``point_ras`` to the cavity wall and drop a conformed tile."""
         if self.cavity is None or not len(self.cavity.vertices):
