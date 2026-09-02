@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+data/
+output/
+*.nrrd
+*.nii*
+*.dcm

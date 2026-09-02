@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gtcore"
+version = "0.1.0"
+description = "IntraOp GammaTile: CT reconstruction, seed localization, tile characterization, and TG-43U1 dosimetry core"
+requires-python = ">=3.9"
+authors = [{ name = "Jacob Lee" }]
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+    "scikit-image>=0.21",
+    "SimpleITK>=2.2",
+    "pydicom>=2.4",
+    "trimesh>=4.0",
+    "matplotlib>=3.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+viz = ["pyvista"]
+
+[project.scripts]
+gt = "gtcore.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["gtcore*"]
