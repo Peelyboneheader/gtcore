@@ -80,6 +80,11 @@ __all__ = [
     "TileCarrier",
     "InterferenceModel",
     "interference_report",
+    "PRESCRIPTION_DEPTH_MM",
+    "KERNEL_ACCURATE_FROM_MM",
+    "tile_prescription_points",
+    "tile_shadowing",
+    "find_shadowing_tiles",
 ]
 
 # ------------------------------------------------------------------- physics
@@ -476,6 +481,36 @@ class InterferenceModel:
             ]
         return cls(capsules, carriers, **kwargs)
 
+    def restricted_to(self, capsule_indices):
+        """A copy in which only the named capsules attenuate.
+
+        Capsules outside the set are replaced by water-equivalent ones, so
+        the capsule *list and its indexing are unchanged* -- the self-skip in
+        :meth:`transmission` still refers to the right seed, and
+        :meth:`validate_against` still passes against the same seed array --
+        while their excess optical depth is exactly zero.  Carriers are
+        dropped, since they belong to no single seed.
+
+        This is what makes shadowing attributable: run the dose once with
+        only tile B's capsules live and the loss is B's doing, not the
+        implant's in aggregate.
+        """
+        keep = set(int(i) for i in capsule_indices)
+        capsules = []
+        for i, cap in enumerate(self.capsules):
+            if i in keep:
+                capsules.append(cap)
+                continue
+            capsules.append(SeedCapsule(
+                cap.center_ras, cap.axis_ras,
+                outer_radius_mm=cap.outer_radius_mm, wall_mm=cap.wall_mm,
+                length_mm=cap.length_mm,
+                mu_wall_cm1=self.mu_water_cm1,
+                mu_core_cm1=self.mu_water_cm1))
+        return InterferenceModel(capsules, (), mu_water_cm1=self.mu_water_cm1,
+                                 max_range_mm=self.max_range_mm,
+                                 line_samples=self.line_samples)
+
     # ------------------------------------------------------------ validation
     def validate_against(self, seed_centers, tol_mm=1.0e-6):
         """Raise unless this model's capsules match ``seed_centers`` in order.
@@ -731,3 +766,228 @@ def interference_report(dose_free, dose_corrected, mask=None, level_cgy=None):
         "max_ratio": float(ratio.max()),
         "mean_percent_change": float(100.0 * (ratio.mean() - 1.0)),
     }
+
+
+# ------------------------------------------------- tile-level shadowing
+#: GammaTile prescribes 60 Gy at 5 mm depth in the tissue behind the wall,
+#: so that is where mutual shadowing between tiles actually matters.
+PRESCRIPTION_DEPTH_MM = 5.0
+
+#: Distance from a seed [mm] beyond which the engine's tabulated kernel is
+#: accurate to <=5e-4 of the analytic rate. Inside it the table degrades to
+#: ~1% -- the same order as the shadowing being measured -- so the sweep
+#: switches to the exact path there. Measured by the dose-engine work; see
+#: the "Evaluation paths" section of gtcore/dose/engine.py.
+KERNEL_ACCURATE_FROM_MM = 2.5
+
+
+def tile_prescription_points(tile, depth_mm=PRESCRIPTION_DEPTH_MM,
+                             wall_offset_mm=None):
+    """Points ``depth_mm`` into the tissue behind each of a tile's seeds.
+
+    A placed tile's ``normal_ras`` points INTO the cavity and its seeds sit
+    ``wall_offset_mm`` off the wall on the cavity side, so the tissue at
+    prescription depth is ``wall_offset + depth`` back along the normal.
+    Defaults to :data:`gtcore.interact.SEED_WALL_OFFSET_MM`.
+
+    Returns ``(N, 3)`` RAS mm, one point per seed.
+    """
+    if wall_offset_mm is None:
+        from ..interact import SEED_WALL_OFFSET_MM
+        wall_offset_mm = SEED_WALL_OFFSET_MM
+    seeds = np.asarray(tile.seed_centers, dtype=float).reshape(-1, 3)
+    n = _unit(tile.normal_ras)
+    return seeds - (float(wall_offset_mm) + float(depth_mm)) * n[None, :]
+
+
+def _sphere_meets_segments(center, radius, origins, targets):
+    """True if a sphere comes within ``radius`` of any origin->target segment.
+
+    ``origins`` is (M, 3) and ``targets`` (P, 3); every M x P segment is
+    tested at once by projecting the sphere centre onto each segment and
+    clamping the parameter to [0, 1].  Used to decide whether an occluding
+    tile is worth a dose evaluation at all.
+    """
+    o = np.asarray(origins, dtype=float).reshape(-1, 1, 3)
+    t = np.asarray(targets, dtype=float).reshape(1, -1, 3)
+    c = np.asarray(center, dtype=float).reshape(1, 1, 3)
+    d = t - o
+    denom = np.einsum("ijk,ijk->ij", d, d)
+    denom = np.where(denom > _TINY, denom, 1.0)
+    u = np.clip(np.einsum("ijk,ijk->ij", c - o, d) / denom, 0.0, 1.0)
+    closest = o + u[..., None] * d
+    gap2 = np.einsum("ijk,ijk->ij", closest - c, closest - c)
+    return bool((gap2 <= float(radius) ** 2).any())
+
+
+def tile_shadowing(tiles, sk_per_seed_u=None, depth_mm=PRESCRIPTION_DEPTH_MM,
+                   engine=None, model=None, **model_kwargs):
+    """How much dose each tile loses to every other tile's seed capsules.
+
+    Geometric overlap (:func:`gtcore.interact.find_overlapping_tiles`) asks
+    whether two collagen sheets collide.  This asks the dosimetric question
+    underneath it: tiles that never touch can still stand in each other's
+    line of fire, and the planner has no way to see that from the geometry.
+
+    For every tile the dose is evaluated at its own prescription-depth points
+    (:func:`tile_prescription_points`) twice: once as plain TG-43, once with
+    only ONE other tile's capsules attenuating.  The relative drop is that
+    tile pair's shadowing, and because only one occluding tile is live at a
+    time it is attributable rather than a lump sum.
+
+    Parameters
+    ----------
+    tiles : sequence of PlacedTile
+        Placed or inferred tiles; each needs ``seed_centers``, ``seed_axes``
+        and ``normal_ras``.
+    sk_per_seed_u : float or (M,) array, optional
+        Air-kerma strength per seed [U] over all tiles' seeds concatenated.
+        Defaults to the engine default; the result is a *ratio*, so a uniform
+        S_K cancels almost entirely and this rarely matters.
+    depth_mm : float
+        Tissue depth for the evaluation points.
+    engine : TG43Engine, optional
+        Reuse an engine across calls.
+    model : InterferenceModel, optional
+        Prebuilt model over the concatenated seeds; rebuilt if omitted.
+    **model_kwargs
+        Passed to :meth:`InterferenceModel.from_implant` when building one.
+
+    Returns
+    -------
+    dict
+        ``loss`` -- (T, T) array; ``loss[i, j]`` is the mean fractional dose
+        drop at tile ``i``'s prescription points caused by tile ``j``'s
+        capsules.  The diagonal is a tile's *self*-shadowing, its own four
+        seeds shading one another, which is real and usually the largest
+        entry.  ``worst`` -- (T, T) array of the worst single point instead
+        of the mean.  ``per_tile`` -- (T,) fractional drop with every
+        capsule live, the number a planner would quote.  ``points`` -- list
+        of the per-tile evaluation points.
+    """
+    from .engine import TG43Engine, dose_at_points
+
+    tiles = list(tiles)
+    n_tiles = len(tiles)
+    out = {"loss": np.zeros((n_tiles, n_tiles)),
+           "worst": np.zeros((n_tiles, n_tiles)),
+           "per_tile": np.zeros(n_tiles),
+           "points": []}
+    if n_tiles == 0:
+        return out
+
+    centers, axes, owner = [], [], []
+    for t_idx, tile in enumerate(tiles):
+        sc = np.asarray(tile.seed_centers, dtype=float).reshape(-1, 3)
+        sa = np.asarray(tile.seed_axes, dtype=float).reshape(-1, 3)
+        centers.append(sc)
+        axes.append(sa)
+        owner.extend([t_idx] * sc.shape[0])
+    centers = np.vstack(centers)
+    axes = np.vstack(axes)
+    owner = np.asarray(owner)
+    groups = [np.flatnonzero(owner == t) for t in range(n_tiles)]
+
+    eng = engine if engine is not None else TG43Engine()
+    if sk_per_seed_u is None:
+        sk_per_seed_u = eng.DEFAULT_SK_U
+    if model is None:
+        model = InterferenceModel.from_implant(centers, axes, **model_kwargs)
+
+    pts = [tile_prescription_points(t, depth_mm=depth_mm) for t in tiles]
+    out["points"] = pts
+
+    # One restricted model per occluding tile, not one per (i, j) pair.
+    restricted = [model.restricted_to(g) for g in groups]
+
+    # Geometric prune. Tile j can only shadow tile i if one of j's capsules
+    # sits on a ray reaching i's evaluation points -- and those rays come
+    # from EVERY seed in the implant, not just tile i's own, since the dose
+    # ratio is over the total. So the test is per segment: does tile j's
+    # bounding sphere touch any segment (seed -> point of tile i)? That is
+    # exact, costs a few thousand flops, and skips the dose evaluation for
+    # pairs that are genuinely out of each other's way.
+    cap_reach = max((c.bounding_radius_mm for c in model.capsules),
+                    default=0.0)
+    tile_c, tile_r = [], []
+    for i in range(n_tiles):
+        sc = centers[groups[i]]
+        c = sc.mean(axis=0)
+        tile_c.append(c)
+        tile_r.append(float(np.linalg.norm(sc - c, axis=1).max()) + cap_reach)
+    tile_c = np.asarray(tile_c)
+
+    for i in range(n_tiles):
+        p = pts[i]
+        # Kernel choice, per tile. The tabulated kernel holds to <=5e-4 of
+        # the analytic rate beyond KERNEL_ACCURATE_FROM_MM of a seed and is
+        # markedly faster, and these are relative drops so its residual error
+        # cancels further still. Closer in it degrades to ~1%, which would be
+        # the same order as the shadowing being measured -- so if any seed
+        # lies inside that radius of this tile's evaluation points, pay for
+        # the exact path. Ordinary geometry sits at 7 mm and never does; a
+        # tile stacked behind another gets down to ~3 mm.
+        near = float(np.linalg.norm(
+            centers[:, None, :] - p[None, :, :], axis=2).min())
+        kw = dict(sk_per_seed_u=sk_per_seed_u, engine=eng,
+                  exact=near < KERNEL_ACCURATE_FROM_MM)
+
+        free = np.atleast_1d(dose_at_points(centers, axes, p, **kw))
+        safe = np.where(free > 0.0, free, np.inf)
+
+        full = np.atleast_1d(dose_at_points(centers, axes, p,
+                                            interference=model, **kw))
+        out["per_tile"][i] = float(np.mean(1.0 - full / safe))
+
+        for j in range(n_tiles):
+            if not _sphere_meets_segments(tile_c[j], tile_r[j], centers, p):
+                continue                      # cannot possibly be in the way
+            d = np.atleast_1d(dose_at_points(centers, axes, p,
+                                             interference=restricted[j],
+                                             **kw))
+            drop = 1.0 - d / safe
+            out["loss"][i, j] = float(np.mean(drop))
+            out["worst"][i, j] = float(np.max(drop))
+
+    return out
+
+
+def find_shadowing_tiles(tiles, threshold_pct=2.0,
+                         depth_mm=PRESCRIPTION_DEPTH_MM, engine=None,
+                         model=None, report=None, **model_kwargs):
+    """Tile pairs that measurably shadow each other's prescription dose.
+
+    Deliberately shaped like :func:`gtcore.interact.find_overlapping_tiles`
+    so a planner can flag both the same way, but it answers a different
+    question -- these tiles need not be anywhere near touching.
+
+    Parameters
+    ----------
+    tiles : sequence of PlacedTile
+    threshold_pct : float
+        Report a pair when either direction's mean dose loss at prescription
+        depth reaches this percentage.
+    report : dict, optional
+        A :func:`tile_shadowing` result to reuse instead of recomputing.
+
+    Returns
+    -------
+    list of (i, j, percent) with ``i < j``, worst direction first by
+    percent, descending.
+    """
+    tiles = list(tiles)
+    if len(tiles) < 2:
+        return []
+    if report is None:
+        report = tile_shadowing(tiles, depth_mm=depth_mm, engine=engine,
+                                model=model, **model_kwargs)
+    loss = report["loss"]
+    thresh = float(threshold_pct) / 100.0
+    pairs = []
+    for i in range(len(tiles)):
+        for j in range(i + 1, len(tiles)):
+            worst = max(float(loss[i, j]), float(loss[j, i]))
+            if worst >= thresh:
+                pairs.append((i, j, 100.0 * worst))
+    pairs.sort(key=lambda p: -p[2])
+    return pairs

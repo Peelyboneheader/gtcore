@@ -196,7 +196,7 @@ def test_mixed_list_ordering(case):
 
 # ------------------------------------------------------- footprint fidelity
 def test_footprint_tracks_cavity_wall(case):
-    """The sampled footprint must ride the mesh at its 2 mm collagen inset:
+    """The sampled footprint must ride the mesh at its 3 mm seed-plane inset:
     every sample within ~1 mm of that offset surface, for full and half
     tiles, with unit inward-pointing sample normals."""
     _vol, truth, mesh = case
@@ -209,7 +209,7 @@ def test_footprint_tracks_cavity_wall(case):
         _, dist, _ = trimesh.proximity.closest_point(mesh, pts)
         err = np.abs(dist - SEED_WALL_OFFSET_MM)
         assert float(err.max()) <= 1.1, (
-            "%s footprint strays %.2f mm from the 2 mm-offset wall"
+            "%s footprint strays %.2f mm from the 3 mm-offset wall"
             % (kind, err.max())
         )
         assert np.allclose(np.linalg.norm(nrm, axis=1), 1.0, atol=1e-9)

@@ -54,6 +54,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 import numpy as np
 from scipy import ndimage
 
+from .. import geometry as _geom
 from ..volume import Volume
 
 __all__ = [
@@ -108,10 +109,14 @@ CAVITY_AIR_OFFSET_MM = 4.0         # air above cavity-centre z + this
 
 TRACT_RADIUS_MM = 7.0
 
-TILE_HALF_MM = 5.0                 # seed corners at +/- this in the tangent plane
+# Manufactured tile geometry (citations in gtcore.geometry): seeds on a 10 mm
+# pitch, so corners at +/- 5 mm in the tangent plane; the seed plane is 3.0 mm
+# from the tissue-facing surface (hydrated 2.25-3.75 mm), so each seed centre
+# sits 3 mm off the cavity wall, inside the lumen.
+TILE_HALF_MM = _geom.SEED_PITCH_MM / 2.0        # 5.0
 TILE_POLAR_RANGE_DEG = (100.0, 150.0)
-SEED_LENGTH_MM = 4.5
-SEED_INSET_MM = 2.0                # seed centre this far inside the cavity wall
+SEED_LENGTH_MM = _geom.SEED_LENGTH_MM           # 4.5
+SEED_INSET_MM = _geom.SEED_PLANE_OFFSET_MM      # 3.0
 
 PSF_SIGMA_MM = 0.45
 
@@ -341,60 +346,87 @@ def _frame_about(u0):
     return e1, e2
 
 
-# half-tile seeds must clear every already-placed seed by this much, so their
-# CT blooms stay separable and the tile-fitting stage sees distinct candidates
+# Seeds of a newly placed tile must clear every already-placed seed by this
+# much: two collagen tiles cannot occupy the same patch of wall, and a
+# phantom whose tiles overlap has no meaningful truth partition (their CT
+# blooms would merge as well).  Full tiles keep their historical first draw
+# and only re-draw on a collision, so every phantom that never collided is
+# reproduced bit-for-bit.
+FULL_TILE_CLEARANCE_MM = 7.0
+FULL_TILE_MAX_TRIES = 40
 HALF_TILE_CLEARANCE_MM = 7.0
 HALF_TILE_MAX_TRIES = 80
+
+
+def _min_clearance(existing_seeds, centers):
+    if not existing_seeds:
+        return np.inf
+    existing = np.asarray([s.center_ras for s in existing_seeds])
+    return min(float(np.linalg.norm(existing - c, axis=1).min())
+               for c in centers)
 
 
 def _build_tiles(shape, cav_c, u0, n_tiles, rng, n_half_tiles=0):
     """Place ``n_tiles`` deformed 4-seed tiles (plus optional 2-seed half
     tiles) on the cavity wall.
 
-    Full tiles are placed exactly as before (identical RNG draws), so a call
-    with ``n_half_tiles=0`` reproduces historical phantoms bit-for-bit.  Half
-    tiles are appended afterwards at rejection-sampled wall directions that
-    keep their seeds at least ``HALF_TILE_CLEARANCE_MM`` from every existing
-    seed.
+    Both kinds are rejection-sampled so that no seed lands within the tile
+    clearance of an already-placed seed (overlapping tiles are physically
+    impossible and have no meaningful truth partition).  A full tile keeps
+    its first draw whenever that draw already clears, so phantoms whose tiles
+    never collided are reproduced bit-for-bit; half tiles are appended
+    afterwards.
     """
     e1, e2 = _frame_about(u0)
     seeds = []
     tiles = []
     seed_id = 0
     for tile_id in range(n_tiles):
-        theta = np.deg2rad(rng.uniform(*TILE_POLAR_RANGE_DEG))
-        phi = 2.0 * np.pi * tile_id / max(1, n_tiles) + rng.uniform(
-            -0.4, 0.4
-        ) * (2.0 * np.pi / max(1, n_tiles))
-        d = _unit(
-            np.cos(theta) * u0
-            + np.sin(theta) * (np.cos(phi) * e1 + np.sin(phi) * e2)
-        )
-        w = cav_c + d * shape.radius(d)
-        t1 = _unit(np.cross(d, u0))
-        t2 = _unit(np.cross(d, t1))
+        best = None  # (clearance, centers, axes)
+        for _ in range(FULL_TILE_MAX_TRIES):
+            theta = np.deg2rad(rng.uniform(*TILE_POLAR_RANGE_DEG))
+            phi = 2.0 * np.pi * tile_id / max(1, n_tiles) + rng.uniform(
+                -0.4, 0.4
+            ) * (2.0 * np.pi / max(1, n_tiles))
+            d = _unit(
+                np.cos(theta) * u0
+                + np.sin(theta) * (np.cos(phi) * e1 + np.sin(phi) * e2)
+            )
+            w = cav_c + d * shape.radius(d)
+            t1 = _unit(np.cross(d, u0))
+            t2 = _unit(np.cross(d, t1))
 
+            centers = []
+            axes = []
+            for sa in (-TILE_HALF_MM, TILE_HALF_MM):
+                for sb in (-TILE_HALF_MM, TILE_HALF_MM):
+                    # Each corner is re-projected onto the lumpy wall on its
+                    # own: that is what deforms the tile away from a flat
+                    # square.
+                    dir_s = _unit(w + sa * t1 + sb * t2 - cav_c)
+                    center = cav_c + dir_s * (shape.radius(dir_s) - SEED_INSET_MM)
+                    axis = _unit(t1 - float(t1 @ dir_s) * dir_s)
+                    centers.append(center)
+                    axes.append(axis)
+            clearance = _min_clearance(seeds, centers)
+            if best is None or clearance > best[0]:
+                best = (clearance, centers, axes)
+            if clearance >= FULL_TILE_CLEARANCE_MM:
+                break
+
+        _, centers, axes = best
         ids = []
-        centers = []
-        for sa in (-TILE_HALF_MM, TILE_HALF_MM):
-            for sb in (-TILE_HALF_MM, TILE_HALF_MM):
-                # Each corner is re-projected onto the lumpy wall on its own:
-                # that is what deforms the tile away from a flat square.
-                dir_s = _unit(w + sa * t1 + sb * t2 - cav_c)
-                center = cav_c + dir_s * (shape.radius(dir_s) - SEED_INSET_MM)
-                axis = t1 - float(t1 @ dir_s) * dir_s
-                axis = _unit(axis)
-                seeds.append(
-                    SeedTruth(
-                        seed_id=seed_id,
-                        tile_id=tile_id,
-                        center_ras=center,
-                        axis_ras=axis,
-                    )
+        for center, axis in zip(centers, axes):
+            seeds.append(
+                SeedTruth(
+                    seed_id=seed_id,
+                    tile_id=tile_id,
+                    center_ras=center,
+                    axis_ras=axis,
                 )
-                ids.append(seed_id)
-                centers.append(center)
-                seed_id += 1
+            )
+            ids.append(seed_id)
+            seed_id += 1
 
         tile_center = np.mean(np.asarray(centers), axis=0)
         tiles.append(
@@ -433,14 +465,7 @@ def _build_tiles(shape, cav_c, u0, n_tiles, rng, n_half_tiles=0):
                 centers.append(center)
                 axes.append(axis)
 
-            if seeds:
-                existing = np.asarray([s.center_ras for s in seeds])
-                clearance = min(
-                    float(np.linalg.norm(existing - c, axis=1).min())
-                    for c in centers
-                )
-            else:
-                clearance = np.inf
+            clearance = _min_clearance(seeds, centers)
             if best is None or clearance > best[0]:
                 best = (clearance, centers, axes)
             if clearance >= HALF_TILE_CLEARANCE_MM:

@@ -4,7 +4,8 @@
 ``TG43Engine`` / ``compute_dose_grid`` / ``dose_at_points`` /
 ``isodose_surfaces`` are the corrected, vectorized v2 engine (see
 docs/tg43-port-notes.md); ``metrics`` adds DVH, cavity-rind and wall-at-depth
-coverage statistics for the planner.
+coverage statistics for the planner, and ``dvh`` the cheap cavity-shell
+(wall / +5 / +10 mm) statistics behind the planner's on-screen dose panel.
 
 ``InterferenceModel`` adds the effect TG-43 superposition cannot express:
 seeds and collagen tile carriers attenuating each other's primary fluence
@@ -14,13 +15,17 @@ the default and stays regression-pinned.
 """
 from .engine import CLRP_V2, DATASETS, SeedDataset, TG43Engine, \
     TG43U1S2_CONSENSUS, compute_dose_grid, dose_at_points, isodose_surfaces
+from .dvh import dvh_curve, dvh_stats, format_report, shell_report
 from .engine import TG43Engine, compute_dose_grid, dose_at_points, \
     isodose_surfaces
 from .interference import (
     InterferenceModel,
     SeedCapsule,
     TileCarrier,
+    find_shadowing_tiles,
     interference_report,
+    tile_prescription_points,
+    tile_shadowing,
 )
 from .metrics import DVH, dose_metrics, dvh, resample_mask_to, rind_mask, \
     surface_coverage, wall_dose
@@ -40,6 +45,9 @@ __all__ = [
     "SeedCapsule",
     "TileCarrier",
     "interference_report",
+    "tile_shadowing",
+    "find_shadowing_tiles",
+    "tile_prescription_points",
     "DVH",
     "dvh",
     "dose_metrics",
@@ -47,4 +55,8 @@ __all__ = [
     "rind_mask",
     "wall_dose",
     "surface_coverage",
+    "dvh_curve",
+    "dvh_stats",
+    "format_report",
+    "shell_report",
 ]

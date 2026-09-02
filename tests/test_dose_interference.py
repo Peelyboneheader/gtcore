@@ -540,3 +540,209 @@ def test_interference_grid_stays_within_budget():
     compute_dose_grid(seeds, axes, bounds, spacing_mm=2.0, interference=model)
     elapsed = time.perf_counter() - t0
     assert elapsed < 6.0, "interference grid took %.2f s" % elapsed
+
+
+# -------------------------------------------------- tile-level shadowing
+def _shadow_tile(origin_xy=(0.0, 0.0), z=0.0, normal=(0.0, 0.0, 1.0)):
+    """A 4-seed tile in the z = ``z`` plane with a chosen outward normal."""
+    ox, oy = origin_xy
+    seeds = np.array([[ox + dx, oy + dy, z]
+                      for dx in (-5.0, 5.0) for dy in (-5.0, 5.0)])
+    tile = _Tile(seeds, normal, [1.0, 0.0, 0.0])
+    tile.seed_axes = np.tile([1.0, 0.0, 0.0], (4, 1)).astype(float)
+    return tile
+
+
+def test_restricted_model_keeps_indices_and_silences_the_rest():
+    """restricted_to must not renumber capsules -- the self-skip depends on it."""
+    centers, axes, model = _pair_model()
+    only_1 = model.restricted_to([1])
+    assert len(only_1.capsules) == len(model.capsules)
+    only_1.validate_against(centers)           # still aligned to the seeds
+
+    pt = np.array([[20.0, 0.0, 0.0]])
+    # Capsule 1 is the one in the way, so restricting to it changes nothing.
+    assert float(only_1.transmission(0, pt)[0]) == pytest.approx(
+        float(model.transmission(0, pt)[0]), rel=1e-12)
+    # Restricting to capsule 0 (the source's own) silences everything.
+    only_0 = model.restricted_to([0])
+    assert float(only_0.transmission(0, pt)[0]) == pytest.approx(1.0)
+
+
+def test_restricted_model_drops_carriers():
+    seeds, axes, tile = _flat_tile()
+    model = InterferenceModel.from_implant(seeds, axes, tiles=[tile],
+                                           include_carriers=True)
+    assert model.carriers
+    assert model.restricted_to([0]).carriers == []
+
+
+def test_prescription_points_sit_behind_the_wall():
+    """Evaluation points go into the TISSUE, opposite the cavity normal."""
+    from gtcore.dose.interference import tile_prescription_points
+    from gtcore.interact import SEED_WALL_OFFSET_MM
+
+    tile = _shadow_tile()                       # normal = +z (into cavity)
+    pts = tile_prescription_points(tile, depth_mm=5.0)
+    assert pts.shape == tile.seed_centers.shape
+    # 2 mm back to the wall, then 5 mm into the tissue.
+    expected_z = -(SEED_WALL_OFFSET_MM + 5.0)
+    assert np.allclose(pts[:, 2], expected_z)
+    assert np.allclose(pts[:, :2], tile.seed_centers[:, :2])
+
+
+def test_coplanar_tiles_barely_shadow_each_other():
+    """Well-laid tiles on one wall are almost shadow-free, and that is real.
+
+    Seeds sit on the wall; the prescription point is 7 mm behind it. A ray
+    from any seed to any such point leaves the seed plane immediately, so it
+    clears the coplanar capsules. The flag must therefore stay quiet on good
+    geometry rather than crying wolf on every plan.
+    """
+    from gtcore.dose.interference import find_shadowing_tiles, tile_shadowing
+
+    tiles = [_shadow_tile((0.0, 0.0)), _shadow_tile((22.0, 0.0))]
+    report = tile_shadowing(tiles)
+    assert np.all(report["loss"] < 0.02)
+    assert find_shadowing_tiles(tiles, threshold_pct=2.0,
+                                report=report) == []
+
+
+def test_stacked_tiles_are_flagged():
+    """A tile parked between another and its target is exactly the failure
+    this is meant to catch."""
+    from gtcore.dose.interference import find_shadowing_tiles
+
+    tiles = [_shadow_tile(z=0.0), _shadow_tile(z=-4.0)]
+    pairs = find_shadowing_tiles(tiles, threshold_pct=2.0)
+    assert len(pairs) == 1
+    i, j, pct = pairs[0]
+    assert (i, j) == (0, 1)
+    assert pct > 2.0
+
+
+def test_shadowing_rows_sum_to_the_per_tile_total():
+    """Pairwise attribution must account for the whole loss, not part of it.
+
+    Each row of ``loss`` is one occluding tile at a time; ``per_tile`` is
+    every capsule live at once. To first order in optical depth those agree,
+    and if the geometric prune ever drops a pair that actually matters, this
+    is what catches it.
+    """
+    from gtcore.dose.interference import tile_shadowing
+
+    tiles = [_shadow_tile(z=0.0), _shadow_tile(z=-4.0),
+             _shadow_tile((22.0, 0.0))]
+    report = tile_shadowing(tiles)
+    assert np.allclose(report["loss"].sum(axis=1), report["per_tile"],
+                       atol=2e-3)
+
+
+def test_shadowing_is_directional():
+    """A shadows B is not the same statement as B shadows A."""
+    from gtcore.dose.interference import tile_shadowing
+
+    tiles = [_shadow_tile(z=0.0), _shadow_tile(z=-4.0)]
+    loss = tile_shadowing(tiles)["loss"]
+    # The lower tile blocks the upper one's rays to depth; not the reverse.
+    assert loss[0, 1] > 0.02
+    assert loss[1, 0] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_self_shadowing_is_reported_on_the_diagonal():
+    """A tile's own four seeds shade one another; that belongs on the
+    diagonal, not hidden."""
+    from gtcore.dose.interference import tile_shadowing
+
+    report = tile_shadowing([_shadow_tile()])
+    assert report["loss"].shape == (1, 1)
+    assert report["loss"][0, 0] >= 0.0
+    assert report["per_tile"][0] == pytest.approx(report["loss"][0, 0],
+                                                  abs=2e-3)
+
+
+def test_shadowing_handles_degenerate_inputs():
+    from gtcore.dose.interference import find_shadowing_tiles, tile_shadowing
+
+    empty = tile_shadowing([])
+    assert empty["loss"].shape == (0, 0)
+    assert find_shadowing_tiles([]) == []
+    assert find_shadowing_tiles([_shadow_tile()]) == []
+
+
+def test_sphere_segment_prune_is_conservative():
+    """The prune must never drop a sphere that really touches a segment."""
+    from gtcore.dose.interference import _sphere_meets_segments
+
+    origins = np.array([[0.0, 0.0, 0.0]])
+    targets = np.array([[10.0, 0.0, 0.0]])
+    # Sphere centred on the segment's midpoint.
+    assert _sphere_meets_segments([5.0, 0.0, 0.0], 0.5, origins, targets)
+    # Just off it, radius too small / large enough.
+    assert not _sphere_meets_segments([5.0, 2.0, 0.0], 1.0, origins, targets)
+    assert _sphere_meets_segments([5.0, 2.0, 0.0], 2.5, origins, targets)
+    # Beyond the end of the segment: clamped, so distance is to the endpoint.
+    assert not _sphere_meets_segments([14.0, 0.0, 0.0], 3.0, origins, targets)
+    assert _sphere_meets_segments([12.0, 0.0, 0.0], 3.0, origins, targets)
+
+
+def test_shadowing_sweep_stays_within_budget():
+    """It runs on every tile placement, so keep it off the critical path."""
+    from gtcore.dose.interference import tile_shadowing
+
+    tiles = [_shadow_tile((22.0 * (i % 3), 22.0 * (i // 3))) for i in range(6)]
+    t0 = time.perf_counter()
+    tile_shadowing(tiles)
+    elapsed = time.perf_counter() - t0
+    assert elapsed < 4.0, "tile shadowing sweep took %.2f s" % elapsed
+
+
+def test_shadowing_is_sane_on_tiles_adopted_from_a_scan():
+    """Tiles recovered from the scan must work, not just hand-dropped ones.
+
+    The planner adopts fitted tiles as placed tiles at startup, so these --
+    the tiles actually in the patient -- are what the shadowing check sees
+    first.  The contract that matters is the sign of the tile normal: it
+    points INTO the cavity, so prescription points must land on the far
+    side, in tissue.  Get that backwards and every reading is taken inside
+    the cavity lumen and silently meaningless.
+    """
+    from gtcore.dose.interference import (
+        find_shadowing_tiles,
+        tile_prescription_points,
+        tile_shadowing,
+    )
+    from gtcore.interact import conform_tile, snap_to_wall
+    from gtcore.phantom import make_head_phantom
+    from gtcore.pipeline import reconstruct
+
+    vol, _truth = make_head_phantom(spacing=1.0)
+    result = reconstruct(vol, n_full_tiles=3, verbose=False)
+    mesh = result.meshes.get("cavity")
+    if mesh is None or not len(mesh.vertices):
+        pytest.skip("pipeline found no cavity on this phantom")
+    fit = getattr(result, "tiles", None)
+    if fit is None or not getattr(fit, "tiles", None):
+        pytest.skip("pipeline recovered no tiles on this phantom")
+
+    # Mirror the planner's adoption path exactly.
+    tiles = []
+    for tp in fit.tiles:
+        surf, n_in = snap_to_wall(mesh, tp.center_ras)
+        tiles.append(conform_tile(mesh, surf, n_in, tp.axis_ras, kind=tp.kind))
+    assert tiles
+
+    centroid = np.asarray(mesh.centroid, dtype=float)
+    for tile in tiles:
+        pts = tile_prescription_points(tile)
+        seed_r = np.linalg.norm(tile.seed_centers - centroid, axis=1).mean()
+        point_r = np.linalg.norm(pts - centroid, axis=1).mean()
+        # Away from the cavity interior, i.e. into the tissue being treated.
+        assert point_r > seed_r + 3.0
+
+    report = tile_shadowing(tiles)
+    assert np.allclose(report["loss"].sum(axis=1), report["per_tile"],
+                       atol=2e-3)
+    # A real recovered implant is well laid out; it must not trip the flag.
+    assert np.all(report["loss"] < 0.02)
+    assert find_shadowing_tiles(tiles, threshold_pct=2.0, report=report) == []

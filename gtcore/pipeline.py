@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
 import numpy as np
 from scipy import ndimage
@@ -40,6 +40,7 @@ class PipelineResult:
     meshes: Dict[str, object]      # trimesh.Trimesh per structure
     timings: Dict[str, float] = field(default_factory=dict)
     tiles: Optional[TileFitResult] = None  # set when n_full_tiles was given
+    implant: Optional[Dict] = None         # assess_implant() verdict
 
 
 def filter_seed_shaped(cands: SeedCandidates,
@@ -80,6 +81,67 @@ def _seed_scale_metal_mask(mask, spacing, max_mm3=SEED_MAX_MM3 + 5.0):
     return small[lab]
 
 
+def assess_implant(centers_ras, axes_ras=None):
+    """Decide whether the scan actually contains an implant.
+
+    Evidence is MANUFACTURED GEOMETRY, not proximity: a genuine implant
+    contains at least one 4-seed group that passes the tile fitter's quad
+    gates (10 mm grid chords, quad topology, coplanarity, axis parallelism).
+    Mere spatial clustering is NOT enough -- a pre-implant head CT's ~30
+    dense-bone candidates chain into one big 15 mm-linkage cluster along the
+    skull base, but form zero gate-passing quads (measured on the DOE
+    negative-control scan), while every real implant scan yields its full
+    tile count.
+
+    Returns dict(present, n_candidates, n_tile_evidence, reason).
+    """
+    from .tiles import fit_tiles
+
+    centers = np.asarray(centers_ras, dtype=float).reshape(-1, 3)
+    n = len(centers)
+    out = {"present": False, "n_candidates": int(n), "n_tile_evidence": 0}
+    if n < 4:
+        out["reason"] = "only %d candidates (a tile needs 4 seeds)" % n
+        return out
+    if axes_ras is None:
+        axes = np.tile(np.array([0.0, 0.0, 1.0]), (n, 1))
+    else:
+        axes = np.asarray(axes_ras, dtype=float).reshape(-1, 3)
+    fit = fit_tiles(centers, axes, n_full=max(1, n // 4))
+    n_tiles = len(fit.tiles)
+    out["n_tile_evidence"] = int(n_tiles)
+
+    # An implant is ONE cavity's lining: its tiles group within a cavity-
+    # sized region. Chance quads from physiologic calcifications (pineal,
+    # choroid plexus, falx -- measured on the pre-implant negative control:
+    # 6 quads with genuinely tile-like geometry) scatter across the head.
+    grouped = 0
+    if n_tiles:
+        from scipy.spatial.distance import cdist
+
+        tc = np.array([t.center_ras for t in fit.tiles])
+        grouped = int((cdist(tc, tc) < 40.0).sum(axis=1).max())  # incl. self
+    if n_tiles >= 2 and grouped >= 2:
+        verdict = "confirmed"
+        reason = ("%d gate-passing tile quads, %d grouped within one "
+                  "cavity-sized region" % (n_tiles, grouped))
+    elif n_tiles >= 1:
+        verdict = "uncertain"
+        reason = ("%d tile-like quad(s) among %d candidates but not grouped "
+                  "as one implant -- could be calcifications; needs review"
+                  % (n_tiles, n))
+    else:
+        verdict = "absent"
+        reason = ("%d candidates but none form a manufactured 4-seed tile "
+                  "geometry (likely pre-implant scan or scattered false "
+                  "positives)" % n)
+    out["verdict"] = verdict
+    out["grouped_tiles"] = grouped
+    out["present"] = verdict == "confirmed"
+    out["reason"] = reason
+    return out
+
+
 def seed_detection_params(spacing):
     """Spacing-aware seed-detection parameters.
 
@@ -115,7 +177,7 @@ def seed_detection_params(spacing):
 
 
 def reconstruct(vol: Volume, verbose: bool = True,
-                n_full_tiles: Optional[int] = None,
+                n_full_tiles: Optional[Union[int, str]] = None,
                 n_half_tiles: int = 0,
                 complete_degraded: bool = True) -> PipelineResult:
     """Run the full reconstruction pipeline on one CT volume.
@@ -124,6 +186,10 @@ def reconstruct(vol: Volume, verbose: bool = True,
     skips tile fitting entirely), the shape-filtered seed candidates are
     additionally grouped into that many full tiles plus ``n_half_tiles`` half
     tiles, and the :class:`TileFitResult` lands on ``PipelineResult.tiles``.
+    ``n_full_tiles="auto"`` needs no count: the configuration is inferred
+    from the seed cloud by model selection (``n_half_tiles`` non-zero then
+    merely allows half tiles to be selected) and ``PipelineResult.tiles`` is
+    an :class:`~gtcore.tiles.auto.AutoFitResult` with the score curve.
     """
     timings = {}
 
@@ -194,9 +260,37 @@ def reconstruct(vol: Volume, verbose: bool = True,
             print("  vault filter: %d seeds inside the cranial interior" % len(seeds))
     vol.meta["vault_filter"] = vault_info
 
+    # Implant assessment uses only candidates AWAY from bone: dense inner-
+    # table spots pass every filter and even form chance quads with tile-like
+    # geometry (measured on the pre-implant negative control: 6 quads,
+    # residuals 0.2-0.7 mm, axis coherence 0.94-0.98 -- indistinguishable
+    # from real tiles), but they sit ON the skull, while implanted seeds sit
+    # in tissue lining the cavity.
+    # (Checking against masks["skull"] does NOT work: segment_head carves the
+    # metal mask out of the bone mask, so candidate locations are holes in
+    # it. Instead, probe the INPAINTED volume on a 4 mm shell around each
+    # candidate: a bone spot is embedded in bone, a seed floats in tissue.)
+    if len(seeds):
+        rng_dirs = np.random.default_rng(0).normal(size=(32, 3))
+        rng_dirs /= np.linalg.norm(rng_dirs, axis=1, keepdims=True)
+        shell = seeds.centers_ras[:, None, :] + 4.0 * rng_dirs[None, :, :]
+        hu = clean.sample_ras(shell.reshape(-1, 3)).reshape(len(seeds), -1)
+        in_bone = np.median(hu, axis=1) > 200.0
+        implant = assess_implant(seeds.centers_ras[~in_bone],
+                                 seeds.axes_ras[~in_bone])
+        implant["n_candidates"] = int(len(seeds))
+        implant["n_in_bone"] = int(in_bone.sum())
+    else:
+        implant = assess_implant(seeds.centers_ras, seeds.axes_ras)
+    vol.meta["implant"] = implant
+    if verbose:
+        print("  implant assessment: %s -- %s"
+              % ("PRESENT" if implant["present"] else "NOT PRESENT",
+                 implant["reason"]))
+
     cavity = stage("cavity segmentation", lambda: segment_cavity(
         clean, masks["cranial_interior"], masks["brain"],
-        seeds.centers_ras if len(seeds) else None,
+        seeds.centers_ras if (len(seeds) and implant["present"]) else None,
     ))
 
     def _meshes():
@@ -224,7 +318,14 @@ def reconstruct(vol: Volume, verbose: bool = True,
             kji = np.argwhere(cavity).mean(axis=0)          # (k, j, i)
             cavity_center = vol.index_to_ras(kji[::-1])     # wants (i, j, k)
 
+        auto = isinstance(n_full_tiles, str)
+
         def _fit():
+            if auto:
+                return fit_tiles(seeds.centers_ras, seeds.axes_ras,
+                                 n_full_tiles, int(n_half_tiles),
+                                 cavity_center_ras=cavity_center,
+                                 mesh=meshes.get("cavity"))
             return fit_tiles(
                 seeds.centers_ras, seeds.axes_ras,
                 int(n_full_tiles), int(n_half_tiles),
@@ -233,7 +334,15 @@ def reconstruct(vol: Volume, verbose: bool = True,
             )
 
         tiles = stage("tile fitting", _fit)
-        if verbose:
+        if verbose and auto:
+            print("  auto: %d tiles, %d candidates rejected; %s"
+                  % (len(tiles.tiles), len(tiles.rejected_indices),
+                     tiles.summary()))
+            for pose in tiles.tiles:
+                if pose.surface is not None:
+                    print("    tile %d: %s" % (pose.tile_id,
+                                               pose.surface.verdict()))
+        elif verbose:
             print("  %d/%d tiles recovered, %d candidates rejected"
                   % (len(tiles.tiles), tiles.n_expected,
                      len(tiles.rejected_indices)))
@@ -241,4 +350,5 @@ def reconstruct(vol: Volume, verbose: bool = True,
     return PipelineResult(
         volume=vol, seeds=seeds, seeds_raw=seeds_raw, masks=masks,
         cavity_mask=cavity, meshes=meshes, timings=timings, tiles=tiles,
+        implant=implant,
     )

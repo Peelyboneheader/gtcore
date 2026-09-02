@@ -95,11 +95,11 @@ def test_seed_axes_are_unit_and_tangential(phantom):
 
 
 def test_seeds_sit_just_inside_the_cavity_wall(phantom):
-    """Seed centres are inset ~2 mm from the wall, embedded in the metal mask.
+    """Seed centres are inset ~3 mm from the wall, embedded in the metal mask.
 
     ``masks['cavity']`` is the fluid/air lumen with the seed voxels removed, so
     a seed centre must *not* be cavity, while a point 3 mm further toward the
-    cavity centre lands in open lumen.
+    cavity centre lands in open lumen (well inside the 3 mm seed offset).
     """
     vol, truth = phantom
     cavity = truth.masks["cavity"]
