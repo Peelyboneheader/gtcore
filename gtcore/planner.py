@@ -13,7 +13,9 @@ Feedback layers, all driven from the VTK event pipeline:
   draping before committing;
 - **hover / selection / drag styling** -- the tile under the cursor lights
   up as grab-able, the selected tile carries a white outline, the tile being
-  dragged turns cyan, overlapping tiles are tinted red;
+  dragged turns cyan, overlapping tiles are tinted amber (a caution, not an
+  error: collagen tiles may legitimately stack, at the cost of very high
+  local dose);
 - **dose panel** -- after 'u' a fixed-width table (upper right) reports
   D90/D50/Dmin/V100/V150 on the cavity wall and on +5/+10 mm tissue shells,
   plus a cumulative shell-DVH chart (lower right); it is flagged STALE as
@@ -89,7 +91,7 @@ UNDO_DEPTH = 50
 # ``_bind_interaction`` appears here, grouped the way a physicist works:
 # place -> adjust -> evaluate -> export.  '?' collapses it to one line.
 HELP_TEXT = """GAMMATILE PLANNER                       ?  hide/show this legend
-PLACE    hover the blue wall : ghost preview of the next tile (red = overlap)
+PLACE    hover the blue wall : ghost preview of the next tile (amber = overlaps)
          gold outline        : tile fitted FROM THE SCAN (green = placed by hand)
          right-click or P    : drop tile there      H : next tile full/half
          T                   : suggest tiles from the detected seeds (auto count)
@@ -128,10 +130,16 @@ _TILE_STYLE: Dict[str, Dict] = {
     "dragging": dict(color="cyan", opacity=0.85,
                      outline="white", line_width=4),
 }
-_OVERLAP_COLOR = {"normal": "red", "hover": "tomato",
-                  "selected": "orangered", "dragging": "orangered"}
+# Overlap is a CAUTION, not an error: collagen tiles can physically overlap
+# and sometimes legitimately do -- but stacked seeds drive the local dose
+# rate extremely high, so overlapping tiles get an amber "check this" tint
+# rather than an alarming red (clinical guidance from Jacob, 2026-09-02).
+_OVERLAP_COLOR = {"normal": "darkgoldenrod", "hover": "goldenrod",
+                  "selected": "goldenrod", "dragging": "goldenrod"}
 _ADOPTED_OUTLINE = "gold"  # provenance cue: tile recovered from the scan
-_GHOST_OVERLAP_COLOR = "red"  # otherwise the ghost takes the text colour
+# amber caution tint; "orange" (1.0, 0.65, 0) keeps >0.5 contrast in some
+# channel against every background in _BACKGROUNDS (goldenrod fails on gray)
+_GHOST_OVERLAP_COLOR = "orange"
 # (background, text colour) pairs cycled by 'B'; text follows so the legend,
 # status, panel and ghost stay legible on every one of them
 _BACKGROUNDS = (("black", "white"), ("#1e2a38", "white"),
@@ -793,7 +801,9 @@ class _PlannerApp:
         if extra:
             text += "\n" + extra
         for i, j in self._overlap_pairs[:4]:  # tile numbers as displayed (1-based)
-            text += "\nWARNING: tiles %d & %d overlap" % (i + 1, j + 1)
+            text += ("\nCAUTION: tiles %d & %d overlap -- allowed (collagen "
+                     "stacks), but local dose may run very high; verify with U"
+                     % (i + 1, j + 1))
         for i, j, pct in self._shadow_pairs[:3]:
             text += ("\nNOTE: tiles %d & %d shadow each other (%.1f%% of dose "
                      "at %g mm depth)" % (i + 1, j + 1, pct, WALL_DEPTH_MM))

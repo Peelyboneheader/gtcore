@@ -15,7 +15,7 @@ off-screen plotter built on the phantom scene:
 - overlap warnings are wired defensively through
   ``gtcore.interact.find_overlapping_tiles``,
 - the ghost preview follows the wall under the cursor, hides off the wall
-  and during camera gestures, turns red when the drop would overlap, and
+  and during camera gestures, turns amber when the drop would overlap, and
   the drop lands exactly where the ghost showed it,
 - hovering an unselected tile lights it up as grab-able,
 - drag pacing never loses the final cursor position on release,
@@ -260,7 +260,8 @@ def test_overlap_warning_wiring(app, monkeypatch):
     app.drop_at(verts[0])
     app.drop_at(verts[len(verts) // 2])
     assert app._overlap_pairs == [(0, 1)]
-    assert "WARNING: tiles 1 & 2 overlap" in app._last_status
+    assert "CAUTION: tiles 1 & 2 overlap" in app._last_status
+    assert "allowed" in app._last_status  # overlap is a caution, not an error
 
     # resolved -> warning and tint state clear
     monkeypatch.setattr(interact_mod, "find_overlapping_tiles",

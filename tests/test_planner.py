@@ -183,12 +183,13 @@ def test_planner_shadowing_reaches_the_status_text():
         app._overlap_pairs = [(0, 1)]
         app._shadow_pairs = [(0, 1, 5.7)]
         app._update_status()
-        # Both checks report, and the overlap WARNING stays ahead of the
+        # Both checks report, and the overlap CAUTION (overlap is allowed --
+        # collagen stacks -- but dosimetrically risky) stays ahead of the
         # shadowing NOTE -- other planner tests substring-match that order.
-        assert "WARNING: tiles 1 & 2 overlap" in app._last_status
+        assert "CAUTION: tiles 1 & 2 overlap" in app._last_status
         assert "shadow each other" in app._last_status
         assert "tiles 1 & 2 shadow" in app._last_status
-        assert (app._last_status.index("WARNING: tiles 1 & 2 overlap")
+        assert (app._last_status.index("CAUTION: tiles 1 & 2 overlap")
                 < app._last_status.index("tiles 1 & 2 shadow"))
     finally:
         app.close()
