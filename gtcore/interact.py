@@ -33,6 +33,8 @@ from typing import Optional
 import numpy as np
 import trimesh
 
+from . import geometry as _geom
+
 __all__ = [
     "SEED_WALL_OFFSET_MM",
     "TILE_SEED_PITCH_MM",
@@ -46,9 +48,12 @@ __all__ = [
     "find_overlapping_tiles",
 ]
 
-SEED_WALL_OFFSET_MM = 2.0     # seed centre this far off the wall, cavity side
-TILE_SEED_PITCH_MM = 10.0     # seed grid pitch (seeds at +/- pitch/2)
-TILE_HALF_SIZE_MM = 10.0      # full tile is 20x20 mm -> corners at +/- 10
+# Manufactured geometry (see gtcore.geometry for the citations): the seed
+# plane lies 3.0 mm from the tissue-facing collagen surface (hydrated spread
+# 2.25-3.75 mm), so a conformed seed sits 3 mm off the wall, cavity side.
+SEED_WALL_OFFSET_MM = _geom.SEED_PLANE_OFFSET_MM   # 3.0
+TILE_SEED_PITCH_MM = _geom.SEED_PITCH_MM           # 10.0 (seeds at +/- 5)
+TILE_HALF_SIZE_MM = _geom.TILE_HALF_SIZE_MM        # 20x20 mm -> corners at +/- 10
 
 _SEED_HALF = TILE_SEED_PITCH_MM / 2.0   # 5.0
 _MAX_SAG_MM = 12.0                      # max plausible wall sag under a tile
@@ -286,7 +291,7 @@ def conform_tile(mesh, surface_point, inward_normal, axis_hint_ras, kind="full")
     corners = conformed[n_seeds:]
 
     # Tangent-project the seed axes against the normal at each seed's OWN
-    # nearest wall point (re-queried from the final 2 mm-offset position, not
+    # nearest wall point (re-queried from the final 3 mm-offset position, not
     # the wall point it was draped from): in tight concave bumps those two
     # normals can differ by 15+ degrees, and the seed physically lies flat
     # against the wall it is nearest to.
@@ -316,7 +321,7 @@ def translate_on_wall(mesh, tile, delta_ras):
 
     The gesture moves the tile's wall anchor (its on-surface attachment
     point) so repeated small moves -- and a move followed by its inverse --
-    do not accumulate drift from the seed centroid sitting 2 mm off the wall.
+    do not accumulate drift from the seed centroid sitting 3 mm off the wall.
     """
     target = tile.anchor_ras + np.asarray(delta_ras, dtype=float).reshape(3)
     surf, n_in = snap_to_wall(mesh, target)
@@ -364,7 +369,7 @@ def _footprint_surface(tile, n_grid=_OVERLAP_GRID_N):
     curved sheet is reconstructed from the conformed points the tile already
     carries: the 4 corners, the seed centres, and the anchor pushed
     ``SEED_WALL_OFFSET_MM`` along the anchor normal (all of which lie ON the
-    conformed sheet, 2 mm off the wall).  In the anchor tangent frame
+    conformed sheet, 3 mm off the wall).  In the anchor tangent frame
     ``(t1, t2, n)`` a quadratic height field ``z(u, v)`` is least-squares
     fitted through those 7-9 points -- a bilinear patch over the 4 corners
     alone is NOT good enough here: on this cavity's curvature the corners sag
