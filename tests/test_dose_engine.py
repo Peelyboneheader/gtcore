@@ -22,12 +22,21 @@ import pytest
 
 from gtcore.dose import DoseInterpolator, TG43Engine, compute_dose_grid, \
     dose_at_points, isodose_surfaces
+from gtcore.dose.engine import CLRP_V2, DATASETS, SeedDataset, \
+    TG43U1S2_CONSENSUS
 from gtcore.phantom import make_head_phantom
 
 
 @pytest.fixture(scope="module")
 def eng():
+    """Default engine: AAPM+GEC-ESTRO TG-43U1S2 consensus dataset."""
     return TG43Engine()
+
+
+@pytest.fixture(scope="module")
+def clrp():
+    """CLRP v2 dataset -- the data v1 carried, for v1 regressions."""
+    return TG43Engine("clrp_v2")
 
 
 @pytest.fixture(scope="module")
@@ -36,21 +45,23 @@ def v1():
 
 
 # ----------------------------------------------------------------- identities
-def test_reference_rate_is_lambda(eng):
-    """Rate at (theta0=90, r0=1 cm) equals Lambda within 2%."""
-    rate = eng.dose_rate(90.0, 1.0)
-    assert rate == pytest.approx(TG43Engine._LAMBDA, rel=0.02)
+def test_reference_rate_is_lambda(eng, clrp):
+    """Rate at (theta0=90, r0=1 cm) equals Lambda: exactly for the
+    consensus tables (g_L(1) = F(1, 90) = 1 by construction), within 2%
+    for the CLRP polynomial fit (g_L(1) = 0.99853)."""
+    assert eng.dose_rate(90.0, 1.0) == pytest.approx(1.056, rel=1e-12)
+    assert clrp.dose_rate(90.0, 1.0) == pytest.approx(clrp.LAMBDA, rel=0.02)
 
 
 def test_reference_factors_are_unity(eng):
-    assert eng._radial_dose(1.0) == pytest.approx(1.0, rel=0.02)
+    assert float(eng._radial_dose(1.0)) == pytest.approx(1.0, abs=1e-12)
     assert float(eng._anisotropy(1.0, 90.0)) == pytest.approx(1.0, abs=1e-12)
     g = eng._geometry_factor(np.array(1.0), np.array(90.0))
     assert float(g) / eng._GL_ref == pytest.approx(1.0, abs=1e-12)
 
 
-def test_constants_match_v1_exactly(eng, v1):
-    """Seed data must be copied byte-for-byte from the v1 port."""
+def test_constants_match_v1_exactly(clrp, v1):
+    """The CLRP dataset must be copied byte-for-byte from the v1 port."""
     assert TG43Engine._LAMBDA == DoseInterpolator._LAMBDA
     assert TG43Engine._L == DoseInterpolator._L
     assert np.array_equal(TG43Engine._GR_COEFFS, DoseInterpolator._GR_COEFFS)
@@ -58,7 +69,108 @@ def test_constants_match_v1_exactly(eng, v1):
     assert np.array_equal(TG43Engine._F_RADII, DoseInterpolator._F_RADII)
     assert np.array_equal(TG43Engine._F_TABLE, DoseInterpolator._F_TABLE,
                           equal_nan=True)
-    assert eng._GL_ref == pytest.approx(v1._GL_ref, rel=1e-12)
+    assert clrp.LAMBDA == DoseInterpolator._LAMBDA
+    assert np.array_equal(clrp.F_TABLE, DoseInterpolator._F_TABLE,
+                          equal_nan=True)
+    assert clrp._GL_ref == pytest.approx(v1._GL_ref, rel=1e-12)
+
+
+# ------------------------------------------------ datasets: TG-43 provenance
+def test_consensus_dataset_is_tg43u1s2_verbatim(eng):
+    """TG-43U1S2 (2017) Appendix A11 / Tables AI, AII, AXIII for the
+    IsoRay CS-1 Rev2: CON Lambda, CON L, CON g_L(r) and CON F(r, theta)."""
+    ds = eng.dataset
+    assert ds is TG43U1S2_CONSENSUS and ds.name == "tg43u1s2"
+    assert ds.dose_rate_constant == 1.056                # Table AI
+    assert ds.active_length_cm == 0.40                   # Table AI
+    # Table AII, CS-1 Rev2 column (spot values incl. both ends)
+    g = dict(zip(ds.g_radii.tolist(), ds.g_values.tolist()))
+    assert g[0.10] == 0.960 and g[0.25] == 0.989 and g[0.75] == 1.009
+    assert g[1.00] == 1.000 and g[2.00] == 0.908 and g[5.00] == 0.518
+    assert g[9.00] == 0.1931 and g[10.00] == 0.1481
+    assert len(g) == 16
+    # Table AXIII spot values; the theta = 90 row is unity by definition.
+    F = ds.f_table
+    it = {t: i for i, t in enumerate(ds.f_thetas.tolist())}
+    ir = {r: i for i, r in enumerate(ds.f_radii.tolist())}
+    assert F[it[0], ir[0.25]] == 0.622 and F[it[0], ir[10.0]] == 0.833
+    assert F[it[25], ir[0.1]] == 1.161 and F[it[5], ir[1.0]] == 0.750
+    assert F[it[80], ir[0.7]] == 0.997 and F[it[40], ir[3.0]] == 0.939
+    assert np.all(F[it[90]] == 1.0)
+    # Holes: r = 0.1 cm for theta <= 20 deg, nothing else.
+    holes = np.argwhere(np.isnan(F))
+    assert holes.shape[0] == 7 and np.all(holes[:, 1] == ir[0.1])
+    assert set(ds.f_thetas[holes[:, 0]].tolist()) == {0, 2, 5, 7, 10, 15, 20}
+    # Half-life used for tau is the TG-43U1S2 Table XXIV value.
+    assert eng.T_HALF_HOURS == pytest.approx(9.689 * 24.0)
+
+
+def test_clrp_dataset_is_the_v1_data_with_consensus_lambda(clrp):
+    ds = clrp.dataset
+    assert ds is CLRP_V2 and ds.g_fit_coeffs is not None
+    assert ds.g_fit_range == (0.05, 10.0)                # CLRP fit range
+    assert ds.dose_rate_constant == 1.056                # consensus, not 1.0625
+    assert np.isnan(ds.f_table).sum() == 19
+    assert set(DATASETS) == {"tg43u1s2", "clrp_v2"}
+    with pytest.raises(ValueError):
+        TG43Engine("no_such_dataset")
+    with pytest.raises(TypeError):
+        TG43Engine(object())
+
+
+def test_radial_dose_follows_tg43u1s1_interpolation_rules():
+    """Worked examples printed in TG-43U1S1 Sec. III.C:
+    Eq. (3) log-linear interpolation: g(1) = 1.000, g(2) = 0.800 ->
+    g(1.5) = 0.894; Eq. (4) single-exponential extrapolation beyond
+    r_max from the two outermost points: g(4) = 0.510, g(5) = 0.391 ->
+    g(6) = 0.300. Below r_min: nearest neighbour."""
+    ds = SeedDataset(name="t", citation="test", dose_rate_constant=1.0,
+                     active_length_cm=0.4,
+                     f_radii=np.array([1.0, 2.0]), f_thetas=np.array([0., 90.]),
+                     f_table=np.ones((2, 2)),
+                     g_radii=np.array([1.0, 2.0, 4.0, 5.0]),
+                     g_values=np.array([1.000, 0.800, 0.510, 0.391]),
+                     g_extrap_radii=(4.0, 5.0))
+    t = TG43Engine(ds)
+    assert float(t._radial_dose(1.5)) == pytest.approx(0.894, abs=5e-4)
+    assert float(t._radial_dose(6.0)) == pytest.approx(0.300, abs=5e-4)
+    assert float(t._radial_dose(0.5)) == 1.000            # nearest neighbour
+    assert float(t._radial_dose(5.0)) == pytest.approx(0.391)
+    # Continuous across r_max and strictly decreasing beyond it.
+    r = np.array([5.0, 5.0 + 1e-9, 6.0, 8.0, 20.0])
+    g = t._radial_dose(r)
+    assert g[1] == pytest.approx(g[0], rel=1e-8) and np.all(np.diff(g) < 0)
+
+
+def test_consensus_rate_matches_hand_computed_2d_formalism(eng):
+    """Eq. (1) of TG-43U1 evaluated by hand from the consensus tables at
+    tabulated nodes, where no interpolation is involved."""
+    L = 0.40
+
+    def G(r):        # transverse-plane line-source geometry function
+        return 2.0 * np.arctan(L / 2.0 / r) / (L * r)
+
+    for r, g in ((0.5, 1.006), (2.0, 0.908), (5.0, 0.518), (10.0, 0.1481)):
+        assert eng.dose_rate(90.0, r) == pytest.approx(
+            1.056 * G(r) / G(1.0) * g, rel=1e-9)
+    # Off-axis node: (r = 1 cm, theta = 30 deg): G ratio * g(1) * F(1, 30).
+    y, z = np.sin(np.radians(30.0)), np.cos(np.radians(30.0))
+    beta = np.arctan2(y, z - L / 2) - np.arctan2(y, z + L / 2)
+    assert eng.dose_rate(30.0, 1.0) == pytest.approx(
+        1.056 * (beta / (L * y)) / G(1.0) * 1.000 * 0.878, rel=1e-9)
+
+
+def test_consensus_and_clrp_datasets_agree_where_it_matters(eng, clrp):
+    """Two independent MC datasets for the same seed: within 1.5% for
+    theta >= 15 deg (>99% of the solid angle), within 9% near the long
+    axis, everywhere outside the capsule and inside the data domain."""
+    rng = np.random.default_rng(21)
+    n = 50000
+    r = np.exp(rng.uniform(np.log(0.25), np.log(10.0), n))
+    th = rng.uniform(0.0, 90.0, n)
+    d = eng.dose_rate(th, r) / clrp.dose_rate(th, r) - 1.0
+    assert np.abs(d[th >= 15.0]).max() < 0.015
+    assert np.abs(d).max() < 0.09
 
 
 # --------------------------------------- independent geometry-function check
@@ -99,13 +211,12 @@ V1_V2_POINTS = ([(90.0, r) for r in (0.5, 1.0, 2.0, 3.0, 5.0)]
 
 
 @pytest.mark.parametrize("theta,r", V1_V2_POINTS)
-def test_v2_matches_v1_where_v1_is_valid(eng, v1, theta, r):
-    """Total-decay dose agrees with the v1 reference within 1%.
-
-    The residual ~0.07% is the documented tau difference (335.48 h derived
-    from T_half vs v1's opaque 335.23 h).
+def test_v2_matches_v1_where_v1_is_valid(clrp, v1, theta, r):
+    """Total-decay dose agrees with the v1 reference within 1% (same
+    CLRP dataset). The residual ~0.07% is the documented tau difference
+    (335.48 h derived from T_half vs v1's opaque 335.23 h).
     """
-    v2_dose = eng.total_dose_at_point(theta, r, sk_per_seed_u=3.5)
+    v2_dose = clrp.total_dose_at_point(theta, r, sk_per_seed_u=3.5)
     v1_dose = v1.dose_at_point(theta, r)
     assert v2_dose == pytest.approx(v1_dose, rel=0.01), (
         "theta=%g r=%g v1=%.4f v2=%.4f" % (theta, r, v1_dose, v2_dose))
@@ -166,19 +277,21 @@ def test_core_rate_folds_theta(eng):
     assert eng.dose_rate(10.0, 1.0) == eng.dose_rate(-10.0, 1.0)
 
 
-def test_anisotropy_nan_fill_precomputed(eng):
+def test_anisotropy_nan_fill_precomputed(eng, clrp):
     """Defect 3: no NaN survives init; holes take the nearest valid value
-    along r at the same theta (== first tabulated radius with data)."""
-    assert not np.isnan(eng._F_FILLED).any()
-    # Row theta=0: holes at r=0.10, 0.15 take the r=0.25 value 0.617.
-    assert eng._F_FILLED[0, 0] == 0.617
-    assert eng._F_FILLED[0, 1] == 0.617
-    # Row theta=20: hole at r=0.10 takes the r=0.15 value 1.141.
-    it20 = int(np.where(TG43Engine._F_THETAS == 20)[0][0])
-    assert eng._F_FILLED[it20, 0] == 1.141
-    # Valid entries are untouched.
-    valid = ~np.isnan(TG43Engine._F_TABLE)
-    assert np.array_equal(eng._F_FILLED[valid], TG43Engine._F_TABLE[valid])
+    along r at the same theta (== first tabulated radius with data), the
+    TG-43U1S1 zeroth-order extrapolation for r < r_min."""
+    for e in (eng, clrp):
+        assert not np.isnan(e._F_FILLED).any()
+        valid = ~np.isnan(e.F_TABLE)
+        assert np.array_equal(e._F_FILLED[valid], e.F_TABLE[valid])
+    # CLRP row theta=0: holes at r=0.10, 0.15 take the r=0.25 value 0.617.
+    assert clrp._F_FILLED[0, 0] == 0.617 and clrp._F_FILLED[0, 1] == 0.617
+    # CLRP row theta=20: hole at r=0.10 takes the r=0.15 value 1.141.
+    it20 = int(np.where(clrp.F_THETAS == 20)[0][0])
+    assert clrp._F_FILLED[it20, 0] == 1.141
+    # Consensus row theta=0: hole at r=0.1 takes the r=0.25 value 0.622.
+    assert eng._F_FILLED[0, 0] == 0.622
 
 
 def test_single_radial_floor(eng):
@@ -194,36 +307,44 @@ def test_single_radial_floor(eng):
         assert eng.dose_rate(90.0, r) == floor
 
 
-def test_far_field_falls_off_beyond_data_domain(eng):
-    """Beyond R_DATA_MAX_CM (10 cm) g_L and F are held at their 10 cm
-    values but the geometry factor keeps falling, so the rate is strictly
-    decreasing (the earlier v2 plateaued at the 10 cm value)."""
+def test_far_field_falls_off_beyond_data_domain(eng, clrp):
+    """Beyond R_DATA_MAX_CM (10 cm): F is held at 10 cm (TG-43U1S1
+    zeroth order), g_L follows the single-exponential tail through the two
+    outermost data points (TG-43U1S1 Eq. 4), and G_L keeps falling. The
+    rate is therefore strictly decreasing and continuous at 10 cm."""
     assert TG43Engine.R_DATA_MAX_CM == 10.0
-    radii = np.array([5.0, 10.0, 10.1, 15.0, 20.0, 40.0])
-    rate = eng.dose_rate(np.full_like(radii, 90.0), radii)
-    assert np.all(np.diff(rate) < 0.0), rate
-    # Exactly the geometry-factor ratio, since the data terms are frozen.
-    g10 = float(eng._geometry_factor(np.array(10.0), np.array(90.0)))
-    for r in (15.0, 20.0, 40.0):
-        g = float(eng._geometry_factor(np.array(r), np.array(90.0)))
-        assert eng.dose_rate(90.0, r) / eng.dose_rate(90.0, 10.0) \
-            == pytest.approx(g / g10, rel=1e-12)
-    # The same holds off the transverse plane.
-    assert eng.dose_rate(30.0, 20.0) < eng.dose_rate(30.0, 10.0)
+    for e in (eng, clrp):
+        radii = np.array([5.0, 10.0, 10.0 + 1e-9, 10.1, 15.0, 20.0, 40.0])
+        rate = e.dose_rate(np.full_like(radii, 90.0), radii)
+        assert np.all(np.diff(rate) < 0.0), rate
+        assert rate[2] == pytest.approx(rate[1], rel=1e-7)
+        assert e.dose_rate(30.0, 20.0) < e.dose_rate(30.0, 10.0)
+    # Consensus tail: g(15) = g(9) * exp(6 * ln(g(10)/g(9)) / 1).
+    g9, g10 = 0.1931, 0.1481
+    g15 = g9 * np.exp((15.0 - 9.0) * np.log(g10 / g9) / (10.0 - 9.0))
+    G = lambda r: 2.0 * np.arctan(0.2 / r) / (0.4 * r)
+    assert eng.dose_rate(90.0, 15.0) == pytest.approx(
+        1.056 * G(15.0) / G(1.0) * g15, rel=1e-9)
 
 
-def test_anisotropy_holes_are_inside_the_capsule(eng):
-    """Every NaN in the anisotropy table sits inside the titanium can
-    (perpendicular distance < 0.04 cm AND |axial| <= 0.225 cm), so the
-    borrowed fill values are never read for a field point in tissue."""
-    it, ir = np.where(np.isnan(TG43Engine._F_TABLE))
-    assert it.size == 19
-    r = TG43Engine._F_RADII[ir]
-    th = np.radians(TG43Engine._F_THETAS[it])
-    y = r * np.sin(th)
-    z = r * np.cos(th)
-    assert np.all(y < TG43Engine._RHO_SURFACE)
-    assert np.all(z <= TG43Engine._CAP_HALF_CM)
+def test_anisotropy_holes_are_inside_the_capsule(eng, clrp):
+    """Every NaN in either anisotropy table sits inside the titanium can
+    (perpendicular distance < 0.0412 cm AND |axial| <= 0.225 cm), so the
+    borrowed fill values are never read for a field point in tissue; and
+    every tabulated (non-NaN) entry lies outside the can."""
+    for e, n_holes in ((clrp, 19), (eng, 7)):
+        it, ir = np.where(np.isnan(e.F_TABLE))
+        assert it.size == n_holes
+        r = e.F_RADII[ir]
+        th = np.radians(e.F_THETAS[it])
+        assert np.all(r * np.sin(th) < TG43Engine._RHO_SURFACE)
+        assert np.all(r * np.cos(th) <= TG43Engine._CAP_HALF_CM)
+        jt, jr = np.where(~np.isnan(e.F_TABLE))
+        r = e.F_RADII[jr]
+        th = np.radians(e.F_THETAS[jt])
+        outside = (r * np.sin(th) >= TG43Engine._RHO_SURFACE) \
+            | (r * np.cos(th) > TG43Engine._CAP_HALF_CM)
+        assert np.all(outside)
 
 
 def test_capsule_boundary_is_continuous(eng):

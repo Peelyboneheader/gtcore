@@ -130,3 +130,73 @@ Phantom readouts with 3 truth tiles (12 seeds, 3.5 U each): 5 mm rind
 25.5 cc, D90 13.6 Gy, V100 0.24, V150 0.09; wall coverage at 5 mm for
 60 Gy: 20.6 % (three tiles cover part of a ~25 cc cavity's wall, as
 expected — the number is a planner readout, not a pass/fail).
+
+## Verification against the TG-43 source documents (2026-09-01)
+
+Sources read in full or in the relevant sections: CLRP TG-43 database v2
+page and workbook for the Proxcelan CS-1 Rev2 (`LDR_Cs131_Proxcelan-CS-1
+Rev2.xlsx`); AAPM TG-43U1 erratum (Med Phys 31:3532, 2004); TG-43U1S1
+(Med Phys 34:2187, 2007) Sec. III interpolation/extrapolation; TG-43U1S2
+(Med Phys 44:e297, 2017) Sec. 3, Appendix A11, Tables AI/AII/AXIII/AXIV/XXIV.
+The 2018 erratum to TG-43U1S2 (Med Phys 45:971) is paywalled (HTTP 403 on
+every route tried); by its abstract it corrects the report's QA dose-rate
+tables, not consensus parameters.
+
+### What matched
+
+| Item | Engine | Source | Result |
+|---|---|---|---|
+| Formalism | 2D line-source, Eq. (1) TG-43U1 | TG-43U1 | identical |
+| G_L(r,θ) | β/(L r sinθ), 1/(r²−L²/4) on axis | TG-43U1 | identical; numerically vs quadrature ≤1e-9 |
+| Λ | 1.056 | TG-43U1S2 Table AI (CON Λ = 1.056 ± 0.013) | identical |
+| L | 0.40 cm | TG-43U1S2 Table AI (CON L) and CLRP (4.0 mm active) | identical |
+| g_L fit a0…a6 | 7.38e-4, −1.198e-2, 9.991e-1, 4.979e-1, 1.07e-2, 1.39e-3, 4.055e-1 | CLRP workbook fitting row | identical, digit for digit; fit range 0.05–10 cm |
+| F(r,θ) 32×12 | engine table | CLRP workbook Anisotropy sheet | every entry = CLRP value rounded to 3 dp; hole pattern identical |
+| T½ | 9.689 d | TG-43U1S2 Table XXIV | identical |
+| Capsule | 0.824 mm OD, 4.50 mm | TG-43U1S2 A11 | now 0.0412 cm radius (was 0.040), 0.225 cm half-length |
+
+### What did not match, and what changed
+
+1. **Dataset choice.** v1 (and v2 until now) paired the consensus Λ with
+   the CLRP v2 g_L fit and F table. The AAPM+GEC-ESTRO *consensus* g_L(r)
+   and F(r,θ) for this seed (TG-43U1S2 Tables AII/AXIII) come from Rivard
+   2007, not CLRP. The two datasets agree within 1.5 % for θ ≥ 15° but
+   differ by up to 8 % within ~10° of the seed axis (CLRP higher). The
+   engine now ships both as `SeedDataset`s; **`TG43Engine()` defaults to
+   `"tg43u1s2"`** (the consensus, i.e. what a TPS is commissioned against —
+   the GammaTile commissioning literature validates against TG-43U1S2),
+   and `"clrp_v2"` remains available for cross-checks and for the v1
+   regression tests.
+2. **g_L interpolation/extrapolation.** TG-43U1S1 Sec. III.C requires
+   log-linear interpolation of tabulated g_L between adjacent nodes
+   (Eq. 3), nearest-neighbour below r_min, and — explicitly *not*
+   zeroth-order — a single exponential through the two outermost nodes
+   beyond r_max (Eq. 4). The engine's earlier far-field policy (hold g_L
+   at 10 cm) violated the last point; it now follows Eq. 4 for both
+   datasets (consensus: nodes 9 and 10 cm; CLRP: fit values at 9.5 and
+   10 cm). Both worked examples printed in the supplement are reproduced
+   (g(1.5) = 0.894 from 1.000/0.800; g(6) = 0.300 from 0.510/0.391).
+3. **F extrapolation** (nearest-neighbour in r both below r_min and beyond
+   r_max, linear-linear interpolation inside) already matched TG-43U1S1;
+   the NaN back-fill is that rule applied once at init. All holes in both
+   tables are inside the capsule (test-pinned), as are none of the
+   tabulated entries.
+4. **CLRP workbook defect (reported here for the record).** The
+   `radial_dose` sheet's r labels are shifted by one row beyond 1 cm: the
+   row labelled 1.5 cm holds exactly 1.000 (= g_L at r0), the row labelled
+   10 cm holds g_L(9.5 cm), and the last, unlabelled row holds g_L(10 cm) =
+   0.1467. Re-aligned, the CLRP fit reproduces the column to 0.3 %, and it
+   agrees with CON g_L to 0.6 % for r ≤ 6 cm and 1.2 % at 10 cm.
+
+### Not verified (stated plainly)
+
+- The 2018 erratum's corrected QA tables. The 2017 printed Table XII for
+  the CS-1 Rev2 is inconsistent with its own consensus parameters (its
+  0.75 cm column is 13 % below Eq. (1) at every angle, its 0.1 cm column
+  7 % above), which is consistent with the erratum's stated scope, so it
+  is not used as a regression target. The engine is instead pinned to
+  hand evaluations of Eq. (1) from the consensus tables at tabulated
+  nodes (exact to 1e-9), and to the TG-43U1S1 worked examples.
+- Anything inside the titanium capsule: TG-43 does not define dose there;
+  the engine's nearest-surface projection is an engineering choice and is
+  documented as such.
