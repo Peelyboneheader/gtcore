@@ -10,7 +10,7 @@ off-screen plotter built on the phantom scene:
 - a click that misses the wall places nothing and says so on screen,
 - a scan with no cavity mesh reports that instead of staying silent,
 - Ctrl+left-drag grabs a placed tile and slides it along the wall, and the
-  relocated tile stays conformed (seeds 1.2-3.0 mm off the wall on the
+  relocated tile stays conformed (seeds 2.0-4.0 mm off the wall on the
   cavity side),
 - overlap warnings are wired defensively through
   ``gtcore.interact.find_overlapping_tiles``,
@@ -161,12 +161,12 @@ def test_ctrl_left_drag_relocates_and_stays_conformed(app):
     assert np.linalg.norm(moved.anchor_ras - start.anchor_ras) > 0.5, (
         "drag did not relocate the tile")
 
-    # relocated tile is still conformed: every seed 1.2-3.0 mm off the wall,
+    # relocated tile is still conformed: every seed 2.0-4.0 mm off the wall,
     # on the cavity side of it
     _surf, dist, _tid = trimesh.proximity.closest_point(
         app.cavity, moved.seed_centers)
     for seed, wall_pt, d in zip(moved.seed_centers, _surf, dist):
-        assert 1.2 <= d <= 3.0, "seed %.2f mm from wall after drag" % d
+        assert 2.0 <= d <= 4.0, "seed %.2f mm from wall after drag" % d
         _s, n_in = snap_to_wall(app.cavity, wall_pt)
         assert float(np.dot(seed - wall_pt, n_in)) > 0.0, (
             "seed ended up on the tissue side of the wall")

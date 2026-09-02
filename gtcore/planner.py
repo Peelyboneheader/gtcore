@@ -92,6 +92,7 @@ HELP_TEXT = """GAMMATILE PLANNER                       ?  hide/show this legend
 PLACE    hover the blue wall : ghost preview of the next tile (red = overlap)
          gold outline        : tile fitted FROM THE SCAN (green = placed by hand)
          right-click or P    : drop tile there      H : next tile full/half
+         T                   : suggest tiles from the detected seeds (auto count)
 ADJUST   left-drag ON a tile : grab it (quad or seeds) and slide it along the wall
          Ctrl + left-drag    : slide the SELECTED tile from anywhere on the wall
          Tab                 : select next tile     arrows : nudge 2 mm
@@ -211,6 +212,7 @@ class _PlannerApp:
         self._shadow_pairs: List = []   # (i, j, percent) dosimetric shadowing
         self._adopting = False   # suppress the sweep during startup adoption
         self._last_status = ""       # last status text (also for headless tests)
+        self._last_suggestion = None  # AutoFitResult of the last 'g' press
 
         # drag state
         self._drag_idx = -1          # index of the tile being dragged, or -1
@@ -358,6 +360,7 @@ class _PlannerApp:
             (("BackSpace",), self.delete_all),
             (("b", "B"), self._cycle_background),
             (("u", "U"), self.update_dose),
+            (("t", "T"), self.suggest_tiles),
             (("bracketleft", "["), lambda: self._rotate_selected(-ROTATE_STEP_RAD)),
             (("bracketright", "]"), lambda: self._rotate_selected(+ROTATE_STEP_RAD)),
             (("Up",), lambda: self._translate_selected(0.0, +1.0)),
@@ -936,12 +939,18 @@ class _PlannerApp:
             return
         adopted = 0
         for tp in fit.tiles:
-            try:
-                surf, n_in = snap_to_wall(self.cavity, tp.center_ras)
-                tile = conform_tile(self.cavity, surf, n_in, tp.axis_ras,
-                                    kind=tp.kind)
-            except Exception:
-                continue
+            tile = None
+            if getattr(tp, "surface", None) is not None:
+                # auto mode already conformed this tile onto the wall at the
+                # seeds' own positions (gtcore.tiles.surface): keep that
+                tile = tp.surface.placed
+            if tile is None:
+                try:
+                    surf, n_in = snap_to_wall(self.cavity, tp.center_ras)
+                    tile = conform_tile(self.cavity, surf, n_in, tp.axis_ras,
+                                        kind=tp.kind)
+                except Exception:
+                    continue
             self.tiles.append(tile)
             self._tile_ids.append(self._next_id)
             self._adopted_ids.add(self._next_id)
@@ -982,6 +991,55 @@ class _PlannerApp:
         self.selected = len(self.tiles) - 1
         self._after_change("tile placed (%d on board)" % len(self.tiles))
         return tile
+
+    def suggest_tiles(self):
+        """Infer the implanted configuration from the detected seeds (no
+        count needed) and put the tiles on the board as ordinary placed
+        tiles -- movable, rotatable, deletable -- conformed to the cavity
+        wall when one exists, otherwise as the free bent-tile fits."""
+        from .tiles import fit_tiles_auto, to_placed_tiles
+
+        seeds = self.result.seeds
+        if len(seeds) < 2:
+            self._update_status("suggest: no detected seeds to fit")
+            return []
+        cavity_center = None
+        mesh = self.cavity if (self.cavity is not None
+                               and len(self.cavity.vertices)) else None
+        if mesh is not None:
+            cavity_center = np.asarray(mesh.vertices, float).mean(axis=0)
+        fit = fit_tiles_auto(seeds.centers_ras, seeds.axes_ras,
+                             cavity_center_ras=cavity_center, mesh=mesh)
+        placed = to_placed_tiles(fit, seeds.centers_ras, seeds.axes_ras)
+        if placed:
+            self._push_history()          # one undo step restores the board
+        for tile in placed:
+            self.tiles.append(tile)
+            self._tile_ids.append(self._next_id)
+            # suggestions are the algorithm's belief about the implant, like
+            # adopted fitted tiles: gold outline, kept by Backspace
+            self._adopted_ids.add(self._next_id)
+            self._next_id += 1
+        self.selected = len(self.tiles) - 1 if placed else self.selected
+        self._last_suggestion = fit
+        notes = []
+        for pose in fit.tiles:
+            tag = "T%d" % (pose.tile_id + 1)
+            if pose.degraded:
+                tag += " crumpled"
+            if pose.surface is not None and not pose.surface.attached:
+                tag += " DETACHED"
+            elif pose.surface is not None and pose.surface.consistent is False:
+                tag += " inconsistent"
+            if len(tag) > 3:
+                notes.append(tag)
+        msg = "suggested %d tile(s): %s" % (len(placed), fit.summary())
+        if notes:
+            msg += "\n  " + ", ".join(notes)
+        if mesh is None:
+            msg += "\n  (no cavity surface: tiles shown as free fits)"
+        self._after_change(msg)
+        return placed
 
     def _toggle_kind(self):
         self.next_kind = "half" if self.next_kind == "full" else "full"
@@ -1464,9 +1522,13 @@ class _PlannerApp:
             pass
 
 
-def run_planner(result: PipelineResult, rx_cgy: float = 6000.0):
-    """Open the interactive planner window (blocking)."""
+def run_planner(result: PipelineResult, rx_cgy: float = 6000.0,
+                suggest: bool = False):
+    """Open the interactive planner window (blocking).  ``suggest`` starts
+    with the auto-inferred tile configuration on the board."""
     app = _PlannerApp(result, rx_cgy=rx_cgy, off_screen=False)
+    if suggest:
+        app.suggest_tiles()
     app.show()
     return app.tiles
 
@@ -1481,6 +1543,7 @@ def snapshot_planner(result: PipelineResult, actions: Sequence, path: str,
     - ``{"point": xyz, "kind": "full"|"half"}``: drop a tile of that kind,
     - ``"update"`` or ``{"update": True}``: run the isodose update (a no-op
       message if the dose engine is not importable yet),
+    - ``"suggest"``: infer tiles from the detected seeds (auto count).
     - ``"interference"`` or ``{"interference": True|False}``: toggle or set
       inter-seed attenuation for subsequent updates.
     """
@@ -1490,6 +1553,8 @@ def snapshot_planner(result: PipelineResult, actions: Sequence, path: str,
             if isinstance(act, str):
                 if act == "update":
                     app.update_dose()
+                elif act == "suggest":
+                    app.suggest_tiles()
                 elif act == "interference":
                     app._toggle_interference()
                 continue

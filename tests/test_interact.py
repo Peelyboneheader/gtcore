@@ -1,7 +1,7 @@
 """Verification campaign for the tile drag-and-drop geometry (gtcore.interact).
 
 The phantom generator is the ground truth: it conforms tiles to the analytic
-lumpy cavity wall (per-seed re-projection + 2 mm inset), so reproducing its
+lumpy cavity wall (per-seed re-projection + 3 mm inset), so reproducing its
 seed positions from the *meshed* cavity mask proves the interactive conform
 implements the same physics.
 """
@@ -150,10 +150,11 @@ def test_placement_invariants_random(case):
             continue
         accepted += 1
 
-        # every seed 1.2-3.0 mm off the mesh, on the cavity side
+        # every seed 2.25-3.75 mm off the mesh (hydrated seed-plane spread),
+        # plus mesh-projection slack, on the cavity side
         surf, dist, _ = trimesh.proximity.closest_point(mesh, tile.seed_centers)
         for s, q, dd in zip(tile.seed_centers, surf, dist):
-            assert 1.2 <= dd <= 3.0, "seed %.2f mm from wall" % dd
+            assert 2.0 <= dd <= 4.0, "seed %.2f mm from wall" % dd
             _, nq = snap_to_wall(mesh, q)
             assert float(np.dot(s - q, nq)) > 0.0, "seed on tissue side of wall"
 
@@ -205,10 +206,11 @@ def test_half_tiles(case):
             assert half.seed_axes.shape == (2, 3)
 
             spacing = np.linalg.norm(half.seed_centers[0] - half.seed_centers[1])
-            assert 8.5 <= spacing <= 10.5, "half-tile spacing %.2f mm" % spacing
+            # 10 mm pitch, chord-shortened by the concave wall at the 3 mm inset
+            assert 7.5 <= spacing <= 10.5, "half-tile spacing %.2f mm" % spacing
 
             _, dist, _ = trimesh.proximity.closest_point(mesh, half.seed_centers)
-            assert np.all(dist >= 1.2) and np.all(dist <= 3.0)
+            assert np.all(dist >= 2.0) and np.all(dist <= 4.0)
             for s, ax in zip(half.seed_centers, half.seed_axes):
                 assert abs(np.linalg.norm(ax) - 1.0) < 1e-6
                 _, nl = snap_to_wall(mesh, s)

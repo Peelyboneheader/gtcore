@@ -98,9 +98,17 @@ class TilePose:
                                     # when one was supplied
     axis_ras: np.ndarray            # (3,) unit tile t1 axis, in-plane
     residual_mm: float              # RMS chord deviation from the ideal grid
-    degraded: bool = False          # True when recovered only by the implant
-                                    # count constraint (crumpled/folded tile
-                                    # outside the normal geometry gates)
+    degraded: bool = False          # True when recovered outside the normal
+                                    # geometry gates (crumpled/folded tile),
+                                    # by the implant count constraint or by
+                                    # the deformable fit in auto mode
+    deform: object = None           # DeformableFit (gtcore.tiles.deform) when
+                                    # the bent-tile model was fitted: carries
+                                    # the fold parameters and bent footprint
+    surface: object = None          # SurfaceFit (gtcore.tiles.surface) when a
+                                    # cavity mesh was available: the tile
+                                    # conformed onto the wall, its footprint,
+                                    # and the attached / consistent verdict
 
     def __post_init__(self):
         self.center_ras = np.asarray(self.center_ras, dtype=float).reshape(3)
@@ -490,7 +498,7 @@ def _complete_degraded_quads(centers, axes, dist, leftovers, missing_full,
 
 
 def fit_tiles(centers_ras, axes_ras, n_full, n_half=0, cavity_center_ras=None,
-              complete_degraded=False):
+              complete_degraded=False, mesh=None):
     """Assign seed candidates to ``n_full`` full and ``n_half`` half tiles.
 
     Parameters
@@ -499,8 +507,13 @@ def fit_tiles(centers_ras, axes_ras, n_full, n_half=0, cavity_center_ras=None,
         Candidate seed centres in RAS mm (:class:`SeedCandidates.centers_ras`).
     axes_ras : (N, 3) array
         Candidate seed long axes; per-axis sign is arbitrary.
-    n_full, n_half : int
-        Implanted tile counts reported by the OR team.
+    n_full, n_half : int, or ``n_full="auto"``
+        Implanted tile counts reported by the OR team.  ``n_full="auto"``
+        infers the configuration from the seed cloud alone by model
+        selection (:func:`gtcore.tiles.auto.fit_tiles_auto`) and returns
+        an :class:`~gtcore.tiles.auto.AutoFitResult` carrying the per-count
+        score curve; ``n_half`` then only says whether half tiles may be
+        selected at all (any non-zero value / True).
     cavity_center_ras : (3,) array, optional
         Resection-cavity centre; when given, every tile normal is flipped to
         point away from it (out of the cavity, into the wall). Without it the
@@ -513,6 +526,9 @@ def fit_tiles(centers_ras, axes_ras, n_full, n_half=0, cavity_center_ras=None,
         missing tiles explain, compact, axis-coherent, non-collinear 4-groups
         are accepted with ``degraded=True``. Missing HALF tiles are never
         completed. Default False.
+    mesh : trimesh.Trimesh, optional
+        Cavity wall; only used by ``n_full="auto"`` (surface cross-check,
+        see :func:`gtcore.tiles.auto.fit_tiles_auto`).
 
     Returns
     -------
@@ -523,6 +539,14 @@ def fit_tiles(centers_ras, axes_ras, n_full, n_half=0, cavity_center_ras=None,
         ``all_assigned`` is True iff the requested tile counts were met.
         Deterministic: identical inputs give identical output.
     """
+    if isinstance(n_full, str):
+        if n_full.lower() != "auto":
+            raise ValueError("n_full must be an int or 'auto', got %r" % (n_full,))
+        from .auto import fit_tiles_auto
+
+        return fit_tiles_auto(centers_ras, axes_ras,
+                              cavity_center_ras=cavity_center_ras,
+                              allow_half=bool(n_half), mesh=mesh)
     centers = np.asarray(centers_ras, dtype=float).reshape(-1, 3)
     axes = _normalize_axes(axes_ras) if centers.size else \
         np.zeros((0, 3), dtype=float)

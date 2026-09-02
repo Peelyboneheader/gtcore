@@ -198,7 +198,12 @@ def test_phantom_wall_coverage_at_5mm(phantom, eng):
     """Wall-at-depth coverage on the phantom: partial at the prescription,
     total at zero, none at an absurd level; tile centres are covered."""
     vol, truth = phantom
-    cav_mesh = mask_to_mesh(truth.masks["cavity"], vol.affine)
+    # The physical wall is the lumen boundary WITH the tiles inside it: the
+    # truth lumen mask has the seed capsules carved out, and at the 3 mm
+    # seed-plane inset those notches face the seeds, so their vertex normals
+    # would aim the 5 mm depth point straight at a capsule.
+    cav_mesh = mask_to_mesh(truth.masks["cavity"] | truth.masks["seeds"],
+                            vol.affine)
     centers = np.array([s.center_ras for s in truth.seeds])
     axes = np.array([s.axis_ras for s in truth.seeds])
     d = wall_dose(cav_mesh, 5.0, centers, axes, engine=eng)

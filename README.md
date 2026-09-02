@@ -14,10 +14,12 @@ From this folder (`gt.bat` wraps the project venv — no activation needed):
 
 ```
 .\gt view  <dicom-folder-or-file>   load a CT, run the pipeline, open the 3D viewer
+.\gt view  <scan> --tiles auto      ... and infer the tile configuration with NO implant count
 .\gt plan  <dicom-folder-or-file>   pipeline + interactive tile planner (drag/drop + isodoses)
+.\gt plan  <scan> --suggest         ... starting from the auto-inferred tiles (planner key 'g')
 .\gt view                           either command, phantom mode (synthetic ground truth)
 .\gt demo                           full phantom demo -> output\ (NRRD, PLY meshes, figures, CSV)
-.\gt test                           run the test suite (290 tests)
+.\gt test                           run the test suite (419 tests)
 ```
 
 Planner controls (the same legend is on screen; `?` collapses it):
@@ -26,6 +28,7 @@ Planner controls (the same legend is on screen; `?` collapses it):
 |---|---|---|
 | Place | hover the blue wall | white **ghost tile** previews the next drop (red = would overlap) |
 | | right-click or `P` | drop the tile there; `H` = next tile full / half |
+| | `T` | **suggest tiles**: infer the implant configuration from the detected seeds with no count (`gt plan --suggest` starts this way); suggestions are ordinary tiles afterwards |
 | Adjust | left-drag on a tile | grab it by its quad or seed capsules (no modifier) and slide it along the wall; hovered tile lights up |
 | | Ctrl + left-drag on the wall | slide the *selected* tile from anywhere (forgiving mode); a press that grabs nothing says so in the status bar |
 | | gold outline | tile fitted **from the scan** (the implant); green = placed by hand. Backspace clears only hand-placed tiles |
@@ -60,6 +63,15 @@ Planner controls (the same legend is on screen; `?` collapses it):
    with deformation-tolerant gates, exact branch-and-bound assignment for the
    known implant count (full + sliced 2×1 half tiles), per-tile pose +
    residual; everything unassigned is rejected (clips, bone, streaks).
+   **Automatic mode (`n_full_tiles="auto"`, no count):** rigid nominal
+   tile model (`tiles.model`), developable bent-tile fit with the 3 mm
+   seed-offset metric that explains wall-conformed *and* folded tiles
+   (`tiles.deform`), count-free model selection with a per-tile penalty
+   and a score-saturation curve (`tiles.auto`), and a stick-to-surface
+   cross-check when a cavity mesh exists (`tiles.surface`: footprint on
+   the wall, attached / detached verdict). Geometry constants are cited in
+   `gtcore.geometry` (seed plane 3.0 mm from the tissue face). Notes:
+   `docs/autogen-notes.md`.
 6. **`gtcore.dose`** — TG-43U1 line-source engine for IsoRay Proxcelan CS-1
    Rev2 (`engine.TG43Engine`, vectorized `compute_dose_grid` /
    `dose_at_points`, sub-voxel `isodose_surfaces`). The five physics defects
@@ -93,7 +105,7 @@ Planner controls (the same legend is on screen; `?` collapses it):
 (skull + craniotomy + lumpy cavity + wall-conformed tiles) that validates
 every stage.
 
-## Validation snapshot (2026-09-02 overnight run + dose-engine refinement + tile interference + planner UI v3; 290 tests green)
+## Validation snapshot (2026-09-02 overnight run + dose-engine refinement + tile interference + planner UI v3; 419 tests green)
 
 | Claim | Measured |
 |---|---|
@@ -109,6 +121,7 @@ every stage.
 | Tile-carrier term (unmeasured density) | swings +19% to 0% over rho 0.15->1.00 g/cm^3 — **off by default**; figure `output/validation_interference.png` |
 | Real post-op CT (degraded export: 2 mm + gaps) | 4 complete tiles recovered, grid residuals 0.28–0.94 mm |
 | Physical 8-tile printed phantom (157 slices, 1 mm, O-MAR) | **32/32 seeds, 8/8 tiles**, residuals 0.32–1.38 mm; one physically crumpled tile recovered via the count constraint and flagged degraded |
+| **Automatic tile creation, no count** (`scripts/validation_autogen.py`) | synthetic 54/60 exact (30/30 at 0.8 mm; the 6 misses at 1.2 mm are seed-detection misses the counted fit shares), centre 0.12 mm mean, normal 2.4°; printed phantom **8/8 incl. the crumpled tile** (0.46 mm rms, 288° fold, no count fallback); post-op cluster n = 4 by score saturation |
 
 Per-dataset findings and data-quality caveats: `docs/data-notes.md`.
 
@@ -120,7 +133,7 @@ gtcore/viz.py      optional PyVista viewer   (only files allowed to render)
 gtcore/planner.py  optional PyVista planner
 gtcore/cli.py      the `gt` command
 scripts/           demo + validation studies
-tests/             290 tests, all stages scored against phantom ground truth
+tests/             419 tests, all stages scored against phantom ground truth
 docs/              TG-43 physics notes, interference notes, data notes
 output/            generated volumes, meshes, figures (gitignored)
 ```
