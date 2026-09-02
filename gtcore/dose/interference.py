@@ -395,10 +395,10 @@ class InterferenceModel:
         ``(mu_material - mu_water) * path``, so a carrier lighter than water
         legitimately yields a transmission slightly above 1.
     max_range_mm : float or None
-        Rays longer than this get transmission 1.  Dose that far out is
-        orders of magnitude below any prescription isodose (the engine's own
-        radial clip is 100 mm), so tracing there is wasted work.  ``None``
-        disables the cutoff.
+        Rays longer than this get transmission 1.  A seed contributes far
+        less than a percent of the 25% isodose at that range, so a shadow
+        there changes nothing visible and tracing it is wasted work.
+        ``None`` disables the cutoff.
     line_samples : int
         Number of ray origins spread over the TG-43 active length.  1 puts
         the origin at the seed centre (fast, hard shadow edges); an odd

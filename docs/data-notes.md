@@ -51,3 +51,10 @@ Fixes this scan drove: (1) voxel-quantization covariance in seed PCA (a seed
 lying flat in one slice had elongation ~1e6); (2) vault filter fails OPEN
 when no credible cranial interior exists (printed phantom has no skull);
 (3) count-constrained completion for crumpled tiles (opt-in, pipeline on).
+
+## PostOp CT — cavity segmentation verdict
+Cavity mask is 0 voxels on this export under every prior (none / all 53 / the
+27-seed cluster): the 52 interpolated slices smear the air/fluid boundaries
+segmentation depends on, and the brain mask collapses to a degenerate blob.
+The planner now says "no cavity surface in this scan" instead of eating
+clicks. Expect both to work on the original thin-cut series.

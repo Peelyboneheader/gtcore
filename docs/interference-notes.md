@@ -100,12 +100,12 @@ prescription, from `scripts/validation_interference.py`:
 
 | Carrier density (g/cm^3) | Flat 3-tile grid | Phantom truth implant |
 |---|---|---|
-| capsules only (no carriers) | **-0.27%** | **-0.66%** |
+| capsules only (no carriers) | **-0.27%** | **-0.65%** |
 | 0.15 | +16.77% | +19.12% |
 | 0.30 (the current guess) | +13.43% | +15.21% |
 | 0.50 | +9.21% | +10.30% |
 | 0.75 | +4.29% | +4.60% |
-| 1.00 (water-equivalent) | -0.27% | -0.66% |
+| 1.00 (water-equivalent) | -0.27% | -0.65% |
 
 So the carrier correction is both **larger than the interseed shadow it is
 meant to partially offset, and opposite in sign** — and it collapses to
@@ -113,7 +113,7 @@ exactly nothing if the implanted, blood- and CSF-soaked carrier is
 water-equivalent, which is entirely plausible. The answer is set almost
 entirely by a number nobody here has measured.
 
-A correction that swings between "+14%" and "nothing" on an unmeasured number
+A correction that swings between "+15%" and "nothing" on an unmeasured number
 must not be applied silently. Therefore:
 
 - `InterferenceModel.from_implant(...)` builds **capsules only**;
@@ -134,11 +134,11 @@ wall-conformed, non-coplanar seed poses).
 | Quantity | Flat 3-tile grid | Phantom truth implant |
 |---|---|---|
 | Mean dose change, all voxels above 0 | -0.03% | -0.07% |
-| Mean dose change at >= 25% rx (1500 cGy) | -0.27% | -0.66% |
+| Mean dose change at >= 25% rx (1500 cGy) | -0.27% | -0.65% |
 | Mean dose change at >= 100% rx (6000 cGy) | -0.48% | -0.60% |
 | 5th-percentile ratio at >= 25% rx | 0.981 | 0.962 |
 | Worst single voxel | 0.840 | 0.850 |
-| Runtime | 0.55 s -> 0.64 s (+17%) | 0.63 s -> 0.67 s (+6%) |
+| Runtime (tabulated kernel) | 0.35 s -> 0.42 s (+20%) | 0.40 s -> 0.46 s (+14%) |
 
 Sub-percent on volume-averaged metrics with local shadows of 15% is what the
 published interseed-attenuation literature reports for low-energy permanent
@@ -159,7 +159,8 @@ and a finer grid, before quoting a point dose in a shadow.
 Naively this is `O(points x seeds x occluders)`. Two things keep it cheap:
 
 - `max_range_mm` (default 40 mm) skips rays whose dose is orders of magnitude
-  below any prescription isodose. The engine's own radial clip is 100 mm.
+  below any prescription isodose. Beyond it the seed contributes far less than
+  a percent of the 25% isodose, so a shadow there changes nothing visible.
 - Capsules get a bounding-sphere prune done as a single matrix product per
   (seed, chunk), and the exact intersection runs only on the points that
   survive — a small fraction of any grid, since shadows are narrow. Carriers
