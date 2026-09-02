@@ -1,10 +1,22 @@
 """Count-free tile configuration search (``n_full_tiles="auto"``).
 
 When the implant count is unknown or untrusted, the number of tiles has to be
-*inferred* from the seed cloud.  The candidate tiles are the same
-gate-passing quads and pairs :mod:`gtcore.tiles.fit` enumerates (each with a
-positive geometric score in ``(0, QUAD_BASE]`` / ``(0, PAIR_BASE]``); this
-module replaces the exact-count assignment with model selection:
+*inferred* from the seed cloud.  Candidate tiles come from two tiers:
+
+* **standard** -- the gate-passing quads and pairs :mod:`gtcore.tiles.fit`
+  enumerates (chord windows, planarity, axis coherence);
+* **deformable** -- quads that FAIL the chord windows but that the bent-tile
+  model of :mod:`gtcore.tiles.deform` explains with a small residual and a
+  bounded bending energy (a crumpled / folded tile).  These carry
+  ``degraded=True`` like the count-constrained completion they replace.
+
+Every full-tile candidate is scored with the deformable fit::
+
+    score = QUAD_BASE - 2.0 * rms_def
+                      - 30 * max(0, bending_energy - 0.02)
+                      - 2.0 * max(0, axis_err - 15 deg) [rad]
+
+and the configuration is chosen by model selection::
 
     objective(config) = sum(tile scores) - lambda_full * n_full
                                          - lambda_half * n_half
@@ -20,14 +32,16 @@ curve peaks -- equivalently, where the marginal gain of one more tile drops
 below ``lambda`` (the saturation we observed on the real post-op scan, where
 requesting 5 or 6 tiles kept returning 4).
 
-Penalty calibration (2026-09, plan Step 2): true tiles score >= 4.8 on the
-8-tile printed phantom (including a strongly axis-fanned one), >= 5.9 on the
-post-op case and >= 7.1 on the synthetic sweep; disjoint junk quads that
-pass the gates are rare and score low.  ``LAMBDA_FULL = 3.5`` sits below
-every observed real tile with margin.  A half tile pays the SAME penalty:
-it has the same pose parameters as a full tile but explains half the data,
-and with a smaller penalty the optimiser happily splits a genuine
-(deformed) quad into two near-perfect pairs.
+Calibration (2026-09, plan Steps 2-3).  Deformable-fit residuals: synthetic
+wall-conformed tiles 0.2-0.5 mm, the 8-tile printed phantom 0.3-1.5 mm
+(1 mm slices; its crumpled tile 0.46 mm at bending energy 0.066), the
+post-op case 0.4-0.7 mm; junk quads that pass the loose gates sit at
+0.8-2.8 mm (median 1.6) with axis errors of 30 deg and more.  Every real
+tile scores >= 4.9 under the formula above; ``LAMBDA_FULL = 3.5`` sits
+below that with margin.  A half tile pays the SAME penalty: it has the same
+pose parameters as a full tile but explains half the data, and with a
+smaller penalty the optimiser happily splits a genuine (deformed) quad into
+two near-perfect pairs.
 
 Half tiles in auto mode
 -----------------------
@@ -43,28 +57,60 @@ plan Step 4.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from itertools import combinations
 from typing import List, Optional
 
 import numpy as np
 
+from .deform import DeformableFit, fit_deformable
 from .fit import (
     DIAG_MAX_MM,
+    QUAD_BASE,
     SIDE_MIN_MM,
     TileFitResult,
+    TilePose,
+    _axis_angle_deg,
     _enumerate_pairs,
     _enumerate_quads,
     _full_pose,
     _half_pose,
     _normalize_axes,
+    _orient_normal,
+    _project_in_plane,
 )
+from .model import fit_rigid
 
 __all__ = ["LAMBDA_FULL", "LAMBDA_HALF", "ScorePoint", "AutoFitResult",
-           "fit_tiles_auto"]
+           "fit_tiles_auto", "deformable_score"]
 
 LAMBDA_FULL = 3.5
 LAMBDA_HALF = LAMBDA_FULL
 
+# deformable-fit scoring of a full-tile candidate
+DEF_W_RMS = 2.0                 # score per mm of seed residual
+DEF_E_FREE = 0.02               # bending energy (1/mm^2) with no penalty
+DEF_W_E = 30.0                  # score per unit of bending energy beyond it
+DEF_AXIS_SOFT_DEG = 15.0
+DEF_W_AXIS = 2.0                # per radian beyond the soft angle
+
+# admission of quads that fail the standard chord gates (crumpled tiles)
+LOOSE_CHORD_MM = (3.5, 16.5)
+LOOSE_AXIS_HARD_DEG = 55.0      # 3rd-smallest pairwise axis angle
+LOOSE_MIN_EXTENT_MM = 1.5       # 2nd singular value: not a clip line
+LOOSE_SIM_RMS_MAX_MM = 2.0      # closed-form similarity-fit prefilter
+LOOSE_RMS_MAX_MM = 0.8
+LOOSE_E_MAX = 0.10
+LOOSE_AXIS_MAX_DEG = 25.0
+
 _SEARCH_NODE_CAP = 200000
+
+
+def deformable_score(fit: DeformableFit) -> float:
+    """Tile score of a quad from its deformable fit (see module docstring)."""
+    axis_pen = DEF_W_AXIS * float(np.deg2rad(
+        max(0.0, fit.axis_err_deg - DEF_AXIS_SOFT_DEG)))
+    bend_pen = DEF_W_E * max(0.0, fit.bending_energy - DEF_E_FREE)
+    return QUAD_BASE - DEF_W_RMS * fit.rms_mm - bend_pen - axis_pen
 
 
 @dataclass
@@ -156,7 +202,6 @@ class _PerCountSelector:
             self.best_sets[c] = list(chosen)
         if c == self.n_max or pos == len(self.items):
             return
-        # bound: can any count c + m still be improved from here?
         row = self.suffix[pos]
         improvable = False
         for m in range(1, min(len(row), self.n_max - c + 1)):
@@ -171,10 +216,65 @@ class _PerCountSelector:
         self._dfs(pos + 1, chosen, used, score)
 
 
+# ------------------------------------------------------- deformable tier
+def _enumerate_loose_quads(centers, axes, dist, exclude):
+    """Quads outside the standard chord gates that the bent-tile model still
+    explains: loose chord window, quad topology, axis coherence, planar
+    extent, a closed-form similarity prefilter, then the deformable fit.
+    Returns ``[(idx, DeformableFit)]``."""
+    n = centers.shape[0]
+    lo, hi = LOOSE_CHORD_MM
+    link = (dist >= lo) & (dist <= hi)
+    out = []
+    for idx in combinations(range(n), 4):
+        i, j, k, l = idx
+        if not (link[i, j] and link[i, k] and link[i, l]
+                and link[j, k] and link[j, l] and link[k, l]):
+            continue
+        if frozenset(idx) in exclude:
+            continue
+        pair_ids = [(i, j), (i, k), (i, l), (j, k), (j, l), (k, l)]
+        d6 = np.array([dist[a, b] for a, b in pair_ids])
+        order = np.argsort(d6)
+        d1, d2 = (pair_ids[int(o)] for o in order[4:])
+        if len({d1[0], d1[1], d2[0], d2[1]}) != 4:
+            continue
+        angles = sorted(_axis_angle_deg(axes[a], axes[b]) for a, b in pair_ids)
+        if angles[2] > LOOSE_AXIS_HARD_DEG:
+            continue
+        pts = centers[list(idx)]
+        sv = np.linalg.svd(pts - pts.mean(axis=0), compute_uv=False)
+        if float(sv[1]) < LOOSE_MIN_EXTENT_MM:
+            continue
+        sim = fit_rigid(pts, axes[list(idx)], allow_scale=True,
+                        scale_range=(0.5, 1.1))
+        if sim.rms_mm > LOOSE_SIM_RMS_MAX_MM:
+            continue
+        fit = fit_deformable(pts, axes[list(idx)])
+        if (fit.rms_mm <= LOOSE_RMS_MAX_MM and fit.bending_energy <= LOOSE_E_MAX
+                and fit.axis_err_deg <= LOOSE_AXIS_MAX_DEG):
+            out.append((idx, fit))
+    return out
+
+
+def _deformed_pose(tile_id, idx, centers, fit, cavity_center, degraded):
+    """TilePose from a deformable fit (normal oriented like fit.py's)."""
+    pts = centers[list(idx)]
+    center = pts.mean(axis=0)
+    normal = _orient_normal(fit.pose.normal.copy(), center, cavity_center)
+    t1 = _project_in_plane(fit.pose.t1, normal)
+    return TilePose(
+        tile_id=tile_id, kind="full", seed_indices=list(idx),
+        center_ras=center, normal_ras=normal, axis_ras=t1,
+        residual_mm=fit.rms_mm, degraded=degraded, deform=fit,
+    )
+
+
 # --------------------------------------------------------------------- main
 def fit_tiles_auto(centers_ras, axes_ras, cavity_center_ras=None,
                    allow_half=False, lambda_full=LAMBDA_FULL,
-                   lambda_half=LAMBDA_HALF, max_tiles=None) -> AutoFitResult:
+                   lambda_half=LAMBDA_HALF, max_tiles=None,
+                   deformable=True) -> AutoFitResult:
     """Infer the tile configuration from the seed cloud alone.
 
     Parameters
@@ -190,6 +290,10 @@ def fit_tiles_auto(centers_ras, axes_ras, cavity_center_ras=None,
         Complexity penalty per full / half tile (see module docstring).
     max_tiles : int, optional
         Upper bound on the number of tiles considered (default ``N // 2``).
+    deformable : bool
+        Score full tiles with the bent-tile fit and admit crumpled tiles
+        that fail the chord gates (default).  ``False`` falls back to the
+        standard geometric scores only.
 
     Returns
     -------
@@ -228,9 +332,27 @@ def fit_tiles_auto(centers_ras, axes_ras, cavity_center_ras=None,
     if not allow_half:
         leftover_pairs, pairs = pairs, []
 
-    items = [(s, frozenset(idx), float(lambda_full), "full", idx, r)
-             for s, idx, r in quads]
-    items += [(s, frozenset(idx), float(lambda_half), "half", idx, r)
+    # items: (score, frozenset, penalty, kind, idx, payload, degraded)
+    items = []
+    if deformable:
+        std = set()
+        for _s, idx, _r in quads:
+            fit = fit_deformable(centers[list(idx)], axes[list(idx)])
+            score = deformable_score(fit)
+            std.add(frozenset(idx))
+            if score > 0.0:
+                items.append((score, frozenset(idx), float(lambda_full),
+                              "full", idx, fit, False))
+        if n >= 4:
+            for idx, fit in _enumerate_loose_quads(centers, axes, dist, std):
+                score = deformable_score(fit)
+                if score > 0.0:
+                    items.append((score, frozenset(idx), float(lambda_full),
+                                  "full", idx, fit, True))
+    else:
+        items += [(s, frozenset(idx), float(lambda_full), "full", idx, r,
+                   False) for s, idx, r in quads]
+    items += [(s, frozenset(idx), float(lambda_half), "half", idx, r, False)
               for s, idx, r in pairs]
     # descending score, kind then index tuple as the deterministic tie-break
     items.sort(key=lambda it: (-it[0], it[3], it[4]))
@@ -270,14 +392,17 @@ def fit_tiles_auto(centers_ras, axes_ras, cavity_center_ras=None,
     assigned = set()
     for kind in ("full", "half"):
         for i in chosen:
-            s, _fs, _pen, k, idx, resid = items[i]
+            s, _fs, _pen, k, idx, payload, degraded = items[i]
             if k != kind:
                 continue
-            if kind == "full":
-                pose = _full_pose(len(tiles), idx, centers, axes, resid,
+            if kind == "full" and isinstance(payload, DeformableFit):
+                pose = _deformed_pose(len(tiles), idx, centers, payload,
+                                      cavity_center, degraded)
+            elif kind == "full":
+                pose = _full_pose(len(tiles), idx, centers, axes, payload,
                                   cavity_center)
             else:
-                pose = _half_pose(len(tiles), idx, centers, axes, resid,
+                pose = _half_pose(len(tiles), idx, centers, axes, payload,
                                   cavity_center)
             tiles.append(pose)
             assigned.update(idx)

@@ -98,9 +98,13 @@ class TilePose:
                                     # when one was supplied
     axis_ras: np.ndarray            # (3,) unit tile t1 axis, in-plane
     residual_mm: float              # RMS chord deviation from the ideal grid
-    degraded: bool = False          # True when recovered only by the implant
-                                    # count constraint (crumpled/folded tile
-                                    # outside the normal geometry gates)
+    degraded: bool = False          # True when recovered outside the normal
+                                    # geometry gates (crumpled/folded tile),
+                                    # by the implant count constraint or by
+                                    # the deformable fit in auto mode
+    deform: object = None           # DeformableFit (gtcore.tiles.deform) when
+                                    # the bent-tile model was fitted: carries
+                                    # the fold parameters and bent footprint
 
     def __post_init__(self):
         self.center_ras = np.asarray(self.center_ras, dtype=float).reshape(3)
