@@ -136,9 +136,15 @@ wall-conformed, non-coplanar seed poses).
 | Mean dose change, all voxels above 0 | -0.03% | -0.07% |
 | Mean dose change at >= 25% rx (1500 cGy) | -0.27% | -0.65% |
 | Mean dose change at >= 100% rx (6000 cGy) | -0.48% | -0.60% |
-| 5th-percentile ratio at >= 25% rx | 0.981 | 0.962 |
+| 5th-percentile ratio at >= 25% rx | 0.982 | 0.962 |
 | Worst single voxel | 0.840 | 0.850 |
 | Runtime (tabulated kernel) | 0.35 s -> 0.42 s (+20%) | 0.40 s -> 0.46 s (+14%) |
+
+Re-measured 2026-09-01 after the capsule geometry moved to the TG-43U1S2
+Appendix A11 values (0.412 mm outer radius, 0.0555 mm Ti wall, from 0.40 /
+0.05): every figure above is unchanged at the quoted precision (worst
+voxels 0.8404 and 0.8504), i.e. the ~11 % thicker wall deepens the shadows
+by less than the table's rounding.
 
 Sub-percent on volume-averaged metrics with local shadows of 15% is what the
 published interseed-attenuation literature reports for low-energy permanent
