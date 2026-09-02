@@ -579,3 +579,73 @@ def test_overlay_text_is_visible_on_black(app):
         rgb = tuple(actor.prop.color.float_rgb)
         assert max(rgb) > 0.5, "%s text colour %r would vanish on black" % (
             name, rgb)
+
+
+# ------------------------------------------------ delete all + background
+def test_delete_all_is_one_undo_step(app):
+    verts = np.asarray(app.cavity.vertices)
+    app.delete_all()
+    assert "no placed tiles" in app._last_status
+    x, y = _cavity_aim(app)
+    _right_click(app, x, y)
+    app.drop_at(verts[len(verts) // 2])
+    app.drop_at(verts[len(verts) // 3], "half")
+    ids = list(app._tile_ids)
+    assert len(app.tiles) == 3
+
+    app.delete_all()
+    assert app.tiles == [] and app.selected == -1
+    assert "3 tiles deleted" in app._last_status
+    for tid in ids:
+        for suffix in ("quad", "edge", "seeds"):
+            assert "tile_%d_%s" % (tid, suffix) not in app.pl.actors
+    assert "0 full + 0 half = 0 seeds placed" in app._last_status
+
+    app.undo()
+    assert len(app.tiles) == 3 and app._tile_ids == ids
+    assert app.tiles[2].kind == "half"
+    assert all("tile_%d_quad" % tid in app.pl.actors for tid in ids)
+
+
+def test_background_cycle_keeps_text_legible(app):
+    from gtcore.planner import _BACKGROUNDS
+
+    x, y = _cavity_aim(app)
+    _right_click(app, x, y)
+    seen = set()
+    for _ in range(len(_BACKGROUNDS)):
+        app._cycle_background()
+        bg, fg = _BACKGROUNDS[app._bg_idx]
+        seen.add(bg)
+        assert "background: %s" % bg in app._last_status
+        for name in ("help", "status", "button_label_iso"):
+            if name in app.pl.actors:
+                rgb = np.array(app.pl.actors[name].prop.color.float_rgb)
+                bg_rgb = np.array(app.pl.background_color.float_rgb)
+                assert np.abs(rgb - bg_rgb).max() > 0.5, (
+                    "%s text would vanish on %s" % (name, bg))
+        # ghost follows the text colour on the new background
+        _move(app, x + 60, y + 15)
+        if app._ghost_tile is not None:
+            ghost_rgb = np.array(app.pl.actors["ghost_edge"].prop.color.float_rgb)
+            bg_rgb = np.array(app.pl.background_color.float_rgb)
+            assert np.abs(ghost_rgb - bg_rgb).max() > 0.5
+    assert len(seen) == len(_BACKGROUNDS)
+    assert app._bg_idx == 0, "a full cycle returns to the default"
+
+
+def test_attenuation_key_and_panel_flag(app):
+    assert app.interference is False
+    app._toggle_interference()
+    assert app.interference is True
+    assert "attenuation ON" in app._last_status
+    x, y = _cavity_aim(app)
+    _right_click(app, x, y)
+    app.update_dose()
+    if "dose engine" in app._last_status or "failed" in app._last_status:
+        pytest.skip("dose engine unavailable: %s" % app._last_status)
+    assert app._dose_attenuated
+    assert "attenuation ON" in app._dose_panel_text
+    assert "wall area >= rx at 5 mm depth" in app._dose_panel_text
+    app._toggle_interference()
+    assert app.interference is False

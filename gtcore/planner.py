@@ -28,11 +28,20 @@ maths in :mod:`gtcore.dose.dvh`.
 Dose contract (implemented by :mod:`gtcore.dose`, loaded lazily on 'u')::
 
     compute_dose_grid(seed_centers, seed_axes, bounds_ras,
-                      spacing_mm=2.0, sk_per_seed_u=3.5) -> Volume
+                      spacing_mm=2.0, sk_per_seed_u=3.5,
+                      interference=None) -> Volume
     isodose_surfaces(dose_volume, levels_cgy) -> {level_cgy: trimesh.Trimesh}
+    InterferenceModel.from_implant(seed_centers, seed_axes) -> model
 
 ``bounds_ras`` is a (2, 3) array of RAS min/max corners.  If the functions
 are missing or fail, the planner shows a message and keeps running.
+
+'A' toggles inter-seed attenuation (:mod:`gtcore.dose.interference`): the
+seeds and tiles already on the board shadow one another, which plain TG-43
+superposition cannot express.  It is off by default so what the planner
+shows matches the formalism unless the user asks for the correction; tile
+carriers stay out of the model entirely, since their contribution rests on
+an unmeasured density (see docs/interference-notes.md).
 """
 from __future__ import annotations
 
@@ -58,6 +67,7 @@ DOSE_PAD_MM = 40.0
 DOSE_SPACING_MM = 2.0
 OVERLAP_THRESHOLD_MM = 1.0  # passed to interact.find_overlapping_tiles
 SHELL_OFFSETS_MM = (0.0, 5.0, 10.0)  # dose panel: wall, +5 mm, +10 mm tissue
+WALL_DEPTH_MM = 5.0         # GammaTile prescription depth (60 Gy at 5 mm)
 DOSE_PANEL_POS = (0.62, 0.99)  # viewport anchor (top-left corner) of the panel
 
 # Interaction pacing.  snap+conform costs ~13 ms and a tile redraw ~5 ms on
@@ -82,15 +92,17 @@ PLACE    hover the blue wall : ghost preview of the next tile (red = overlap)
 ADJUST   Ctrl + left-drag    : grab a tile and slide it along the wall
          Tab                 : select next tile     arrows : nudge 2 mm
          [  ]                : rotate 10 deg        X / Del : delete tile
+         Backspace           : delete ALL placed tiles
          Z                   : undo last change
 DOSE     U                   : compute TG-43 dose, isodoses + dose panel
+         A                   : inter-seed attenuation on/off (applies at next U)
          +  -                : prescription +/- 100 cGy (isodoses re-cut)
          I                   : isodoses on/off      C : clear isodoses
          D                   : dose panel on/off    (or click the buttons)
          isodose colours     : 100% red   50% orange   25% yellow
 EXPORT   S                   : save plan (seed coordinates) to output/*.csv
 VIEW     left-drag rotate    right-drag zoom    middle-drag pan    R reset
-         G                   : ghost preview on/off"""
+         G                   : ghost preview on/off      B : background colour"""
 HELP_TEXT_COMPACT = ("? legend   right-click drop   Ctrl+drag move   "
                      "U dose   S save")
 
@@ -113,7 +125,11 @@ _TILE_STYLE: Dict[str, Dict] = {
 }
 _OVERLAP_COLOR = {"normal": "red", "hover": "tomato",
                   "selected": "orangered", "dragging": "orangered"}
-_GHOST_COLOR = {False: "white", True: "red"}  # keyed by "would overlap"
+_GHOST_OVERLAP_COLOR = "red"  # otherwise the ghost takes the text colour
+# (background, text colour) pairs cycled by 'B'; text follows so the legend,
+# status, panel and ghost stay legible on every one of them
+_BACKGROUNDS = (("black", "white"), ("#1e2a38", "white"),
+                ("dimgray", "white"), ("white", "black"))
 _SHELL_COLOR = ("deepskyblue", "black", "gray")  # DVH chart lines
 
 
@@ -164,6 +180,9 @@ class _PlannerApp:
         self._next_id = 0
         self.selected = -1
         self.next_kind = "full"
+        self.interference = False    # inter-seed attenuation for the next U
+        self._bg_idx = 0
+        self._fg = _BACKGROUNDS[0][1]  # text colour for the current background
 
         self._cavity_actor = None
         self._tile_actors = {}       # tile id -> quad vtkActor (for grabbing)
@@ -197,6 +216,7 @@ class _PlannerApp:
         self._dose_volume = None
         self._dose_report = None     # {offset_mm: {"stats", "curve_x", "curve_y"}}
         self._dose_n_seeds = 0
+        self._dose_attenuated = False  # grid computed with the interference model
         self._dose_stale = False
         self._dose_panel_text = ""
         self.dose_panel_visible = True
@@ -212,7 +232,7 @@ class _PlannerApp:
     # ------------------------------------------------------------- base scene
     def _build_scene(self):
         pv, pl = self.pv, self.pl
-        pl.set_background("black")
+        pl.set_background(_BACKGROUNDS[self._bg_idx][0])
         styles = {
             "skull": dict(color="ivory", opacity=0.12),
             "brain": dict(color="rosybrown", opacity=0.25),
@@ -267,7 +287,7 @@ class _PlannerApp:
                     background_color="black")
                 self._buttons[name] = widget
                 pl.add_text(label, position=((x + size + 6) / w, (y + 4) / h),
-                            viewport=True, font_size=8, color="white",
+                            viewport=True, font_size=8, color=self._fg,
                             name="button_label_%s" % name, render=False)
             except Exception:
                 continue
@@ -304,6 +324,7 @@ class _PlannerApp:
             (("d", "D"), self._toggle_dose_panel),
             (("i", "I"), self._toggle_isodoses),
             (("c", "C"), self.clear_isodoses),
+            (("a", "A"), self._toggle_interference),
             (("z", "Z"), self.undo),
             (("s", "S"), self.save_plan),
             (("question", "?"), self._toggle_help),
@@ -311,6 +332,8 @@ class _PlannerApp:
             (("minus", "KP_Subtract"), lambda: self.set_rx(self.rx_cgy - RX_STEP_CGY)),
             (("Tab",), self._cycle_selection),
             (("x", "X", "Delete"), self._delete_selected),
+            (("BackSpace",), self.delete_all),
+            (("b", "B"), self._cycle_background),
             (("u", "U"), self.update_dose),
             (("bracketleft", "["), lambda: self._rotate_selected(-ROTATE_STEP_RAD)),
             (("bracketright", "]"), lambda: self._rotate_selected(+ROTATE_STEP_RAD)),
@@ -619,7 +642,7 @@ class _PlannerApp:
         tile = self._ghost_tile
         if tile is None:
             return
-        color = _GHOST_COLOR[bool(self._ghost_overlaps)]
+        color = _GHOST_OVERLAP_COLOR if self._ghost_overlaps else self._fg
         pl.add_mesh(_quad_polydata(pv, tile), name="ghost_quad", color=color,
                     opacity=0.30, pickable=False, reset_camera=False)
         pl.add_mesh(_outline_polydata(pv, tile), name="ghost_edge", color=color,
@@ -681,7 +704,7 @@ class _PlannerApp:
         try:
             self.pl.add_text(text, font_size=9, name="help",
                              position="upper_left", font="courier",
-                             color="white", render=False)
+                             color=self._fg, render=False)
             self._render()
         except Exception:
             pass
@@ -723,7 +746,7 @@ class _PlannerApp:
             # explicit colour: the theme default is BLACK, invisible on the
             # black background (the legend was unreadable for that reason)
             self.pl.add_text(text, font_size=10, name="status",
-                             position="lower_left", color="white")
+                             position="lower_left", color=self._fg)
             self.pl.render()
         except Exception:
             pass
@@ -848,6 +871,44 @@ class _PlannerApp:
         self.selected = min(self.selected, len(self.tiles) - 1)
         self._after_change("tile deleted")
 
+    def delete_all(self):
+        """Remove every placed tile (one undo step restores them all)."""
+        if not self.tiles:
+            self._update_status("no placed tiles to delete")
+            return
+        self._push_history()
+        n = len(self.tiles)
+        self._drag_idx = -1
+        self._hover_idx = -1
+        for tid in list(self._tile_ids):
+            self._remove_tile_actors(tid)
+        self.tiles, self._tile_ids = [], []
+        self.selected = -1
+        self._after_change("%d tile%s deleted (Z restores them)"
+                           % (n, "" if n == 1 else "s"))
+
+    def _cycle_background(self):
+        self._bg_idx = (self._bg_idx + 1) % len(_BACKGROUNDS)
+        bg, self._fg = _BACKGROUNDS[self._bg_idx]
+        try:
+            self.pl.set_background(bg)
+        except Exception:
+            pass
+        # every overlay re-draws in the new text colour
+        self._draw_help()
+        for name in ("iso", "clear", "panel"):
+            actor = self.pl.actors.get("button_label_%s" % name)
+            if actor is not None:
+                try:
+                    actor.prop.color = self._fg
+                except Exception:
+                    pass
+        if self._dose_volume is not None:
+            self._draw_dose_panel()
+        if self._ghost_tile is not None:
+            self._draw_ghost()
+        self._update_status("background: %s" % bg)
+
     def _camera_right(self):
         try:
             cam = self.pl.camera
@@ -944,6 +1005,17 @@ class _PlannerApp:
         self._render()
 
     # ------------------------------------------------------------------- dose
+    def _toggle_interference(self):
+        """Flip inter-seed attenuation on/off for the next dose update.
+
+        Deliberately does NOT recompute: a dose update takes seconds, and a
+        surgeon tapping a key should not trigger one by surprise.
+        """
+        self.interference = not self.interference
+        self._update_status(
+            "inter-seed attenuation %s -- press 'U' to recompute"
+            % ("ON" if self.interference else "OFF"))
+
     def update_dose(self):
         """Recompute + redraw isodose surfaces over detected + placed seeds."""
         try:
@@ -965,9 +1037,16 @@ class _PlannerApp:
 
         bounds = np.vstack([centers.min(axis=0) - DOSE_PAD_MM,
                             centers.max(axis=0) + DOSE_PAD_MM])
+        model = None
         try:
+            if self.interference:
+                # Capsules only: the carrier term rests on an unmeasured
+                # density (docs/interference-notes.md), so the planner never
+                # applies it.
+                model = dose_mod.InterferenceModel.from_implant(centers, axes)
             dose_volume = compute_dose_grid(centers, axes, bounds,
-                                            spacing_mm=DOSE_SPACING_MM)
+                                            spacing_mm=DOSE_SPACING_MM,
+                                            interference=model)
         except (ImportError, AttributeError):
             self._update_status("dose engine not available yet")
             return
@@ -976,6 +1055,7 @@ class _PlannerApp:
             return
         self._dose_volume = dose_volume
         self._dose_n_seeds = int(centers.shape[0])
+        self._dose_attenuated = model is not None
         self._dose_stale = False
         self._refresh_from_dose_volume()
 
@@ -1004,9 +1084,11 @@ class _PlannerApp:
         self._dose_report = self._compute_report(self._dose_volume)
         self._draw_dose_panel()
         self._update_status(note or (
-            "isodose over %d seeds: %s of rx %.0f cGy"
+            "isodose over %d seeds: %s of rx %.0f cGy%s"
             % (self._dose_n_seeds,
-               "/".join(shown) if shown else "none in grid", self.rx_cgy)))
+               "/".join(shown) if shown else "none in grid", self.rx_cgy,
+               "  (inter-seed attenuation ON)" if self._dose_attenuated
+               else "")))
 
     def _draw_isodoses(self, surfaces):
         shown = []
@@ -1103,9 +1185,31 @@ class _PlannerApp:
             return None
 
     # ------------------------------------------------------------ dose panel
+    def _wall_coverage(self):
+        """Area fraction of the cavity wall receiving >= rx at WALL_DEPTH_MM
+        (GammaTile's prescription point); None when it cannot be scored.
+        Advisory: any failure is swallowed so the panel never breaks."""
+        cavity = self.cavity
+        if self._dose_volume is None or cavity is None \
+                or getattr(cavity, "faces", None) is None or not len(cavity.faces):
+            return None
+        try:
+            from . import dose as dose_mod
+            d = dose_mod.wall_dose(cavity, WALL_DEPTH_MM,
+                                   dose_volume=self._dose_volume)
+            frac = float(dose_mod.surface_coverage(cavity, d, self.rx_cgy))
+            return frac if np.isfinite(frac) else None
+        except Exception:
+            return None
+
     def _dose_panel_lines(self):
-        header = "DOSE  rx %.0f cGy   %d seeds   %g mm grid" % (
-            self.rx_cgy, self._dose_n_seeds, DOSE_SPACING_MM)
+        header = "DOSE  rx %.0f cGy   %d seeds   %g mm grid%s" % (
+            self.rx_cgy, self._dose_n_seeds, DOSE_SPACING_MM,
+            "   attenuation ON" if self._dose_attenuated else "")
+        cov = self._wall_coverage()
+        if cov is not None:
+            header += "\nwall area >= rx at %g mm depth: %.0f%%" % (
+                WALL_DEPTH_MM, 100.0 * cov)
         if self._dose_report is None:
             body = "no cavity wall to score"
         else:
@@ -1129,7 +1233,7 @@ class _PlannerApp:
                 actor = self.pl.add_text(
                     self._dose_panel_text, font_size=9, name="dose",
                     position=DOSE_PANEL_POS, viewport=True, font="courier",
-                    color="gray" if self._dose_stale else "white",
+                    color="gray" if self._dose_stale else self._fg,
                     render=False)
                 try:
                     actor.prop.justification_horizontal = "left"
@@ -1222,7 +1326,9 @@ def snapshot_planner(result: PipelineResult, actions: Sequence, path: str,
     - a 3-vector: drop a full tile at that cavity point,
     - ``{"point": xyz, "kind": "full"|"half"}``: drop a tile of that kind,
     - ``"update"`` or ``{"update": True}``: run the isodose update (a no-op
-      message if the dose engine is not importable yet).
+      message if the dose engine is not importable yet),
+    - ``"interference"`` or ``{"interference": True|False}``: toggle or set
+      inter-seed attenuation for subsequent updates.
     """
     app = _PlannerApp(result, rx_cgy=rx_cgy, off_screen=True)
     try:
@@ -1230,9 +1336,13 @@ def snapshot_planner(result: PipelineResult, actions: Sequence, path: str,
             if isinstance(act, str):
                 if act == "update":
                     app.update_dose()
+                elif act == "interference":
+                    app._toggle_interference()
                 continue
             if isinstance(act, dict):
-                if act.get("update"):
+                if "interference" in act:
+                    app.interference = bool(act["interference"])
+                elif act.get("update"):
                     app.update_dose()
                 else:
                     app.drop_at(act["point"], act.get("kind", "full"))

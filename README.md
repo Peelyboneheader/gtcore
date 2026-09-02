@@ -17,7 +17,7 @@ From this folder (`gt.bat` wraps the project venv — no activation needed):
 .\gt plan  <dicom-folder-or-file>   pipeline + interactive tile planner (drag/drop + isodoses)
 .\gt view                           either command, phantom mode (synthetic ground truth)
 .\gt demo                           full phantom demo -> output\ (NRRD, PLY meshes, figures, CSV)
-.\gt test                           run the test suite (163 tests)
+.\gt test                           run the test suite (262 tests)
 ```
 
 Planner controls (the same legend is on screen; `?` collapses it):
@@ -31,6 +31,7 @@ Planner controls (the same legend is on screen; `?` collapses it):
 | | `X` / `Del`, `Z` | delete tile, undo last change (50 steps) |
 | Dose | `U` | TG-43 dose grid, 100/50/25 % isodoses (red/orange/yellow) and the **dose panel** (D90/D50/Dmin/V100/V150 on the cavity wall and +5/+10 mm tissue shells + shell DVH; flagged STALE when a tile moves) |
 | | `+` `-` | prescription +/- 100 cGy, isodoses re-cut from the grid |
+| | `A` | inter-seed attenuation on/off for the next `U` (capsule shadowing; carriers excluded, see `docs/interference-notes.md`); the panel also reports the cavity-wall area fraction receiving >= rx at 5 mm depth |
 | | `I`, `C`, `D` | isodoses on/off, clear isodoses, dose panel on/off (also clickable buttons above the DVH chart) |
 | Export | `S` | save every seed (detected + placed, RAS mm + axis) to `output/plan_<timestamp>.csv` |
 | View | left/right/middle-drag, `R`, `G` | rotate / zoom / pan, reset camera, ghost preview on/off |
@@ -58,10 +59,24 @@ Planner controls (the same legend is on screen; `?` collapses it):
    known implant count (full + sliced 2×1 half tiles), per-tile pose +
    residual; everything unassigned is rejected (clips, bone, streaks).
 6. **`gtcore.dose`** — TG-43U1 line-source engine for IsoRay Proxcelan CS-1
-   Rev2 (`engine.TG43Engine`, vectorized `compute_dose_grid`,
-   `isodose_surfaces`). The five physics defects of the AAPM-era port are
-   fixed and regression-pinned (`docs/tg43-port-notes.md`); S_K per seed is an
-   explicit parameter to be fed from the assay certificate.
+   Rev2 (`engine.TG43Engine`, vectorized `compute_dose_grid` /
+   `dose_at_points`, sub-voxel `isodose_surfaces`). The five physics defects
+   of the AAPM-era port are fixed and regression-pinned
+   (`docs/tg43-port-notes.md`); the capsule interior projects to the nearest
+   surface point (continuous field), the far field keeps falling beyond the
+   10 cm data domain, and a tabulated (ln r, θ) kernel makes 1 mm grids
+   interactive (≤0.1 % vs the analytic rate outside the capsule). S_K per
+   seed is an explicit parameter to be fed from the assay certificate, with
+   `sk_decayed` / `delivered_fraction` for assay→implant decay and dose at a
+   given time. `dose.metrics` adds the clinical readouts: DVH (D90/V100/
+   V150/V200), the 5 mm cavity rind, and wall coverage at depth.
+   `dose.InterferenceModel` adds what superposition cannot express — seeds
+   and tile carriers attenuating each other along the line of sight
+   (`docs/interference-notes.md`). It is **opt-in**
+   (`compute_dose_grid(..., interference=model)`), so bare TG-43 stays the
+   default and stays regression-pinned; seed capsules cost -0.3 to -0.7% of
+   mean dose in the treated volume with 15% local shadows, while the collagen
+   carrier term is off entirely because it rests on an unmeasured density.
 7. **`gtcore.interact` / `gtcore.planner`** — snap-to-wall + curvature
    conforming for placed tiles (pure geometry, unit-tested against phantom
    truth) and the interactive planner on top; `gtcore.dose.dvh` scores
@@ -73,7 +88,7 @@ Planner controls (the same legend is on screen; `?` collapses it):
 (skull + craniotomy + lumpy cavity + wall-conformed tiles) that validates
 every stage.
 
-## Validation snapshot (2026-09-02 overnight run; 163 tests green)
+## Validation snapshot (2026-09-02 overnight run + dose-engine refinement + tile interference + planner UI v3; 262 tests green)
 
 | Claim | Measured |
 |---|---|
@@ -81,8 +96,11 @@ every stage.
 | Brain / cavity segmentation | Dice 0.961 / 0.881 |
 | Tile partition accuracy (sweeps, 120 configs) | 117/120 exact; failures = physically overlapping seeds (<1 mm gap) |
 | Tile pose | centre ≤0.14 mm mean, normal ≤0.9° mean; fit <10 ms |
-| TG-43 v2 vs independent quadrature | ≤1e-9 relative on G_L; grid 12 seeds/2 mm/100 mm in 0.35 s |
+| TG-43 v2 vs independent quadrature | ≤1e-9 relative on G_L; tabulated kernel ≤1e-3 vs analytic (r ≥ 2.5 mm); grid 12 seeds/2 mm/100 mm in 0.17 s, 1 mm in 1.1 s |
+| Isodose surface placement (log-dose marching cubes, 2 mm grid) | 0.04 mm rms, 0.09 mm max vs analytic isodose radius |
 | Slice-spacing robustness (adaptive params) | recall 1.00 at 1.4/2.1/2.8 mm (fixed params: 0.58/0/0); figure `output/validation_spacing.png` |
+| Inter-seed attenuation (12 seeds, capsules only) | mean -0.27% (flat grid) / -0.65% (conformed) at >=25% rx; worst voxel 0.84; +14-20% runtime |
+| Tile-carrier term (unmeasured density) | swings +19% to 0% over rho 0.15->1.00 g/cm^3 — **off by default**; figure `output/validation_interference.png` |
 | Real post-op CT (degraded export: 2 mm + gaps) | 4 complete tiles recovered, grid residuals 0.28–0.94 mm |
 | Physical 8-tile printed phantom (157 slices, 1 mm, O-MAR) | **32/32 seeds, 8/8 tiles**, residuals 0.32–1.38 mm; one physically crumpled tile recovered via the count constraint and flagged degraded |
 
@@ -96,8 +114,8 @@ gtcore/viz.py      optional PyVista viewer   (only files allowed to render)
 gtcore/planner.py  optional PyVista planner
 gtcore/cli.py      the `gt` command
 scripts/           demo + validation studies
-tests/             163 tests, all stages scored against phantom ground truth
-docs/              TG-43 physics notes, data notes
+tests/             262 tests, all stages scored against phantom ground truth
+docs/              TG-43 physics notes, interference notes, data notes
 output/            generated volumes, meshes, figures (gitignored)
 ```
 
