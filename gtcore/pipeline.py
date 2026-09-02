@@ -207,8 +207,11 @@ def reconstruct(vol: Volume, verbose: bool = True,
                         ("cavity", cavity)):
             if np.asarray(m).any():
                 out[name] = mask_to_mesh(m, vol.affine, step_size=step)
-        if "brain" not in out and "skull" not in out and masks["body"].any():
-            # phantom / non-head scan: show the object surface as context
+        if "brain" not in out and masks["body"].any():
+            # phantom / non-head scan: no brain-window tissue exists, so show
+            # the scanned object's surface as the anatomical context (a
+            # 3D-printed shell at ~150-330 HU produces at most a few skull
+            # specks, which alone render as near-nothing)
             out["body"] = mask_to_mesh(masks["body"], vol.affine, step_size=step)
         return out
 

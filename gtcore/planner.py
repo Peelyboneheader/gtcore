@@ -40,9 +40,12 @@ TRANSLATE_STEP_MM = 2.0
 ROTATE_STEP_RAD = np.deg2rad(10.0)
 DOSE_PAD_MM = 40.0
 DOSE_SPACING_MM = 2.0
+DRAG_CONFORM_EVERY = 2      # re-conform every Nth MouseMoveEvent while dragging
+OVERLAP_THRESHOLD_MM = 1.0  # passed to interact.find_overlapping_tiles
 
 HELP_TEXT = (
     "right-click / P over the blue wall: drop tile   h: full/half for next drop\n"
+    "Ctrl+left-drag a placed tile: grab it and slide it along the wall\n"
     "Tab: cycle selection   arrows: slide tile ~2 mm   [ ]: rotate 10 deg\n"
     "x: delete selected   u: update isodose (100/50/25% rx: red/orange/yellow)\n"
     "left-drag rotate, right-drag zoom, middle-drag pan, r: reset camera"
@@ -80,6 +83,15 @@ class _PlannerApp:
         self.selected = -1
         self.next_kind = "full"
 
+        self._cavity_actor = None
+        self._tile_actors = {}       # tile id -> quad vtkActor (for grabbing)
+        self._cavity_picker = None   # vtkCellPicker restricted to the cavity
+        self._tile_picker = None     # vtkCellPicker restricted to tile quads
+        self._drag_idx = -1          # index of the tile being dragged, or -1
+        self._drag_moves = 0
+        self._overlap_pairs: List = []
+        self._last_status = ""       # last status text (also for headless tests)
+
         self.pl = pv.Plotter(window_size=(1280, 900), title=title,
                              off_screen=off_screen)
         self._build_scene()
@@ -93,6 +105,7 @@ class _PlannerApp:
         styles = {
             "skull": dict(color="ivory", opacity=0.12),
             "brain": dict(color="rosybrown", opacity=0.25),
+            "body": dict(color="lightsteelblue", opacity=0.25),  # phantom shell
             "cavity": dict(color="deepskyblue", opacity=0.55, specular=0.4),
         }
         for name, style in styles.items():
@@ -116,36 +129,13 @@ class _PlannerApp:
 
     def _bind_interaction(self):
         pl = self.pl
-        if self.cavity is not None and len(self.cavity.vertices):
-            try:  # P-key picking on the surface under the mouse
-                pl.enable_surface_point_picking(
-                    callback=self._on_pick, show_message=False,
-                    show_point=False, picker="cell",
-                )
-            except Exception:
-                try:
-                    pl.enable_surface_point_picking(
-                        callback=self._on_pick, show_message=False,
-                        show_point=False,
-                    )
-                except Exception:
-                    pass
-            try:  # right-click picking
-                pl.track_click_position(callback=self._on_pick, side="right")
-            except Exception:
-                pass
-
-        for key, fn in (
-            ("h", self._toggle_kind),
-            ("Tab", self._cycle_selection),
-            ("x", self._delete_selected),
-            ("u", self.update_dose),
-        ):
-            try:
-                pl.add_key_event(key, fn)
-            except Exception:
-                pass
+        self._bind_pick_observers()
         for keys, fn in (
+            (("p", "P"), self._place_at_mouse),
+            (("h",), self._toggle_kind),
+            (("Tab",), self._cycle_selection),
+            (("x",), self._delete_selected),
+            (("u",), self.update_dose),
             (("bracketleft", "["), lambda: self._rotate_selected(-ROTATE_STEP_RAD)),
             (("bracketright", "]"), lambda: self._rotate_selected(+ROTATE_STEP_RAD)),
             (("Up",), lambda: self._translate_selected(0.0, +1.0)),
@@ -159,6 +149,205 @@ class _PlannerApp:
                 except Exception:
                     pass
 
+    def _bind_pick_observers(self):
+        """Bind mouse gestures directly on the VTK interactor.
+
+        Placement and drag both go through explicit ``vtkCellPicker``s with
+        pick lists (cavity actor for placement/slide targets, tile quads for
+        grabbing), so a click can never land on the translucent skull/brain
+        in front of the cavity, and a miss is *known* to be a miss so it can
+        be reported on screen.  (The previous implementation stacked
+        ``enable_surface_point_picking`` -- which binds its own right-click
+        handler -- on top of ``track_click_position`` -- whose
+        ``vtkPointPicker`` picks any actor's nearest vertex: one click placed
+        several tiles, centimetres from the aim point, and when no cavity
+        mesh existed nothing was bound at all so clicks died silently.)
+
+        Observers are registered at higher priority than the camera
+        interactor style; a handler returning True aborts the event so the
+        camera never fights a tile grab.  Bound even without a cavity mesh:
+        placement attempts must always produce on-screen feedback.
+        """
+        try:
+            import vtk
+        except ImportError:  # rendering stack without separate vtk namespace
+            return
+        iren = getattr(self.pl.iren, "interactor", None) \
+            if self.pl.iren is not None else None
+        if iren is None:
+            return
+
+        self._cavity_picker = vtk.vtkCellPicker()
+        self._cavity_picker.SetTolerance(0.0005)
+        self._cavity_picker.PickFromListOn()
+        if self._cavity_actor is not None:
+            self._cavity_picker.AddPickList(self._cavity_actor)
+        self._tile_picker = vtk.vtkCellPicker()
+        self._tile_picker.SetTolerance(0.005)
+        self._tile_picker.PickFromListOn()
+
+        def _add(event, handler):
+            holder = {}
+
+            def _cb(_caller, _event, _handler=handler, _holder=holder):
+                try:
+                    handled = bool(_handler())
+                except Exception:
+                    handled = False
+                cmd = _holder.get("cmd")
+                if cmd is not None:
+                    try:  # abort so the camera style never sees the event
+                        cmd.SetAbortFlag(1 if handled else 0)
+                    except Exception:
+                        pass
+
+            tag = iren.AddObserver(event, _cb, 30.0)
+            try:
+                holder["cmd"] = iren.GetCommand(tag)
+            except Exception:
+                holder["cmd"] = None
+
+        _add("RightButtonPressEvent", self._on_right_press)
+        _add("LeftButtonPressEvent", self._on_left_press)
+        _add("MouseMoveEvent", self._on_mouse_move)
+        _add("LeftButtonReleaseEvent", self._on_left_release)
+
+        # Swallow VTK's BUILT-IN 'p' prop-pick (the interactor style's char
+        # handler draws a red bounding box around whatever actor is under the
+        # cursor -- users saw that instead of tile placement). Our own 'p'
+        # binding rides KeyPressEvent, which still fires; only the CharEvent
+        # that reaches the style is aborted.
+        def _swallow_pick_char():
+            try:
+                return iren.GetKeySym() in ("p", "P")
+            except Exception:
+                return False
+
+        _add("CharEvent", _swallow_pick_char)
+
+    # ----------------------------------------------------------- mouse picking
+    def _mouse_xy(self):
+        try:
+            return self.pl.iren.interactor.GetEventPosition()
+        except Exception:
+            return None
+
+    def _pick_cavity_point(self, x, y):
+        """Cast the cursor ray against the CAVITY actor only; None on miss."""
+        if self._cavity_picker is None or self._cavity_actor is None:
+            return None
+        try:
+            self._cavity_picker.Pick(x, y, 0, self.pl.renderer)
+            if self._cavity_picker.GetCellId() < 0:
+                return None
+            pt = np.asarray(self._cavity_picker.GetPickPosition(), dtype=float)
+        except Exception:
+            return None
+        if pt.size != 3 or not np.all(np.isfinite(pt)):
+            return None
+        return pt
+
+    def _pick_tile_index(self, x, y):
+        """Index of the placed tile whose quad is under the cursor, or -1."""
+        picker = self._tile_picker
+        if picker is None:
+            return -1
+        try:
+            picker.InitializePickList()
+            order = []
+            for i, tid in enumerate(self._tile_ids):
+                actor = self._tile_actors.get(tid)
+                if actor is not None:
+                    picker.AddPickList(actor)
+                    order.append((actor, i))
+            if not order:
+                return -1
+            picker.Pick(x, y, 0, self.pl.renderer)
+            if picker.GetCellId() < 0:
+                return -1
+            picked = picker.GetActor()
+            if picked is None:
+                return -1
+            addr = picked.GetAddressAsString("vtkProp")
+            for actor, i in order:
+                if actor.GetAddressAsString("vtkProp") == addr:
+                    return i
+        except Exception:
+            pass
+        return -1
+
+    # -------------------------------------------------------- mouse gestures
+    def _on_right_press(self):
+        """Right-click: drop a tile at the cursor (feedback on any outcome)."""
+        xy = self._mouse_xy()
+        if xy is not None:
+            self.place_at_screen(xy[0], xy[1])
+        return False  # never abort: right-drag zoom keeps working
+
+    def _on_left_press(self):
+        """Ctrl+left-press on a placed tile grabs it for dragging."""
+        iren = getattr(self.pl.iren, "interactor", None) \
+            if self.pl.iren is not None else None
+        if iren is None or not iren.GetControlKey():
+            return False
+        xy = self._mouse_xy()
+        if xy is None:
+            return False
+        idx = self._pick_tile_index(xy[0], xy[1])
+        if idx < 0:
+            return False
+        self._drag_idx = idx
+        self._drag_moves = 0
+        self.selected = idx
+        self._redraw_tiles()
+        self._update_status("dragging tile %d -- release to drop" % (idx + 1))
+        return True  # abort so the camera style never sees this press
+
+    def _on_mouse_move(self):
+        """While dragging: re-place the tile at the wall point under the cursor."""
+        if not (0 <= self._drag_idx < len(self.tiles)):
+            return False
+        self._drag_moves += 1
+        if self._drag_moves % DRAG_CONFORM_EVERY:
+            return True  # throttled (conform_tile costs ~ms); camera stays put
+        xy = self._mouse_xy()
+        pt = self._pick_cavity_point(xy[0], xy[1]) if xy is not None else None
+        if pt is None:
+            return True  # cursor slid off the wall: tile stays where it was
+        tile = self.tiles[self._drag_idx]
+        surf, n_in = snap_to_wall(self.cavity, pt)
+        self.tiles[self._drag_idx] = conform_tile(
+            self.cavity, surf, n_in, tile.axis_ras, kind=tile.kind)
+        self._after_change("dragging tile %d -- release to drop"
+                           % (self._drag_idx + 1))
+        return True
+
+    def _on_left_release(self):
+        if self._drag_idx < 0:
+            return False
+        idx, self._drag_idx = self._drag_idx, -1
+        self._after_change("tile %d dropped" % (idx + 1))
+        return True
+
+    def _place_at_mouse(self):
+        """'P'/'p' key: drop a tile at the current mouse position."""
+        xy = self._mouse_xy()
+        if xy is not None:
+            self.place_at_screen(xy[0], xy[1])
+
+    def place_at_screen(self, x, y):
+        """Place a tile via a screen-space pick; ALWAYS reports the outcome."""
+        if self.cavity is None or not len(self.cavity.vertices):
+            self._update_status(
+                "no cavity surface in this scan -- nothing to place on")
+            return None
+        pt = self._pick_cavity_point(x, y)
+        if pt is None:
+            self._update_status(
+                "click missed the cavity wall (aim at the blue surface)")
+            return None
+        return self.drop_at(pt)
+
     # ------------------------------------------------------------- messaging
     def _update_status(self, extra: str = ""):
         n_full = sum(1 for t in self.tiles if t.kind == "full")
@@ -169,6 +358,9 @@ class _PlannerApp:
             n_full, n_half, self.next_kind, sel)
         if extra:
             text += "\n" + extra
+        for i, j in self._overlap_pairs[:4]:  # tile numbers as displayed (1-based)
+            text += "\nWARNING: tiles %d & %d overlap" % (i + 1, j + 1)
+        self._last_status = text
         try:
             self.pl.add_text(text, font_size=10, name="status",
                              position="lower_left")
@@ -176,11 +368,45 @@ class _PlannerApp:
         except Exception:
             pass
 
+    # -------------------------------------------------------------- overlaps
+    def _refresh_overlaps(self):
+        """Recompute overlapping tile pairs, fully defensively.
+
+        ``find_overlapping_tiles`` may not exist yet (it is developed against
+        the contract ``find_overlapping_tiles(tiles, threshold_mm=1.0) ->
+        [(i, j), ...]``); any import/call/shape failure silently means
+        "no overlaps" so the planner never goes down over a warning feature.
+        """
+        pairs = []
+        if len(self.tiles) >= 2:
+            try:
+                from .interact import find_overlapping_tiles
+                pairs = list(find_overlapping_tiles(
+                    self.tiles, threshold_mm=OVERLAP_THRESHOLD_MM))
+            except Exception:
+                pairs = []
+        clean = []
+        for pair in pairs:
+            try:
+                i, j = int(pair[0]), int(pair[1])
+            except Exception:
+                continue
+            if 0 <= i < len(self.tiles) and 0 <= j < len(self.tiles) and i != j:
+                clean.append((i, j))
+        self._overlap_pairs = clean
+
+    def _after_change(self, extra: str = ""):
+        """One funnel for every tile mutation: overlaps -> redraw -> status."""
+        self._refresh_overlaps()
+        self._redraw_tiles()
+        self._update_status(extra)
+
     # ------------------------------------------------------------------ tiles
     def drop_at(self, point_ras, kind: Optional[str] = None):
         """Snap ``point_ras`` to the cavity wall and drop a conformed tile."""
         if self.cavity is None or not len(self.cavity.vertices):
-            self._update_status("no cavity mesh -- cannot place tiles")
+            self._update_status(
+                "no cavity surface in this scan -- nothing to place on")
             return None
         kind = self.next_kind if kind is None else kind
         point_ras = np.asarray(point_ras, dtype=float).reshape(3)
@@ -193,21 +419,8 @@ class _PlannerApp:
         self._tile_ids.append(self._next_id)
         self._next_id += 1
         self.selected = len(self.tiles) - 1
-        self._redraw_tiles()
-        self._update_status()
+        self._after_change("tile placed (%d on board)" % len(self.tiles))
         return tile
-
-    def _on_pick(self, *args):
-        """Picking callback (surface pick or click-track)."""
-        point = None
-        for a in args:
-            arr = np.asarray(a, dtype=float).ravel()
-            if arr.size == 3 and np.all(np.isfinite(arr)):
-                point = arr
-                break
-        if point is None or not np.any(point):
-            return
-        self.drop_at(point)
 
     def _toggle_kind(self):
         self.next_kind = "half" if self.next_kind == "full" else "full"
@@ -226,14 +439,16 @@ class _PlannerApp:
             return
         tid = self._tile_ids.pop(self.selected)
         self.tiles.pop(self.selected)
+        self._tile_actors.pop(tid, None)
+        if self._drag_idx == self.selected:
+            self._drag_idx = -1
         for suffix in ("quad", "seeds"):
             try:
                 self.pl.remove_actor("tile_%d_%s" % (tid, suffix))
             except Exception:
                 pass
         self.selected = min(self.selected, len(self.tiles) - 1)
-        self._redraw_tiles()
-        self._update_status()
+        self._after_change("tile deleted")
 
     def _camera_right(self):
         try:
@@ -272,28 +487,34 @@ class _PlannerApp:
             return
         delta = TRANSLATE_STEP_MM * move / norm
         self.tiles[self.selected] = translate_on_wall(self.cavity, tile, delta)
-        self._redraw_tiles()
-        self._update_status()
+        self._after_change()
 
     def _rotate_selected(self, angle_rad: float):
         if not (0 <= self.selected < len(self.tiles)):
             return
         self.tiles[self.selected] = rotate_on_wall(
             self.cavity, self.tiles[self.selected], angle_rad)
-        self._redraw_tiles()
-        self._update_status()
+        self._after_change()
 
     def _redraw_tiles(self):
         pv, pl = self.pv, self.pl
+        flagged = set()
+        for i, j in self._overlap_pairs:
+            flagged.add(i)
+            flagged.add(j)
         for i, (tile, tid) in enumerate(zip(self.tiles, self._tile_ids)):
             selected = i == self.selected
+            if i in flagged:  # red-ish tint until the overlap is resolved
+                color = "orangered" if selected else "red"
+            else:
+                color = "springgreen" if selected else "green"
             quad = pv.PolyData(
                 np.asarray(tile.corners_ras, dtype=float),
                 np.array([3, 0, 1, 2, 3, 0, 2, 3], dtype=np.int64),
             )
-            pl.add_mesh(
+            self._tile_actors[tid] = pl.add_mesh(
                 quad, name="tile_%d_quad" % tid,
-                color="springgreen" if selected else "green",
+                color=color,
                 opacity=0.75 if selected else 0.45,
                 show_edges=selected, edge_color="white",
             )
