@@ -82,7 +82,7 @@ def show_scene(result: PipelineResult, title: str = "IntraOp GammaTile",
         "brain (rose) | skull (ivory) | %s | %s\n"
         "left-drag rotate, right-drag zoom, middle-drag pan, 'r' reset"
         % (cavity_note, seed_note),
-        font_size=10,
+        font_size=10, color="white",  # theme default is black-on-black
     )
     pl.add_axes(line_width=2)
     pl.camera_position = "yz"

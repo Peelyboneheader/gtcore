@@ -5,10 +5,25 @@ pick a point on the cavity wall to drop a conformed GammaTile, then slide,
 spin, or delete it, and update TG-43 isodose surfaces over detected + placed
 seeds on demand.
 
+Feedback layers, all driven from the VTK event pipeline:
+
+- **ghost tile** -- while the cursor hovers over the cavity wall a
+  translucent conformed preview of the *next* drop follows it (red when that
+  drop would overlap a placed tile), so the user sees size, orientation and
+  draping before committing;
+- **hover / selection / drag styling** -- the tile under the cursor lights
+  up as grab-able, the selected tile carries a white outline, the tile being
+  dragged turns cyan, overlapping tiles are tinted red;
+- **dose panel** -- after 'u' a fixed-width table (upper right) reports
+  D90/D50/Dmin/V100/V150 on the cavity wall and on +5/+10 mm tissue shells,
+  plus a cumulative shell-DVH chart (lower right); it is flagged STALE as
+  soon as any tile moves until the next 'u'.
+
 Like ``viz.py``, this module is a rendering front-end and the only other
 place in gtcore allowed to touch pyvista -- and it imports it lazily, inside
 functions, so the algorithm core never depends on a rendering stack.  All
-geometry lives in :mod:`gtcore.interact` (pure numpy/trimesh).
+geometry lives in :mod:`gtcore.interact` (pure numpy/trimesh) and the DVH
+maths in :mod:`gtcore.dose.dvh`.
 
 Dose contract (implemented by :mod:`gtcore.dose`, loaded lazily on 'u')::
 
@@ -21,7 +36,8 @@ are missing or fail, the planner shows a message and keeps running.
 """
 from __future__ import annotations
 
-from typing import List, Optional, Sequence
+import time
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -40,16 +56,43 @@ TRANSLATE_STEP_MM = 2.0
 ROTATE_STEP_RAD = np.deg2rad(10.0)
 DOSE_PAD_MM = 40.0
 DOSE_SPACING_MM = 2.0
-DRAG_CONFORM_EVERY = 2      # re-conform every Nth MouseMoveEvent while dragging
 OVERLAP_THRESHOLD_MM = 1.0  # passed to interact.find_overlapping_tiles
+SHELL_OFFSETS_MM = (0.0, 5.0, 10.0)  # dose panel: wall, +5 mm, +10 mm tissue
+DOSE_PANEL_POS = (0.62, 0.99)  # viewport anchor (top-left corner) of the panel
 
-HELP_TEXT = (
-    "right-click / P over the blue wall: drop tile   h: full/half for next drop\n"
-    "Ctrl+left-drag a placed tile: grab it and slide it along the wall\n"
-    "Tab: cycle selection   arrows: slide tile ~2 mm   [ ]: rotate 10 deg\n"
-    "x: delete selected   u: update isodose (100/50/25% rx: red/orange/yellow)\n"
-    "left-drag rotate, right-drag zoom, middle-drag pan, r: reset camera"
-)
+# Interaction pacing.  snap+conform costs ~13 ms and a tile redraw ~5 ms on
+# the phantom cavity, so re-conforming on EVERY MouseMoveEvent stalls the
+# event queue and the tile visibly lags the cursor; skipping every other
+# event (the previous scheme) alternates between stall and skip and feels
+# jittery.  Wall-clock pacing conforms at a steady rate however fast the
+# mouse reports, and the final cursor position is always applied on release
+# so a drop never lands one throttled move short of where the user let go.
+DRAG_MIN_INTERVAL_S = 0.025   # ~40 conforms/s while dragging
+GHOST_MIN_INTERVAL_S = 0.030  # ~33 preview updates/s while hovering
+
+RX_STEP_CGY = 100.0
+UNDO_DEPTH = 50
+
+# Full key legend (monospace, upper left).  Every binding in
+# ``_bind_interaction`` appears here, grouped the way a physicist works:
+# place -> adjust -> evaluate -> export.  '?' collapses it to one line.
+HELP_TEXT = """GAMMATILE PLANNER                       ?  hide/show this legend
+PLACE    hover the blue wall : ghost preview of the next tile (red = overlap)
+         right-click or P    : drop tile there      H : next tile full/half
+ADJUST   Ctrl + left-drag    : grab a tile and slide it along the wall
+         Tab                 : select next tile     arrows : nudge 2 mm
+         [  ]                : rotate 10 deg        X / Del : delete tile
+         Z                   : undo last change
+DOSE     U                   : compute TG-43 dose, isodoses + dose panel
+         +  -                : prescription +/- 100 cGy (isodoses re-cut)
+         I                   : isodoses on/off      C : clear isodoses
+         D                   : dose panel on/off    (or click the buttons)
+         isodose colours     : 100% red   50% orange   25% yellow
+EXPORT   S                   : save plan (seed coordinates) to output/*.csv
+VIEW     left-drag rotate    right-drag zoom    middle-drag pan    R reset
+         G                   : ghost preview on/off"""
+HELP_TEXT_COMPACT = ("? legend   right-click drop   Ctrl+drag move   "
+                     "U dose   S save")
 
 _ISO_STYLE = (  # (fraction of rx, actor name, color)
     (1.00, "iso_100", "red"),
@@ -57,12 +100,51 @@ _ISO_STYLE = (  # (fraction of rx, actor name, color)
     (0.25, "iso_25", "yellow"),
 )
 
+# Tile quad styling per interaction state; the overlap tint overrides colour.
+# ``outline`` is the colour of a separate 4-edge loop actor (None = no loop).
+_TILE_STYLE: Dict[str, Dict] = {
+    "normal":   dict(color="green", opacity=0.45, outline=None, line_width=1),
+    "hover":    dict(color="mediumseagreen", opacity=0.60,
+                     outline="palegreen", line_width=2),
+    "selected": dict(color="springgreen", opacity=0.75,
+                     outline="white", line_width=3),
+    "dragging": dict(color="cyan", opacity=0.85,
+                     outline="white", line_width=4),
+}
+_OVERLAP_COLOR = {"normal": "red", "hover": "tomato",
+                  "selected": "orangered", "dragging": "orangered"}
+_GHOST_COLOR = {False: "white", True: "red"}  # keyed by "would overlap"
+_SHELL_COLOR = ("deepskyblue", "black", "gray")  # DVH chart lines
+
 
 def _to_pv(pv, tm):
     faces = np.hstack(
         [np.full((len(tm.faces), 1), 3, dtype=np.int64), np.asarray(tm.faces)]
     ).ravel()
     return pv.PolyData(np.asarray(tm.vertices), faces)
+
+
+def _quad_polydata(pv, tile):
+    return pv.PolyData(
+        np.asarray(tile.corners_ras, dtype=float),
+        np.array([3, 0, 1, 2, 3, 0, 2, 3], dtype=np.int64),
+    )
+
+
+def _outline_polydata(pv, tile):
+    """Closed 4-edge loop of the draped tile (show_edges would also draw
+    the diagonal of the two-triangle quad)."""
+    return pv.PolyData(np.asarray(tile.corners_ras, dtype=float),
+                       lines=np.array([5, 0, 1, 2, 3, 0], dtype=np.int64))
+
+
+def _seed_polydata(pv, tile):
+    polys = None
+    for c, a in zip(tile.seed_centers, tile.seed_axes):
+        cyl = pv.Cylinder(center=c, direction=a, radius=0.6,
+                          height=SEED_LENGTH_MM)
+        polys = cyl if polys is None else polys + cyl
+    return polys
 
 
 class _PlannerApp:
@@ -87,10 +169,39 @@ class _PlannerApp:
         self._tile_actors = {}       # tile id -> quad vtkActor (for grabbing)
         self._cavity_picker = None   # vtkCellPicker restricted to the cavity
         self._tile_picker = None     # vtkCellPicker restricted to tile quads
-        self._drag_idx = -1          # index of the tile being dragged, or -1
-        self._drag_moves = 0
         self._overlap_pairs: List = []
         self._last_status = ""       # last status text (also for headless tests)
+
+        # drag state
+        self._drag_idx = -1          # index of the tile being dragged, or -1
+        self._drag_last_t = float("-inf")  # first move conforms at once
+        self._drag_pending_xy = None  # latest cursor pos seen while dragging
+        self._drag_applied_xy = None  # cursor pos the tile was last conformed at
+        self.drag_min_interval_s = DRAG_MIN_INTERVAL_S
+
+        # hover + ghost preview state
+        self._hover_idx = -1
+        self.ghost_enabled = True
+        self._ghost_tile: Optional[PlacedTile] = None
+        self._ghost_overlaps = False
+        self._ghost_last_t = 0.0
+        self.ghost_min_interval_s = GHOST_MIN_INTERVAL_S
+
+        self._history: List = []     # undo stack of (tiles, tile_ids)
+        self.help_expanded = True
+        self.isodose_visible = True
+        self._iso_shown: List[str] = []  # isodose actor names on screen
+        self._buttons = {}           # name -> vtkButtonWidget (clickable UI)
+
+        # dose panel state
+        self._dose_volume = None
+        self._dose_report = None     # {offset_mm: {"stats", "curve_x", "curve_y"}}
+        self._dose_n_seeds = 0
+        self._dose_stale = False
+        self._dose_panel_text = ""
+        self.dose_panel_visible = True
+        self._dvh_chart = None
+        self._dvh_lines = {}
 
         self.pl = pv.Plotter(window_size=(1280, 900), title=title,
                              off_screen=off_screen)
@@ -121,21 +232,86 @@ class _PlannerApp:
                                     height=SEED_LENGTH_MM),
                         color="gold", specular=0.8)
 
-        pl.add_text(HELP_TEXT, font_size=11, name="help", position="upper_left")
+        self._draw_help()
+        self._add_buttons()
         pl.add_axes(line_width=2)
         pl.camera_position = "yz"
         pl.camera.azimuth = 135
         pl.camera.elevation = 15
+
+    def _add_buttons(self):
+        """Clickable on-screen buttons above the DVH chart (lower right).
+
+        Each mirrors a key so nothing depends on remembering the legend:
+        isodoses on/off (I), clear isodoses (C), dose panel on/off (D).
+        Widgets need a live interactor; any failure just leaves the keys.
+        """
+        pl = self.pl
+        try:
+            w, h = pl.window_size
+        except Exception:
+            w, h = 1280, 900
+        size = 22
+        y = int(0.32 * h)
+        specs = (  # (name, label, initial state, callback(state))
+            ("iso", "isodoses", True, self._button_isodoses),
+            ("clear", "clear isodoses", False, self._button_clear),
+            ("panel", "dose panel", True, self._button_panel),
+        )
+        x = int(0.69 * w)
+        for name, label, state, cb in specs:
+            try:
+                widget = pl.add_checkbox_button_widget(
+                    cb, value=state, position=(x, y), size=size,
+                    border_size=2, color_on="springgreen", color_off="dimgray",
+                    background_color="black")
+                self._buttons[name] = widget
+                pl.add_text(label, position=((x + size + 6) / w, (y + 4) / h),
+                            viewport=True, font_size=8, color="white",
+                            name="button_label_%s" % name, render=False)
+            except Exception:
+                continue
+            x += size + 12 + 8 * len(label)
+
+    def _set_button(self, name, state):
+        widget = self._buttons.get(name)
+        if widget is None:
+            return
+        try:
+            widget.GetRepresentation().SetState(1 if state else 0)
+        except Exception:
+            pass
+
+    def _button_isodoses(self, state):
+        if bool(state) != self.isodose_visible:
+            self._toggle_isodoses()
+
+    def _button_clear(self, _state):
+        self.clear_isodoses()
+        self._set_button("clear", False)  # momentary, not a toggle
+
+    def _button_panel(self, state):
+        if bool(state) != self.dose_panel_visible:
+            self._toggle_dose_panel()
 
     def _bind_interaction(self):
         pl = self.pl
         self._bind_pick_observers()
         for keys, fn in (
             (("p", "P"), self._place_at_mouse),
-            (("h",), self._toggle_kind),
+            (("h", "H"), self._toggle_kind),
+            (("g", "G"), self._toggle_ghost),
+            (("d", "D"), self._toggle_dose_panel),
+            (("i", "I"), self._toggle_isodoses),
+            (("c", "C"), self.clear_isodoses),
+            (("z", "Z"), self.undo),
+            (("s", "S"), self.save_plan),
+            (("question", "?"), self._toggle_help),
+            (("plus", "equal", "KP_Add"), lambda: self.set_rx(self.rx_cgy + RX_STEP_CGY)),
+            (("minus", "KP_Subtract"), lambda: self.set_rx(self.rx_cgy - RX_STEP_CGY)),
             (("Tab",), self._cycle_selection),
-            (("x",), self._delete_selected),
-            (("u",), self.update_dose),
+            (("x", "X", "Delete"), self._delete_selected),
+            (("u", "U"), self.update_dose),
             (("bracketleft", "["), lambda: self._rotate_selected(-ROTATE_STEP_RAD)),
             (("bracketright", "]"), lambda: self._rotate_selected(+ROTATE_STEP_RAD)),
             (("Up",), lambda: self._translate_selected(0.0, +1.0)),
@@ -211,6 +387,7 @@ class _PlannerApp:
         _add("LeftButtonPressEvent", self._on_left_press)
         _add("MouseMoveEvent", self._on_mouse_move)
         _add("LeftButtonReleaseEvent", self._on_left_release)
+        _add("LeaveEvent", self._on_leave)
 
         # Swallow VTK's BUILT-IN 'p' prop-pick (the interactor style's char
         # handler draws a red bounding box around whatever actor is under the
@@ -224,6 +401,21 @@ class _PlannerApp:
                 return False
 
         _add("CharEvent", _swallow_pick_char)
+
+    def _camera_busy(self):
+        """True while the camera style owns a rotate/zoom/pan gesture.
+
+        Hover and ghost updates pause then: they would fight the camera for
+        CPU and flicker across the moving wall.  ``vtkInteractorStyle`` keeps
+        its own state (VTKIS_NONE == 0 when idle), which is more reliable
+        than tracking button events ourselves -- a release can reach the
+        style without reaching a second observer.
+        """
+        try:
+            style = self.pl.iren.interactor.GetInteractorStyle()
+            return int(style.GetState()) != 0
+        except Exception:
+            return False
 
     # ----------------------------------------------------------- mouse picking
     def _mouse_xy(self):
@@ -288,47 +480,176 @@ class _PlannerApp:
         """Ctrl+left-press on a placed tile grabs it for dragging."""
         iren = getattr(self.pl.iren, "interactor", None) \
             if self.pl.iren is not None else None
-        if iren is None or not iren.GetControlKey():
-            return False
         xy = self._mouse_xy()
-        if xy is None:
-            return False
-        idx = self._pick_tile_index(xy[0], xy[1])
+        idx = -1
+        if iren is not None and iren.GetControlKey() and xy is not None:
+            idx = self._pick_tile_index(xy[0], xy[1])
         if idx < 0:
+            self._hide_ghost()  # camera rotate starts: no preview meanwhile
             return False
+        self._hide_ghost()
+        self._set_hover(-1)
+        self._push_history()  # one undo step per drag, however long
         self._drag_idx = idx
-        self._drag_moves = 0
+        self._drag_last_t = float("-inf")  # first move conforms at once
+        self._drag_pending_xy = self._drag_applied_xy = None
         self.selected = idx
         self._redraw_tiles()
         self._update_status("dragging tile %d -- release to drop" % (idx + 1))
         return True  # abort so the camera style never sees this press
 
     def _on_mouse_move(self):
-        """While dragging: re-place the tile at the wall point under the cursor."""
-        if not (0 <= self._drag_idx < len(self.tiles)):
-            return False
-        self._drag_moves += 1
-        if self._drag_moves % DRAG_CONFORM_EVERY:
-            return True  # throttled (conform_tile costs ~ms); camera stays put
+        """Dragging: paced re-conform.  Otherwise: hover + ghost feedback."""
+        if 0 <= self._drag_idx < len(self.tiles):
+            return self._drag_move()
+        if self._camera_busy():
+            return False  # camera gesture in progress: leave the scene alone
         xy = self._mouse_xy()
-        pt = self._pick_cavity_point(xy[0], xy[1]) if xy is not None else None
-        if pt is None:
-            return True  # cursor slid off the wall: tile stays where it was
-        tile = self.tiles[self._drag_idx]
-        surf, n_in = snap_to_wall(self.cavity, pt)
-        self.tiles[self._drag_idx] = conform_tile(
-            self.cavity, surf, n_in, tile.axis_ras, kind=tile.kind)
-        self._after_change("dragging tile %d -- release to drop"
-                           % (self._drag_idx + 1))
-        return True
+        if xy is None:
+            return False
+        self._set_hover(self._pick_tile_index(xy[0], xy[1]))
+        if self._hover_idx >= 0:
+            self._hide_ghost()  # a tile is under the cursor: offer the grab
+        else:
+            self._update_ghost(xy)
+        return False
 
     def _on_left_release(self):
         if self._drag_idx < 0:
             return False
         idx, self._drag_idx = self._drag_idx, -1
+        pending, applied = self._drag_pending_xy, self._drag_applied_xy
+        if pending is not None and pending != applied:
+            self._apply_drag(idx, pending)  # land exactly where the mouse is
+        self._drag_pending_xy = self._drag_applied_xy = None
         self._after_change("tile %d dropped" % (idx + 1))
         return True
 
+    def _on_leave(self):
+        """Cursor left the window: no preview, no hover."""
+        self._set_hover(-1)
+        self._hide_ghost()
+        return False
+
+    # ----------------------------------------------------------------- drag
+    def _drag_move(self):
+        xy = self._mouse_xy()
+        if xy is None:
+            return True
+        self._drag_pending_xy = xy
+        now = time.perf_counter()
+        if now - self._drag_last_t < self.drag_min_interval_s:
+            return True  # paced: the pending position is applied on release
+        self._apply_drag(self._drag_idx, xy, now)
+        return True
+
+    def _apply_drag(self, idx, xy, now=None):
+        """Re-conform tile ``idx`` at the wall point under ``xy``.
+
+        Only the dragged tile is redrawn unless the overlap tint of another
+        tile changed -- a full redraw costs as much as the conform itself.
+        """
+        self._drag_last_t = time.perf_counter() if now is None else now
+        self._drag_applied_xy = xy
+        pt = self._pick_cavity_point(xy[0], xy[1])
+        if pt is None:
+            return False  # cursor slid off the wall: tile stays where it was
+        tile = self.tiles[idx]
+        surf, n_in = snap_to_wall(self.cavity, pt)
+        self.tiles[idx] = conform_tile(self.cavity, surf, n_in, tile.axis_ras,
+                                       kind=tile.kind)
+        before = self._flagged()
+        self._refresh_overlaps()
+        if self._flagged() != before:
+            self._redraw_tiles()
+        else:
+            self._redraw_tile(idx)
+            self._render()
+        return True
+
+    # -------------------------------------------------------- hover + ghost
+    def _set_hover(self, idx):
+        if idx == self._hover_idx:
+            return
+        old, self._hover_idx = self._hover_idx, idx
+        changed = False
+        for i in (old, idx):
+            if 0 <= i < len(self.tiles):
+                self._redraw_tile(i)
+                changed = True
+        if changed:
+            self._render()
+
+    def _update_ghost(self, xy):
+        """Follow the cursor with a conformed preview of the next drop."""
+        if not self.ghost_enabled or self.cavity is None \
+                or not len(self.cavity.vertices):
+            self._hide_ghost()
+            return
+        now = time.perf_counter()
+        if now - self._ghost_last_t < self.ghost_min_interval_s:
+            return
+        self._ghost_last_t = now
+        pt = self._pick_cavity_point(xy[0], xy[1])
+        if pt is None:
+            self._hide_ghost()
+            return
+        surf, n_in = snap_to_wall(self.cavity, pt)
+        ghost = conform_tile(self.cavity, surf, n_in, self._camera_right(),
+                             kind=self.next_kind)
+        self._ghost_tile = ghost
+        self._ghost_overlaps = self._would_overlap(ghost)
+        self._draw_ghost()
+
+    def _would_overlap(self, tile):
+        """Would ``tile`` overlap any placed tile?  Defensive like the rest."""
+        if not self.tiles:
+            return False
+        try:
+            from .interact import find_overlapping_tiles
+            k = len(self.tiles)
+            pairs = find_overlapping_tiles(self.tiles + [tile],
+                                           threshold_mm=OVERLAP_THRESHOLD_MM)
+            return any(k in (int(p[0]), int(p[1])) for p in pairs)
+        except Exception:
+            return False
+
+    def _draw_ghost(self):
+        pv, pl = self.pv, self.pl
+        tile = self._ghost_tile
+        if tile is None:
+            return
+        color = _GHOST_COLOR[bool(self._ghost_overlaps)]
+        pl.add_mesh(_quad_polydata(pv, tile), name="ghost_quad", color=color,
+                    opacity=0.30, pickable=False, reset_camera=False)
+        pl.add_mesh(_outline_polydata(pv, tile), name="ghost_edge", color=color,
+                    line_width=2, pickable=False, reset_camera=False)
+        seeds = _seed_polydata(pv, tile)
+        if seeds is not None:
+            pl.add_mesh(seeds, name="ghost_seeds", color=color, opacity=0.45,
+                        pickable=False, reset_camera=False)
+        self._render()
+
+    def _hide_ghost(self):
+        if self._ghost_tile is None:
+            return
+        self._ghost_tile = None
+        self._ghost_overlaps = False
+        for name in ("ghost_quad", "ghost_edge", "ghost_seeds"):
+            try:
+                self.pl.remove_actor(name, render=False)
+            except Exception:
+                pass
+        self._render()
+
+    def _toggle_ghost(self):
+        self.ghost_enabled = not self.ghost_enabled
+        if not self.ghost_enabled:
+            self._hide_ghost()
+        self._update_status("ghost preview %s"
+                            % ("on" if self.ghost_enabled else "off"))
+
+    # ------------------------------------------------------------ placement
     def _place_at_mouse(self):
         """'P'/'p' key: drop a tile at the current mouse position."""
         xy = self._mouse_xy()
@@ -349,21 +670,60 @@ class _PlannerApp:
         return self.drop_at(pt)
 
     # ------------------------------------------------------------- messaging
+    def _render(self):
+        try:
+            self.pl.render()
+        except Exception:
+            pass
+
+    def _draw_help(self):
+        text = HELP_TEXT if self.help_expanded else HELP_TEXT_COMPACT
+        try:
+            self.pl.add_text(text, font_size=9, name="help",
+                             position="upper_left", font="courier",
+                             color="white", render=False)
+            self._render()
+        except Exception:
+            pass
+
+    def _toggle_help(self):
+        self.help_expanded = not self.help_expanded
+        self._draw_help()
+
+    def _dose_state(self):
+        if self._dose_volume is None:
+            return "not computed (press U)"
+        return "STALE, press U" if self._dose_stale else "up to date"
+
     def _update_status(self, extra: str = ""):
         n_full = sum(1 for t in self.tiles if t.kind == "full")
         n_half = len(self.tiles) - n_full
-        sel = ("tile %d/%d selected" % (self.selected + 1, len(self.tiles))
-               if 0 <= self.selected < len(self.tiles) else "no tile selected")
-        text = "tiles: %d full + %d half | next drop: %s | %s" % (
-            n_full, n_half, self.next_kind, sel)
+        n_placed = sum(len(t.seed_centers) for t in self.tiles)
+        n_det = len(self.result.seeds)
+        if 0 <= self.selected < len(self.tiles):
+            sel = "tile %d/%d selected (%s)" % (
+                self.selected + 1, len(self.tiles),
+                self.tiles[self.selected].kind)
+        else:
+            sel = "no tile selected"
+        # no '|' separators: VTK's text renderer draws them as wide gaps
+        text = ("tiles: %d full + %d half = %d seeds placed, %d detected"
+                "    next drop: %s    %s\n"
+                "rx %.0f cGy    dose %s    isodoses %s" % (
+                    n_full, n_half, n_placed, n_det, self.next_kind.upper(),
+                    sel, self.rx_cgy, self._dose_state(),
+                    ("none" if not self._iso_shown else
+                     "shown" if self.isodose_visible else "hidden")))
         if extra:
             text += "\n" + extra
         for i, j in self._overlap_pairs[:4]:  # tile numbers as displayed (1-based)
             text += "\nWARNING: tiles %d & %d overlap" % (i + 1, j + 1)
         self._last_status = text
         try:
+            # explicit colour: the theme default is BLACK, invisible on the
+            # black background (the legend was unreadable for that reason)
             self.pl.add_text(text, font_size=10, name="status",
-                             position="lower_left")
+                             position="lower_left", color="white")
             self.pl.render()
         except Exception:
             pass
@@ -395,11 +755,49 @@ class _PlannerApp:
                 clean.append((i, j))
         self._overlap_pairs = clean
 
+    def _flagged(self):
+        return frozenset(i for pair in self._overlap_pairs for i in pair)
+
     def _after_change(self, extra: str = ""):
         """One funnel for every tile mutation: overlaps -> redraw -> status."""
         self._refresh_overlaps()
         self._redraw_tiles()
+        if self._dose_report is not None and not self._dose_stale:
+            self._dose_stale = True  # seeds moved: the panel no longer applies
+            self._draw_dose_panel()
         self._update_status(extra)
+
+    # ------------------------------------------------------------------ undo
+    def _push_history(self):
+        """Snapshot the board before a mutation (tiles are immutable values)."""
+        self._history.append((list(self.tiles), list(self._tile_ids),
+                              self.selected))
+        del self._history[:-UNDO_DEPTH]
+
+    def undo(self):
+        if not self._history:
+            self._update_status("nothing to undo")
+            return
+        if self._drag_idx >= 0:  # never unwind under an active grab
+            self._drag_idx = -1
+            self._drag_pending_xy = self._drag_applied_xy = None
+        tiles, ids, selected = self._history.pop()
+        for tid in set(self._tile_ids) - set(ids):
+            self._remove_tile_actors(tid)
+        self.tiles, self._tile_ids = tiles, ids
+        self.selected = selected if 0 <= selected < len(tiles) \
+            else len(tiles) - 1
+        self._hover_idx = -1
+        self._after_change("undo (%d left)" % len(self._history))
+
+    def _remove_tile_actors(self, tid):
+        self._tile_actors.pop(tid, None)
+        for suffix in ("quad", "edge", "seeds"):
+            try:
+                self.pl.remove_actor("tile_%d_%s" % (tid, suffix),
+                                     render=False)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------ tiles
     def drop_at(self, point_ras, kind: Optional[str] = None):
@@ -415,6 +813,8 @@ class _PlannerApp:
         # falling back to any tangent if that is degenerate
         hint = self._camera_right()
         tile = conform_tile(self.cavity, surf, n_in, hint, kind=kind)
+        self._hide_ghost()  # the real tile takes the preview's place
+        self._push_history()
         self.tiles.append(tile)
         self._tile_ids.append(self._next_id)
         self._next_id += 1
@@ -424,6 +824,7 @@ class _PlannerApp:
 
     def _toggle_kind(self):
         self.next_kind = "half" if self.next_kind == "full" else "full"
+        self._hide_ghost()  # next hover rebuilds it at the new size
         self._update_status()
 
     def _cycle_selection(self):
@@ -437,16 +838,13 @@ class _PlannerApp:
     def _delete_selected(self):
         if not (0 <= self.selected < len(self.tiles)):
             return
+        self._push_history()
         tid = self._tile_ids.pop(self.selected)
         self.tiles.pop(self.selected)
-        self._tile_actors.pop(tid, None)
         if self._drag_idx == self.selected:
             self._drag_idx = -1
-        for suffix in ("quad", "seeds"):
-            try:
-                self.pl.remove_actor("tile_%d_%s" % (tid, suffix))
-            except Exception:
-                pass
+        self._hover_idx = -1  # indices shifted; the next move re-picks
+        self._remove_tile_actors(tid)
         self.selected = min(self.selected, len(self.tiles) - 1)
         self._after_change("tile deleted")
 
@@ -486,50 +884,64 @@ class _PlannerApp:
         if norm < 1e-6:
             return
         delta = TRANSLATE_STEP_MM * move / norm
+        self._push_history()
         self.tiles[self.selected] = translate_on_wall(self.cavity, tile, delta)
         self._after_change()
 
     def _rotate_selected(self, angle_rad: float):
         if not (0 <= self.selected < len(self.tiles)):
             return
+        self._push_history()
         self.tiles[self.selected] = rotate_on_wall(
             self.cavity, self.tiles[self.selected], angle_rad)
         self._after_change()
 
-    def _redraw_tiles(self):
+    # -------------------------------------------------------------- drawing
+    def _tile_state(self, i):
+        if i == self._drag_idx:
+            return "dragging"
+        if i == self.selected:
+            return "selected"
+        if i == self._hover_idx:
+            return "hover"
+        return "normal"
+
+    def _tile_style(self, i):
+        state = self._tile_state(i)
+        style = dict(_TILE_STYLE[state])
+        if i in self._flagged():  # red-ish tint until the overlap is resolved
+            style["color"] = _OVERLAP_COLOR[state]
+            if style["outline"] is not None:
+                style["outline"] = "white"
+        return style
+
+    def _redraw_tile(self, i):
+        """(Re)build the actors of tile ``i`` (quad, outline, seeds); no render."""
         pv, pl = self.pv, self.pl
-        flagged = set()
-        for i, j in self._overlap_pairs:
-            flagged.add(i)
-            flagged.add(j)
-        for i, (tile, tid) in enumerate(zip(self.tiles, self._tile_ids)):
-            selected = i == self.selected
-            if i in flagged:  # red-ish tint until the overlap is resolved
-                color = "orangered" if selected else "red"
-            else:
-                color = "springgreen" if selected else "green"
-            quad = pv.PolyData(
-                np.asarray(tile.corners_ras, dtype=float),
-                np.array([3, 0, 1, 2, 3, 0, 2, 3], dtype=np.int64),
-            )
-            self._tile_actors[tid] = pl.add_mesh(
-                quad, name="tile_%d_quad" % tid,
-                color=color,
-                opacity=0.75 if selected else 0.45,
-                show_edges=selected, edge_color="white",
-            )
-            seed_polys = None
-            for c, a in zip(tile.seed_centers, tile.seed_axes):
-                cyl = pv.Cylinder(center=c, direction=a, radius=0.6,
-                                  height=SEED_LENGTH_MM)
-                seed_polys = cyl if seed_polys is None else seed_polys + cyl
-            if seed_polys is not None:
-                pl.add_mesh(seed_polys, name="tile_%d_seeds" % tid,
-                            color="gold", specular=0.8)
-        try:
-            pl.render()
-        except Exception:
-            pass
+        tile, tid = self.tiles[i], self._tile_ids[i]
+        style = self._tile_style(i)
+        self._tile_actors[tid] = pl.add_mesh(
+            _quad_polydata(pv, tile), name="tile_%d_quad" % tid,
+            color=style["color"], opacity=style["opacity"], reset_camera=False)
+        edge_name = "tile_%d_edge" % tid
+        if style["outline"] is not None:
+            pl.add_mesh(_outline_polydata(pv, tile), name=edge_name,
+                        color=style["outline"], line_width=style["line_width"],
+                        pickable=False, reset_camera=False)
+        else:
+            try:
+                pl.remove_actor(edge_name, render=False)
+            except Exception:
+                pass
+        seeds = _seed_polydata(pv, tile)
+        if seeds is not None:
+            pl.add_mesh(seeds, name="tile_%d_seeds" % tid, color="gold",
+                        specular=0.8, reset_camera=False)
+
+    def _redraw_tiles(self):
+        for i in range(len(self.tiles)):
+            self._redraw_tile(i)
+        self._render()
 
     # ------------------------------------------------------------------- dose
     def update_dose(self):
@@ -553,22 +965,55 @@ class _PlannerApp:
 
         bounds = np.vstack([centers.min(axis=0) - DOSE_PAD_MM,
                             centers.max(axis=0) + DOSE_PAD_MM])
-        levels = [frac * self.rx_cgy for frac, _n, _c in _ISO_STYLE]
         try:
             dose_volume = compute_dose_grid(centers, axes, bounds,
                                             spacing_mm=DOSE_SPACING_MM)
-            surfaces = isodose_surfaces(dose_volume, levels)
         except (ImportError, AttributeError):
             self._update_status("dose engine not available yet")
             return
         except Exception as exc:  # engine present but unhappy: stay alive
             self._update_status("dose update failed: %s" % exc)
             return
+        self._dose_volume = dose_volume
+        self._dose_n_seeds = int(centers.shape[0])
+        self._dose_stale = False
+        self._refresh_from_dose_volume()
 
+    def set_rx(self, rx_cgy: float):
+        """Change the prescription; isodoses and panel re-cut from the grid."""
+        rx = max(RX_STEP_CGY, float(rx_cgy))
+        if rx == self.rx_cgy:
+            return
+        self.rx_cgy = rx
+        if self._dose_volume is None:
+            self._update_status("prescription set to %.0f cGy" % rx)
+            return
+        self._refresh_from_dose_volume(
+            "prescription %.0f cGy: isodoses re-cut" % rx)
+
+    def _refresh_from_dose_volume(self, note: str = ""):
+        """Isodose shells + panel from the stored grid at the current rx."""
+        try:
+            from .dose import isodose_surfaces
+            levels = [frac * self.rx_cgy for frac, _n, _c in _ISO_STYLE]
+            surfaces = isodose_surfaces(self._dose_volume, levels)
+        except Exception as exc:
+            self._update_status("isodose extraction failed: %s" % exc)
+            return
+        shown = self._draw_isodoses(surfaces)
+        self._dose_report = self._compute_report(self._dose_volume)
+        self._draw_dose_panel()
+        self._update_status(note or (
+            "isodose over %d seeds: %s of rx %.0f cGy"
+            % (self._dose_n_seeds,
+               "/".join(shown) if shown else "none in grid", self.rx_cgy)))
+
+    def _draw_isodoses(self, surfaces):
         shown = []
+        self._iso_shown = []
         for frac, name, color in _ISO_STYLE:
             try:
-                self.pl.remove_actor(name)
+                self.pl.remove_actor(name, render=False)
             except Exception:
                 pass
             level = frac * self.rx_cgy
@@ -586,13 +1031,165 @@ class _PlannerApp:
             if surf is None or getattr(surf, "vertices", None) is None \
                     or len(surf.vertices) == 0 or len(surf.faces) == 0:
                 continue
-            self.pl.add_mesh(_to_pv(self.pv, surf), name=name, color=color,
-                             opacity=0.35)
+            actor = self.pl.add_mesh(_to_pv(self.pv, surf), name=name,
+                                     color=color, opacity=0.35,
+                                     reset_camera=False)
+            try:
+                actor.SetVisibility(bool(self.isodose_visible))
+            except Exception:
+                pass
+            self._iso_shown.append(name)
             shown.append("%d%%" % round(100 * frac))
-        self._update_status(
-            "isodose over %d seeds: %s of rx %.0f cGy"
-            % (len(centers), "/".join(shown) if shown else "none in grid",
-               self.rx_cgy))
+        return shown
+
+    def _toggle_isodoses(self):
+        self.isodose_visible = not self.isodose_visible
+        for name in self._iso_shown:
+            try:
+                self.pl.actors[name].SetVisibility(bool(self.isodose_visible))
+            except Exception:
+                pass
+        self._set_button("iso", self.isodose_visible)
+        self._render()
+        self._update_status("isodoses %s"
+                            % ("shown" if self.isodose_visible else "hidden"))
+
+    def clear_isodoses(self):
+        """Remove the isodose shells from the scene (the dose grid and the
+        panel stay valid; U recomputes, +/- re-cut them from the grid)."""
+        if not self._iso_shown:
+            self._update_status("no isodoses on screen")
+            return
+        for name in self._iso_shown:
+            try:
+                self.pl.remove_actor(name, render=False)
+            except Exception:
+                pass
+        self._iso_shown = []
+        self._render()
+        self._update_status("isodoses cleared -- U recomputes them")
+
+    # ----------------------------------------------------------------- export
+    def save_plan(self, path: Optional[str] = None):
+        """Write detected + placed seeds (RAS mm) to a CSV; returns the path."""
+        import os
+        import time as _time
+
+        from .interact import export_plan_csv
+        if path is None:
+            root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            out_dir = os.path.join(root, "output")
+            os.makedirs(out_dir, exist_ok=True)
+            path = os.path.join(out_dir, _time.strftime("plan_%Y%m%d_%H%M%S.csv"))
+        try:
+            n = export_plan_csv(path, self.tiles,
+                                self.result.seeds.centers_ras,
+                                self.result.seeds.axes_ras, rx_cgy=self.rx_cgy)
+        except Exception as exc:
+            self._update_status("save failed: %s" % exc)
+            return None
+        self._update_status("plan saved: %d seeds -> %s" % (n, path))
+        return path
+
+    def _compute_report(self, dose_volume):
+        """Shell DVH report over the cavity wall, or None when not possible."""
+        if self.cavity is None or not len(self.cavity.vertices):
+            return None
+        try:
+            from .dose.dvh import shell_report
+            return shell_report(dose_volume, self.cavity, self.rx_cgy,
+                                offsets_mm=SHELL_OFFSETS_MM)
+        except Exception:
+            return None
+
+    # ------------------------------------------------------------ dose panel
+    def _dose_panel_lines(self):
+        header = "DOSE  rx %.0f cGy   %d seeds   %g mm grid" % (
+            self.rx_cgy, self._dose_n_seeds, DOSE_SPACING_MM)
+        if self._dose_report is None:
+            body = "no cavity wall to score"
+        else:
+            from .dose.dvh import format_report
+            body = format_report(self._dose_report, self.rx_cgy)
+        lines = [header] + body.splitlines()
+        if self._dose_stale:
+            lines.append("STALE -- tiles changed, press u")
+        return "\n".join(lines)
+
+    def _draw_dose_panel(self):
+        """Text table (upper right) + shell-DVH chart (lower right)."""
+        if self._dose_volume is None:
+            return
+        self._dose_panel_text = self._dose_panel_lines()
+        try:
+            if self.dose_panel_visible:
+                # a positioned (viewport) text actor keeps the fixed-width
+                # table left-justified; the corner annotation would
+                # right-justify each line after trimming its padding
+                actor = self.pl.add_text(
+                    self._dose_panel_text, font_size=9, name="dose",
+                    position=DOSE_PANEL_POS, viewport=True, font="courier",
+                    color="gray" if self._dose_stale else "white",
+                    render=False)
+                try:
+                    actor.prop.justification_horizontal = "left"
+                    actor.prop.justification_vertical = "top"
+                except Exception:
+                    pass
+            else:
+                self.pl.remove_actor("dose", render=False)
+        except Exception:
+            pass
+        self._draw_dvh_chart()
+        self._render()
+
+    def _draw_dvh_chart(self):
+        """Cumulative DVH per shell; any chart failure is non-fatal."""
+        report = self._dose_report
+        pv = self.pv
+        try:
+            if report is None:
+                if self._dvh_chart is not None:
+                    self._dvh_chart.visible = False
+                return
+            if self._dvh_chart is None:
+                chart = pv.Chart2D(size=(0.30, 0.28), loc=(0.69, 0.02),
+                                   x_label="dose [% of rx]",
+                                   y_label="shell fraction [%]")
+                chart.x_range = [0.0, 300.0]
+                chart.y_range = [0.0, 100.0]
+                chart.background_color = (1.0, 1.0, 1.0, 0.85)
+                chart.legend_visible = True
+                self.pl.add_chart(chart)
+                self._dvh_chart = chart
+            chart = self._dvh_chart
+            chart.title = "shell DVH%s" % (" (STALE)" if self._dose_stale else "")
+            for k, (off, entry) in enumerate(report.items()):
+                x = 100.0 * np.asarray(entry["curve_x"], dtype=float)
+                y = 100.0 * np.asarray(entry["curve_y"], dtype=float)
+                line = self._dvh_lines.get(off)
+                if line is None:
+                    label = "wall" if abs(off) < 1e-9 else "+%g mm" % off
+                    line = chart.line(x, y, width=2, label=label,
+                                      color=_SHELL_COLOR[k % len(_SHELL_COLOR)])
+                    self._dvh_lines[off] = line
+                else:
+                    line.update(x, y)
+            chart.visible = bool(self.dose_panel_visible)
+        except Exception:
+            self._dvh_chart = None
+            self._dvh_lines = {}
+
+    def _toggle_dose_panel(self):
+        self.dose_panel_visible = not self.dose_panel_visible
+        self._set_button("panel", self.dose_panel_visible)
+        if self._dose_volume is None:
+            self._update_status("dose panel %s (press u to compute dose)"
+                                % ("on" if self.dose_panel_visible else "off"))
+            return
+        self._draw_dose_panel()
+        self._update_status("dose panel %s"
+                            % ("on" if self.dose_panel_visible else "off"))
 
     # -------------------------------------------------------------------- run
     def show(self):

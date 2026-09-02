@@ -13,7 +13,14 @@ off-screen plotter built on the phantom scene:
   relocated tile stays conformed (seeds 1.2-3.0 mm off the wall on the
   cavity side),
 - overlap warnings are wired defensively through
-  ``gtcore.interact.find_overlapping_tiles``.
+  ``gtcore.interact.find_overlapping_tiles``,
+- the ghost preview follows the wall under the cursor, hides off the wall
+  and during camera gestures, turns red when the drop would overlap, and
+  the drop lands exactly where the ghost showed it,
+- hovering an unselected tile lights it up as grab-able,
+- drag pacing never loses the final cursor position on release,
+- the dose panel reports wall/+5/+10 mm shells and goes STALE when a tile
+  moves after the last update.
 """
 from __future__ import annotations
 
@@ -215,3 +222,360 @@ def test_overlap_detector_failure_is_silent(app, monkeypatch):
     assert len(app.tiles) == 2
     assert app._overlap_pairs == []
     assert "WARNING" not in app._last_status
+
+
+# ------------------------------------------------------------ ghost preview
+def _move(planner, x, y):
+    planner._ghost_last_t = 0.0  # defeat the wall-clock pacing in tests
+    iren = _iren(planner)
+    iren.SetEventPosition(x, y)
+    iren.InvokeEvent("MouseMoveEvent")
+
+
+def test_ghost_follows_wall_hover_and_hides_off_wall(app):
+    x, y = _cavity_aim(app)
+    _move(app, x, y)
+    assert app._ghost_tile is not None, "hovering the wall must show a ghost"
+    assert app._ghost_tile.kind == "full"
+    assert "ghost_quad" in app.pl.actors and "ghost_edge" in app.pl.actors
+    assert len(app.tiles) == 0, "a ghost is not a placed tile"
+    # ghost is conformed at the cursor's wall point, on the wall
+    _surf, dist, _tid = trimesh.proximity.closest_point(
+        app.cavity, [app._ghost_tile.anchor_ras])
+    assert dist[0] < 0.5
+
+    _move(app, 3, 3)
+    assert app._ghost_tile is None
+    assert "ghost_quad" not in app.pl.actors
+
+
+def test_ghost_tracks_next_kind_and_toggle(app):
+    x, y = _cavity_aim(app)
+    app._toggle_kind()  # next drop: half
+    _move(app, x, y)
+    assert app._ghost_tile.kind == "half"
+    app._toggle_ghost()
+    assert not app.ghost_enabled and app._ghost_tile is None
+    _move(app, x, y)
+    assert app._ghost_tile is None, "disabled ghost must not reappear"
+    app._toggle_ghost()
+    _move(app, x, y)
+    assert app._ghost_tile is not None
+
+
+def test_ghost_turns_red_when_drop_would_overlap(app, monkeypatch):
+    import gtcore.interact as interact_mod
+
+    x, y = _cavity_aim(app)
+    _right_click(app, x, y)
+    assert len(app.tiles) == 1
+    assert app._ghost_tile is None, "placing replaces the preview"
+
+    # the detector says: whatever is last in the list overlaps tile 0
+    monkeypatch.setattr(interact_mod, "find_overlapping_tiles",
+                        lambda tiles, threshold_mm=1.0: [(0, len(tiles) - 1)],
+                        raising=False)
+    _move(app, x + 60, y + 15)  # beside the tile, still on the wall
+    assert app._ghost_tile is not None
+    assert app._ghost_overlaps is True
+    assert app._overlap_pairs == [], "a preview must not raise a real warning"
+
+    monkeypatch.setattr(interact_mod, "find_overlapping_tiles",
+                        lambda tiles, threshold_mm=1.0: [], raising=False)
+    _move(app, x + 62, y + 16)
+    assert app._ghost_overlaps is False
+
+
+def test_placement_hides_ghost_and_drops_at_cursor(app):
+    x, y = _cavity_aim(app)
+    _move(app, x, y)
+    ghost_anchor = app._ghost_tile.anchor_ras.copy()
+    _right_click(app, x, y)
+    assert app._ghost_tile is None and "ghost_quad" not in app.pl.actors
+    assert np.linalg.norm(app.tiles[0].anchor_ras - ghost_anchor) < 0.5, (
+        "the dropped tile must land where the ghost showed it")
+
+
+# ------------------------------------------------------- hover highlighting
+def test_hover_highlights_unselected_tile(app):
+    verts = np.asarray(app.cavity.vertices)
+    x, y = _cavity_aim(app)
+    _right_click(app, x, y)
+    app.drop_at(verts[len(verts) // 2])  # second tile becomes the selection
+    assert app.selected == 1
+    assert "tile_1_edge" in app.pl.actors, "selected tile carries an outline"
+    assert "tile_0_edge" not in app.pl.actors
+
+    gx, gy = _display_xy(app, app.tiles[0].anchor_ras)
+    _move(app, gx, gy)
+    assert app._hover_idx == 0
+    assert app._tile_state(0) == "hover"
+    assert "tile_0_edge" in app.pl.actors, "hovered tile lights up"
+    assert app._ghost_tile is None, "no ghost while offering a grab"
+
+    _move(app, 3, 3)
+    assert app._hover_idx == -1
+    assert "tile_0_edge" not in app.pl.actors
+
+
+def test_camera_gesture_pauses_hover_and_ghost(app):
+    x, y = _cavity_aim(app)
+    style = _iren(app).GetInteractorStyle()
+    style.StartRotate()
+    try:
+        assert app._camera_busy()
+        _move(app, x, y)
+        assert app._ghost_tile is None
+    finally:
+        style.EndRotate()
+    assert not app._camera_busy()
+    x, y = _cavity_aim(app)  # the style rotated the camera on that move
+    _move(app, x, y)
+    assert app._ghost_tile is not None
+
+
+# ---------------------------------------------------------- drag pacing
+def test_drag_release_lands_at_final_cursor_even_when_paced(app):
+    x, y = _cavity_aim(app)
+    _right_click(app, x, y)
+    gx, gy = _display_xy(app, app.tiles[0].anchor_ras)
+    app.drag_min_interval_s = 1e9  # every move after the first is paced out
+
+    iren = _iren(app)
+    iren.SetControlKey(1)
+    iren.SetEventPosition(gx, gy)
+    iren.InvokeEvent("LeftButtonPressEvent")
+    assert app._drag_idx == 0
+    assert app._tile_state(0) == "dragging"
+    for frac in np.linspace(0.0, 1.0, 12):
+        iren.SetEventPosition(int(gx + 60 * frac), int(gy + 15 * frac))
+        iren.InvokeEvent("MouseMoveEvent")
+    assert app._drag_applied_xy == (gx, gy), "burst was paced to one conform"
+    assert app._drag_pending_xy == (gx + 60, gy + 15)
+    expect = app._pick_cavity_point(gx + 60, gy + 15)
+    assert expect is not None, "test geometry: end point must be on the wall"
+
+    iren.InvokeEvent("LeftButtonReleaseEvent")
+    iren.SetControlKey(0)
+    assert app._drag_idx == -1
+    assert np.linalg.norm(app.tiles[0].anchor_ras - expect) < 0.5, (
+        "the drop must use the final cursor position, not the last paced one")
+    assert app._drag_pending_xy is None and app._drag_applied_xy is None
+    assert app._tile_state(0) == "selected"
+
+
+# ------------------------------------------------------------- dose panel
+def test_dose_panel_reports_shells_and_goes_stale(app):
+    x, y = _cavity_aim(app)
+    _right_click(app, x, y)
+    assert app._dose_panel_text == ""
+    app.update_dose()
+    if "dose engine" in app._last_status or "failed" in app._last_status:
+        pytest.skip("dose engine unavailable: %s" % app._last_status)
+    text = app._dose_panel_text
+    assert "DOSE" in text and "rx 6000" in text
+    for shell in ("wall", "+5 mm", "+10 mm"):
+        assert shell in text
+    assert "STALE" not in text
+    assert "dose" in app.pl.actors
+    assert app._dose_report is not None and list(app._dose_report) == [0.0, 5.0, 10.0]
+
+    app._rotate_selected(0.2)  # seeds moved: numbers no longer apply
+    assert app._dose_stale
+    assert "STALE" in app._dose_panel_text
+
+    app._toggle_dose_panel()
+    assert not app.dose_panel_visible
+    assert "dose" not in app.pl.actors
+    if app._dvh_chart is not None:
+        assert not app._dvh_chart.visible
+    app._toggle_dose_panel()
+    assert "dose" in app.pl.actors
+
+    app.update_dose()
+    assert not app._dose_stale and "STALE" not in app._dose_panel_text
+
+
+# ------------------------------------------------------------- key legend
+def test_every_bound_key_is_in_the_legend(app):
+    """Physicists learn the tool from the on-screen legend: every key that
+    ``_bind_interaction`` binds must be named there (and vice versa keys
+    named there must do something)."""
+    from gtcore.planner import HELP_TEXT
+    legend = HELP_TEXT
+    for token in ("right-click", "P", "H", "Ctrl", "Tab", "arrows", "[  ]",
+                  "X / Del", "Z", "U", "+  -", "I", "D", "S", "R", "G", "?"):
+        assert token in legend, "legend lacks %r" % token
+    assert app.help_expanded
+    app._toggle_help()
+    assert not app.help_expanded
+    assert "help" in app.pl.actors
+    app._toggle_help()
+    assert app.help_expanded
+
+
+def test_status_line_reports_counts_rx_and_dose_state(app):
+    x, y = _cavity_aim(app)
+    _right_click(app, x, y)
+    s = app._last_status
+    assert "1 full + 0 half = 4 seeds placed" in s
+    assert "%d detected" % len(app.result.seeds) in s
+    assert "rx 6000 cGy" in s and "not computed" in s
+    assert "next drop: FULL" in s and "selected (full)" in s
+
+
+# ------------------------------------------------------------------- undo
+def test_undo_reverts_place_move_rotate_delete(app):
+    x, y = _cavity_aim(app)
+    assert not app._history
+    app.undo()
+    assert "nothing to undo" in app._last_status
+
+    _right_click(app, x, y)
+    t0 = app.tiles[0]
+    app._rotate_selected(0.3)
+    assert not np.allclose(app.tiles[0].axis_ras, t0.axis_ras)
+    app.undo()
+    assert len(app.tiles) == 1
+    assert np.allclose(app.tiles[0].axis_ras, t0.axis_ras)
+
+    app._translate_selected(1.0, 0.0)
+    assert np.linalg.norm(app.tiles[0].anchor_ras - t0.anchor_ras) > 0.5
+    app.undo()
+    assert np.allclose(app.tiles[0].anchor_ras, t0.anchor_ras)
+
+    app._delete_selected()
+    assert len(app.tiles) == 0 and "tile_0_quad" not in app.pl.actors
+    app.undo()
+    assert len(app.tiles) == 1 and "tile_0_quad" in app.pl.actors
+    assert app.selected == 0
+
+    app.undo()  # the placement itself
+    assert len(app.tiles) == 0 and "tile_0_quad" not in app.pl.actors
+    assert not app._history
+
+
+def test_drag_is_one_undo_step(app):
+    x, y = _cavity_aim(app)
+    _right_click(app, x, y)
+    start = app.tiles[0]
+    gx, gy = _display_xy(app, start.anchor_ras)
+    iren = _iren(app)
+    iren.SetControlKey(1)
+    iren.SetEventPosition(gx, gy)
+    iren.InvokeEvent("LeftButtonPressEvent")
+    for frac in np.linspace(0.0, 1.0, 6):
+        app._drag_last_t = float("-inf")  # apply every move
+        iren.SetEventPosition(int(gx + 60 * frac), int(gy + 15 * frac))
+        iren.InvokeEvent("MouseMoveEvent")
+    iren.InvokeEvent("LeftButtonReleaseEvent")
+    iren.SetControlKey(0)
+    assert np.linalg.norm(app.tiles[0].anchor_ras - start.anchor_ras) > 0.5
+    assert len(app._history) == 2  # place + drag
+    app.undo()
+    assert np.allclose(app.tiles[0].anchor_ras, start.anchor_ras)
+
+
+# ------------------------------------------------- rx change + isodose toggle
+def test_rx_change_recuts_isodoses_and_panel(app):
+    x, y = _cavity_aim(app)
+    _right_click(app, x, y)
+    app.set_rx(5000.0)
+    assert app.rx_cgy == 5000.0 and "5000" in app._last_status
+    app.update_dose()
+    if "dose engine" in app._last_status or "failed" in app._last_status:
+        pytest.skip("dose engine unavailable: %s" % app._last_status)
+    v100_before = app._dose_report[0.0]["stats"]["V100"]
+    app.set_rx(2500.0)  # halve rx: strictly more of the wall is covered
+    assert "rx 2500" in app._dose_panel_text
+    assert app._dose_report[0.0]["stats"]["V100"] >= v100_before
+    assert not app._dose_stale, "re-cutting at a new rx is not a stale board"
+    assert "iso_100" in app.pl.actors
+
+    app._toggle_isodoses()
+    assert not app.isodose_visible
+    assert not app.pl.actors["iso_100"].GetVisibility()
+    assert "isodoses hidden" in app._last_status
+    app._toggle_isodoses()
+    assert app.pl.actors["iso_100"].GetVisibility()
+
+    app.set_rx(0.0)  # clamps, never zero
+    assert app.rx_cgy > 0.0
+
+
+# ------------------------------------------------------------------ export
+def test_save_plan_writes_all_seeds(app, tmp_path):
+    import csv
+
+    x, y = _cavity_aim(app)
+    _right_click(app, x, y)
+    app._toggle_kind()
+    app.drop_at(np.asarray(app.cavity.vertices)[len(app.cavity.vertices) // 2])
+    out = str(tmp_path / "plan.csv")
+    assert app.save_plan(out) == out
+    assert "plan saved" in app._last_status
+    with open(out) as fh:
+        lines = [ln for ln in fh.read().splitlines() if ln.strip()]
+    assert lines[0] == "# rx_cgy=6000.0"
+    rows = list(csv.DictReader(lines[1:]))
+    n_det = len(app.result.seeds)
+    assert len(rows) == n_det + 4 + 2
+    placed = [r for r in rows if r["source"] == "placed"]
+    assert {r["kind"] for r in placed} == {"full", "half"}
+    assert {r["tile"] for r in placed} == {"1", "2"}
+    seed = placed[0]
+    xyz = np.array([float(seed[k]) for k in ("x_mm", "y_mm", "z_mm")])
+    assert np.allclose(xyz, app.tiles[0].seed_centers[0], atol=1e-3)
+    axis = np.array([float(seed[k]) for k in ("ax", "ay", "az")])
+    assert abs(np.linalg.norm(axis) - 1.0) < 1e-3
+
+
+# --------------------------------------------------- clear isodoses + buttons
+def test_clear_isodoses_key_and_button(app):
+    x, y = _cavity_aim(app)
+    _right_click(app, x, y)
+    app.clear_isodoses()
+    assert "no isodoses" in app._last_status
+    app.update_dose()
+    if "dose engine" in app._last_status or "failed" in app._last_status:
+        pytest.skip("dose engine unavailable: %s" % app._last_status)
+    assert app._iso_shown and all(n in app.pl.actors for n in app._iso_shown)
+    assert "isodoses shown" in app._last_status
+
+    names = list(app._iso_shown)
+    app.clear_isodoses()
+    assert app._iso_shown == []
+    assert all(n not in app.pl.actors for n in names)
+    assert "isodoses cleared" in app._last_status and "isodoses none" in app._last_status
+    assert app._dose_volume is not None, "the grid + panel survive a clear"
+    assert "DOSE" in app._dose_panel_text
+
+    app.set_rx(app.rx_cgy - 100.0)  # re-cut from the grid brings them back
+    assert app._iso_shown
+
+    if "clear" in app._buttons:  # clickable button path (needs an interactor)
+        app._button_clear(1)
+        assert app._iso_shown == []
+        assert app._buttons["clear"].GetRepresentation().GetState() == 0
+    if "iso" in app._buttons:
+        app.update_dose()
+        app._button_isodoses(0)
+        assert not app.isodose_visible
+        assert not app.pl.actors[app._iso_shown[0]].GetVisibility()
+        app._toggle_isodoses()  # key path keeps the widget in sync
+        assert app._buttons["iso"].GetRepresentation().GetState() == 1
+    if "panel" in app._buttons:
+        app._button_panel(0)
+        assert not app.dose_panel_visible and "dose" not in app.pl.actors
+        app._button_panel(1)
+        assert app.dose_panel_visible
+
+
+def test_overlay_text_is_visible_on_black(app):
+    """Regression: the theme's default font colour is black, so the legend
+    and status bar were invisible on the black background."""
+    for name in ("help", "status"):
+        actor = app.pl.actors[name]
+        rgb = tuple(actor.prop.color.float_rgb)
+        assert max(rgb) > 0.5, "%s text colour %r would vanish on black" % (
+            name, rgb)

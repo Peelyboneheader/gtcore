@@ -20,9 +20,20 @@ From this folder (`gt.bat` wraps the project venv — no activation needed):
 .\gt test                           run the test suite (163 tests)
 ```
 
-Planner controls: pick on the cavity wall to drop a conformed tile (`h` = half
-tile), `tab` select, arrows translate along the wall, `[` `]` rotate, `x`
-delete, `u` = recompute TG-43 dose and redraw 100/50/25% isodose shells.
+Planner controls (the same legend is on screen; `?` collapses it):
+
+| Group | Key / mouse | Action |
+|---|---|---|
+| Place | hover the blue wall | white **ghost tile** previews the next drop (red = would overlap) |
+| | right-click or `P` | drop the tile there; `H` = next tile full / half |
+| Adjust | Ctrl + left-drag | grab a tile and slide it along the wall (hovered tile lights up) |
+| | `Tab`, arrows, `[` `]` | select next tile, nudge 2 mm, rotate 10 deg |
+| | `X` / `Del`, `Z` | delete tile, undo last change (50 steps) |
+| Dose | `U` | TG-43 dose grid, 100/50/25 % isodoses (red/orange/yellow) and the **dose panel** (D90/D50/Dmin/V100/V150 on the cavity wall and +5/+10 mm tissue shells + shell DVH; flagged STALE when a tile moves) |
+| | `+` `-` | prescription +/- 100 cGy, isodoses re-cut from the grid |
+| | `I`, `C`, `D` | isodoses on/off, clear isodoses, dose panel on/off (also clickable buttons above the DVH chart) |
+| Export | `S` | save every seed (detected + placed, RAS mm + axis) to `output/plan_<timestamp>.csv` |
+| View | left/right/middle-drag, `R`, `G` | rotate / zoom / pan, reset camera, ghost preview on/off |
 
 ## Pipeline (and why the order matters)
 
@@ -53,7 +64,9 @@ delete, `u` = recompute TG-43 dose and redraw 100/50/25% isodose shells.
    explicit parameter to be fed from the assay certificate.
 7. **`gtcore.interact` / `gtcore.planner`** — snap-to-wall + curvature
    conforming for placed tiles (pure geometry, unit-tested against phantom
-   truth) and the interactive planner on top.
+   truth) and the interactive planner on top; `gtcore.dose.dvh` scores
+   cavity-wall shells (offset outward into tissue) for the planner's dose
+   panel.
 
 `gtcore.pipeline.reconstruct(vol, n_full_tiles=..., n_half_tiles=...)` runs
 1→5 in one call; `gtcore.phantom` provides the synthetic ground-truth head
