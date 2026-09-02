@@ -695,3 +695,54 @@ def test_shadowing_sweep_stays_within_budget():
     tile_shadowing(tiles)
     elapsed = time.perf_counter() - t0
     assert elapsed < 4.0, "tile shadowing sweep took %.2f s" % elapsed
+
+
+def test_shadowing_is_sane_on_tiles_adopted_from_a_scan():
+    """Tiles recovered from the scan must work, not just hand-dropped ones.
+
+    The planner adopts fitted tiles as placed tiles at startup, so these --
+    the tiles actually in the patient -- are what the shadowing check sees
+    first.  The contract that matters is the sign of the tile normal: it
+    points INTO the cavity, so prescription points must land on the far
+    side, in tissue.  Get that backwards and every reading is taken inside
+    the cavity lumen and silently meaningless.
+    """
+    from gtcore.dose.interference import (
+        find_shadowing_tiles,
+        tile_prescription_points,
+        tile_shadowing,
+    )
+    from gtcore.interact import conform_tile, snap_to_wall
+    from gtcore.phantom import make_head_phantom
+    from gtcore.pipeline import reconstruct
+
+    vol, _truth = make_head_phantom(spacing=1.0)
+    result = reconstruct(vol, n_full_tiles=3, verbose=False)
+    mesh = result.meshes.get("cavity")
+    if mesh is None or not len(mesh.vertices):
+        pytest.skip("pipeline found no cavity on this phantom")
+    fit = getattr(result, "tiles", None)
+    if fit is None or not getattr(fit, "tiles", None):
+        pytest.skip("pipeline recovered no tiles on this phantom")
+
+    # Mirror the planner's adoption path exactly.
+    tiles = []
+    for tp in fit.tiles:
+        surf, n_in = snap_to_wall(mesh, tp.center_ras)
+        tiles.append(conform_tile(mesh, surf, n_in, tp.axis_ras, kind=tp.kind))
+    assert tiles
+
+    centroid = np.asarray(mesh.centroid, dtype=float)
+    for tile in tiles:
+        pts = tile_prescription_points(tile)
+        seed_r = np.linalg.norm(tile.seed_centers - centroid, axis=1).mean()
+        point_r = np.linalg.norm(pts - centroid, axis=1).mean()
+        # Away from the cavity interior, i.e. into the tissue being treated.
+        assert point_r > seed_r + 3.0
+
+    report = tile_shadowing(tiles)
+    assert np.allclose(report["loss"].sum(axis=1), report["per_tile"],
+                       atol=2e-3)
+    # A real recovered implant is well laid out; it must not trip the flag.
+    assert np.all(report["loss"] < 0.02)
+    assert find_shadowing_tiles(tiles, threshold_pct=2.0, report=report) == []
