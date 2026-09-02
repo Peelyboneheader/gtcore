@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, Optional, Union
 
 import numpy as np
 from scipy import ndimage
@@ -115,7 +115,7 @@ def seed_detection_params(spacing):
 
 
 def reconstruct(vol: Volume, verbose: bool = True,
-                n_full_tiles: Optional[int] = None,
+                n_full_tiles: Optional[Union[int, str]] = None,
                 n_half_tiles: int = 0,
                 complete_degraded: bool = True) -> PipelineResult:
     """Run the full reconstruction pipeline on one CT volume.
@@ -124,6 +124,10 @@ def reconstruct(vol: Volume, verbose: bool = True,
     skips tile fitting entirely), the shape-filtered seed candidates are
     additionally grouped into that many full tiles plus ``n_half_tiles`` half
     tiles, and the :class:`TileFitResult` lands on ``PipelineResult.tiles``.
+    ``n_full_tiles="auto"`` needs no count: the configuration is inferred
+    from the seed cloud by model selection (``n_half_tiles`` non-zero then
+    merely allows half tiles to be selected) and ``PipelineResult.tiles`` is
+    an :class:`~gtcore.tiles.auto.AutoFitResult` with the score curve.
     """
     timings = {}
 
@@ -224,7 +228,13 @@ def reconstruct(vol: Volume, verbose: bool = True,
             kji = np.argwhere(cavity).mean(axis=0)          # (k, j, i)
             cavity_center = vol.index_to_ras(kji[::-1])     # wants (i, j, k)
 
+        auto = isinstance(n_full_tiles, str)
+
         def _fit():
+            if auto:
+                return fit_tiles(seeds.centers_ras, seeds.axes_ras,
+                                 n_full_tiles, int(n_half_tiles),
+                                 cavity_center_ras=cavity_center)
             return fit_tiles(
                 seeds.centers_ras, seeds.axes_ras,
                 int(n_full_tiles), int(n_half_tiles),
@@ -233,7 +243,11 @@ def reconstruct(vol: Volume, verbose: bool = True,
             )
 
         tiles = stage("tile fitting", _fit)
-        if verbose:
+        if verbose and auto:
+            print("  auto: %d tiles, %d candidates rejected; %s"
+                  % (len(tiles.tiles), len(tiles.rejected_indices),
+                     tiles.summary()))
+        elif verbose:
             print("  %d/%d tiles recovered, %d candidates rejected"
                   % (len(tiles.tiles), tiles.n_expected,
                      len(tiles.rejected_indices)))

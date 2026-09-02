@@ -18,6 +18,12 @@ import subprocess
 import sys
 
 
+def _int_or_auto(text):
+    if str(text).lower() == "auto":
+        return "auto"
+    return int(text)
+
+
 def _load(path, spacing):
     if path:
         from .io import load_volume
@@ -85,11 +91,13 @@ def main(argv=None):
                    help="phantom voxel size in mm (phantom mode only)")
     v.add_argument("--snapshot", default=None,
                    help="render off-screen to this PNG instead of opening a window")
-    v.add_argument("--tiles", type=int, default=None,
-                   help="implanted FULL tile count: runs tile fitting and "
-                        "colours/labels seeds per recovered tile")
+    v.add_argument("--tiles", type=_int_or_auto, default=None,
+                   help="implanted FULL tile count, or 'auto' to infer the "
+                        "configuration from the seeds alone: runs tile "
+                        "fitting and colours/labels seeds per recovered tile")
     v.add_argument("--half", type=int, default=0,
-                   help="implanted HALF (2x1) tile count (with --tiles)")
+                   help="implanted HALF (2x1) tile count (with --tiles); with "
+                        "--tiles auto any non-zero value allows half tiles")
     v.set_defaults(fn=cmd_view)
 
     pln = sub.add_parser("plan", help="run the pipeline and open the interactive tile planner")
