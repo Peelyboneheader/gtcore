@@ -81,6 +81,7 @@ __all__ = [
     "InterferenceModel",
     "interference_report",
     "PRESCRIPTION_DEPTH_MM",
+    "KERNEL_ACCURATE_FROM_MM",
     "tile_prescription_points",
     "tile_shadowing",
     "find_shadowing_tiles",
@@ -770,6 +771,13 @@ def interference_report(dose_free, dose_corrected, mask=None, level_cgy=None):
 #: so that is where mutual shadowing between tiles actually matters.
 PRESCRIPTION_DEPTH_MM = 5.0
 
+#: Distance from a seed [mm] beyond which the engine's tabulated kernel is
+#: accurate to <=5e-4 of the analytic rate. Inside it the table degrades to
+#: ~1% -- the same order as the shadowing being measured -- so the sweep
+#: switches to the exact path there. Measured by the dose-engine work; see
+#: the "Evaluation paths" section of gtcore/dose/engine.py.
+KERNEL_ACCURATE_FROM_MM = 2.5
+
 
 def tile_prescription_points(tile, depth_mm=PRESCRIPTION_DEPTH_MM,
                              wall_offset_mm=None):
@@ -907,13 +915,21 @@ def tile_shadowing(tiles, sk_per_seed_u=None, depth_mm=PRESCRIPTION_DEPTH_MM,
         tile_r.append(float(np.linalg.norm(sc - c, axis=1).max()) + cap_reach)
     tile_c = np.asarray(tile_c)
 
-    # The tabulated kernel is well inside the accuracy this ratio needs
-    # (<=1e-3 vs analytic outside the capsule) and is markedly faster; these
-    # are relative drops, so its residual error cancels further still.
-    kw = dict(sk_per_seed_u=sk_per_seed_u, engine=eng, exact=False)
-
     for i in range(n_tiles):
         p = pts[i]
+        # Kernel choice, per tile. The tabulated kernel holds to <=5e-4 of
+        # the analytic rate beyond KERNEL_ACCURATE_FROM_MM of a seed and is
+        # markedly faster, and these are relative drops so its residual error
+        # cancels further still. Closer in it degrades to ~1%, which would be
+        # the same order as the shadowing being measured -- so if any seed
+        # lies inside that radius of this tile's evaluation points, pay for
+        # the exact path. Ordinary geometry sits at 7 mm and never does; a
+        # tile stacked behind another gets down to ~3 mm.
+        near = float(np.linalg.norm(
+            centers[:, None, :] - p[None, :, :], axis=2).min())
+        kw = dict(sk_per_seed_u=sk_per_seed_u, engine=eng,
+                  exact=near < KERNEL_ACCURATE_FROM_MM)
+
         free = np.atleast_1d(dose_at_points(centers, axes, p, **kw))
         safe = np.where(free > 0.0, free, np.inf)
 
