@@ -13,6 +13,8 @@ seeds and collagen tile carriers attenuating each other's primary fluence
 ``compute_dose_grid(..., interference=model)`` -- so the bare formalism stays
 the default and stays regression-pinned.
 """
+from .engine import CLRP_V2, DATASETS, SeedDataset, TG43Engine, \
+    TG43U1S2_CONSENSUS, compute_dose_grid, dose_at_points, isodose_surfaces
 from .dvh import dvh_curve, dvh_stats, format_report, shell_report
 from .engine import TG43Engine, compute_dose_grid, dose_at_points, \
     isodose_surfaces
@@ -31,6 +33,10 @@ from .tg43 import DoseInterpolator
 
 __all__ = [
     "DoseInterpolator",
+    "SeedDataset",
+    "DATASETS",
+    "TG43U1S2_CONSENSUS",
+    "CLRP_V2",
     "TG43Engine",
     "compute_dose_grid",
     "dose_at_points",

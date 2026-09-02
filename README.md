@@ -19,7 +19,7 @@ From this folder (`gt.bat` wraps the project venv — no activation needed):
 .\gt plan  <scan> --suggest         ... starting from the auto-inferred tiles (planner key 'g')
 .\gt view                           either command, phantom mode (synthetic ground truth)
 .\gt demo                           full phantom demo -> output\ (NRRD, PLY meshes, figures, CSV)
-.\gt test                           run the test suite (419 tests)
+.\gt test                           run the test suite (424 tests)
 ```
 
 Planner controls (the same legend is on screen; `?` collapses it):
@@ -76,9 +76,13 @@ Planner controls (the same legend is on screen; `?` collapses it):
    Rev2 (`engine.TG43Engine`, vectorized `compute_dose_grid` /
    `dose_at_points`, sub-voxel `isodose_surfaces`). The five physics defects
    of the AAPM-era port are fixed and regression-pinned
-   (`docs/tg43-port-notes.md`); the capsule interior projects to the nearest
-   surface point (continuous field), the far field keeps falling beyond the
-   10 cm data domain, and a tabulated (ln r, θ) kernel makes 1 mm grids
+   (`docs/tg43-port-notes.md`). Two verified parameter sets: the
+   **AAPM+GEC-ESTRO TG-43U1S2 consensus** (default: CON Λ = 1.056, CON L =
+   0.40 cm, CON g_L / CON F from Tables AII/AXIII) and the **CLRP v2** MC
+   dataset (`TG43Engine("clrp_v2")`), with TG-43U1S1 interpolation and
+   extrapolation rules (bilinear F, log-linear g_L, exponential tail beyond
+   10 cm). The capsule interior projects to the nearest surface point
+   (continuous field) and a tabulated (ln r, θ) kernel makes 1 mm grids
    interactive (≤0.1 % vs the analytic rate outside the capsule). S_K per
    seed is an explicit parameter to be fed from the assay certificate, with
    `sk_decayed` / `delivered_fraction` for assay→implant decay and dose at a
@@ -105,7 +109,7 @@ Planner controls (the same legend is on screen; `?` collapses it):
 (skull + craniotomy + lumpy cavity + wall-conformed tiles) that validates
 every stage.
 
-## Validation snapshot (2026-09-02 overnight run + dose-engine refinement + tile interference + planner UI v3; 419 tests green)
+## Validation snapshot (2026-09-02 overnight run + dose-engine refinement + tile interference + planner UI v3; 424 tests green)
 
 | Claim | Measured |
 |---|---|
@@ -133,7 +137,7 @@ gtcore/viz.py      optional PyVista viewer   (only files allowed to render)
 gtcore/planner.py  optional PyVista planner
 gtcore/cli.py      the `gt` command
 scripts/           demo + validation studies
-tests/             419 tests, all stages scored against phantom ground truth
+tests/             424 tests, all stages scored against phantom ground truth
 docs/              TG-43 physics notes, interference notes, data notes
 output/            generated volumes, meshes, figures (gitignored)
 ```

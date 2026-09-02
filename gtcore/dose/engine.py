@@ -49,14 +49,15 @@ Fixes relative to ``tg43.py`` (numbers match the port-notes items):
    deserves replacement with published consensus data — see port notes.
 4. **One radial floor, one data domain.** ``r`` is floored at
    ``R_FLOOR_CM`` (0.05 cm) exactly once in the core rate function, and the
-   floored value feeds G_L, g_L and F alike. The tabulated / fitted data —
-   g_L(r) and F(r, theta) — are only defined out to ``R_DATA_MAX_CM``
-   (10 cm); beyond it they are held at their 10 cm values while the
-   geometry factor keeps falling as ~1/r^2. The original v2 froze the whole
-   rate at its 10 cm value (a 1.5e-3 cGy h^-1 U^-1 plateau everywhere beyond
-   10 cm), which is unphysical for whole-head grids; holding only the data
-   terms is the same domain-clamp policy the F lookup already applied and
-   gives a monotone, conservative (attenuation-free) far-field falloff.
+   floored value feeds G_L, g_L and F alike. The tabulated data — g_L(r)
+   and F(r, theta) — end at ``R_DATA_MAX_CM`` (10 cm). Beyond it the
+   TG-43U1S1 rules apply: F takes its 10 cm value (zeroth order) and g_L
+   follows a single exponential through the two outermost nodes (Eq. 4),
+   while the geometry factor keeps falling as ~1/r^2. The original v2
+   froze the whole rate at its 10 cm value (a 1.5e-3 cGy h^-1 U^-1 plateau
+   everywhere beyond 10 cm), which is unphysical for whole-head grids and,
+   for g_L, is the zeroth-order extrapolation the AAPM explicitly asks
+   planning systems not to use.
 5. **Explicit dose conversion.** ``dose_to_total_decay(rate, sk_per_seed_u)``
    = ``rate * S_K * tau`` with ``tau = T_half / ln 2``,
    ``T_half(Cs-131) = 9.689 d = 232.536 h`` so ``tau = 335.48 h`` (~335.5 h).
@@ -68,6 +69,41 @@ Fixes relative to ``tg43.py`` (numbers match the port-notes items):
    should come from the implant's assay certificate. ``sk_decayed`` and
    ``delivered_fraction`` expose the same exponential for decaying an assay
    S_K to the implant date and for dose delivered by a given elapsed time.
+
+Data provenance (verified against the primary sources, 2026-09-01)
+------------------------------------------------------------------
+Two parameter sets are shipped as :class:`SeedDataset` objects:
+
+``"tg43u1s2"`` (DEFAULT) — the AAPM + GEC-ESTRO consensus dataset for the
+IsoRay model CS-1 Rev2 (Rivard et al., Med. Phys. 44(9):e297, 2017,
+Appendix A11): CON Lambda = 1.056 cGy h^-1 U^-1, CON L = 0.40 cm (Table
+AI), CON g_L(r) at 16 radii 0.1-10 cm (Table AII) and CON F(r, theta) on a
+10 x 15 grid (Table AXIII, Rivard 2007 MC). This is the dataset a clinical
+TPS is commissioned against for GammaTile, and the one the Joint AAPM/IROC
+Registry lists for the seed.
+
+``"clrp_v2"`` — the Carleton (CLRP) TG-43 database v2 (2019) egs_brachy
+dataset for the same seed: F(r, theta) on a 12 x 32 grid and the CLRP
+modified-polynomial g_L(r) fit (range 0.05-10 cm), paired — as the v1 port
+did — with the consensus Lambda rather than CLRP's own 1.0625 (WAFAC).
+Verified entry-by-entry against the CLRP workbook. (The workbook's
+tabulated g_L column is mislabelled by one row beyond 1 cm — its "1.5 cm"
+row holds g_L(1 cm) = 1.000 — which is why the fit, not the column, is the
+reference.) The two datasets agree within 1.5 % for theta >= 15 deg and
+within 9 % near the seed axis (< 1 % of the solid angle).
+
+Interpolation / extrapolation follow TG-43U1 Sec. IV.g and TG-43U1S1
+Sec. III: F(r, theta) bilinear (linear-linear) on the adjacent nodes with
+nearest-neighbour (zeroth-order) extrapolation in r; g_L(r) log-linear
+between adjacent nodes (Eq. 3), nearest-neighbour below r_min, and a
+single exponential through the two outermost nodes beyond r_max (Eq. 4).
+The 2004 TG-43U1 erratum (Med. Phys. 31:3532) corrects typographic items
+only (units, a Best 2301 table); nothing there touches this seed or the
+formalism. The 2018 erratum to TG-43U1S2 (Med. Phys. 45:971) corrected
+the report's *QA dose-rate tables*, not the consensus parameters; its text
+is paywalled, so the printed 2017 QA table is deliberately not used as a
+regression target here — the engine is instead pinned to hand evaluations
+of Eq. (1) from the consensus tables at tabulated nodes.
 
 Evaluation paths
 ----------------
@@ -85,7 +121,8 @@ grid defaults to the table, point evaluation to exact.
 from __future__ import annotations
 
 import math
-from typing import Dict
+from dataclasses import dataclass
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import trimesh
@@ -93,68 +130,191 @@ from skimage import measure
 
 from ..volume import Volume, apply_affine
 
-__all__ = ["TG43Engine", "compute_dose_grid", "dose_at_points",
+__all__ = ["SeedDataset", "DATASETS", "TG43U1S2_CONSENSUS", "CLRP_V2",
+           "TG43Engine", "compute_dose_grid", "dose_at_points",
            "isodose_surfaces"]
+
+
+# ------------------------------------------------- seed data: CLRP v2 (2019)
+# Copied EXACTLY from gtcore.dose.tg43.DoseInterpolator — do not retune.
+# Verified 2026-09-01 against the CLRP database workbook
+# ``LDR_Cs131_Proxcelan-CS-1 Rev2.xlsx`` (Anisotropy sheet, first block):
+# every entry equals the CLRP value rounded to 3 dp and the hole pattern is
+# identical. The g_L fit coefficients equal the workbook's 'Fitting
+# parameters' row digit for digit (fit range 0.05-10 cm). NOTE: the CLRP
+# dose-rate constant is 1.0625 (WAFAC); the 1.056 below is the AAPM+GEC-ESTRO
+# consensus value that v1 paired with the CLRP tables.
+_CLRP_LAMBDA = 1.056           # Dose-rate constant (cGy h^-1 U^-1)
+_CLRP_L = 0.40                 # Active source length (cm)
+# g_L(r) = (a0*r^-2 + a1*r^-1 + a2 + a3*r + a4*r^2 + a5*r^3) * exp(-a6*r)
+_CLRP_GR_COEFFS = np.array([7.38e-04, -1.198e-02, 9.991e-01, 4.979e-01,
+                       1.07e-02, 1.39e-03, 4.055e-01])
+# Anisotropy table F(r, theta) — V2 (2019) Proxcelan CS-1 Rev2
+_CLRP_F_THETAS = np.array([
+    0, 1, 2, 3, 5, 7, 10, 12, 15, 20, 25, 30, 35, 40, 45,
+    50, 55, 60, 65, 70, 73, 75, 78, 80, 82, 84, 85, 86, 87, 88, 89, 90
+], dtype=np.float64)
+
+_CLRP_F_RADII = np.array([
+    0.10, 0.15, 0.25, 0.50, 0.75, 1.00, 2.00, 3.00, 4.00, 5.00, 7.50, 10.00
+], dtype=np.float64)
+_CLRP_F_TABLE = np.array([
+    #  0.10   0.15   0.25   0.50   0.75   1.00   2.00   3.00   4.00   5.00   7.50  10.00
+    [  np.nan, np.nan, 0.617, 0.883, 0.903, 0.900, 0.889, 0.884, 0.882, 0.882, 0.880, 0.874],  # 0
+    [  np.nan, np.nan, 0.648, 0.864, 0.890, 0.893, 0.891, 0.889, 0.887, 0.885, 0.879, 0.875],  # 1
+    [  np.nan, np.nan, 0.679, 0.847, 0.868, 0.878, 0.877, 0.882, 0.878, 0.875, 0.869, 0.866],  # 2
+    [  np.nan, np.nan, 0.709, 0.837, 0.860, 0.867, 0.850, 0.847, 0.848, 0.849, 0.850, 0.852],  # 3
+    [  np.nan, np.nan, 0.762, 0.822, 0.793, 0.779, 0.787, 0.798, 0.807, 0.814, 0.826, 0.832],  # 5
+    [  np.nan, np.nan, 0.786, 0.742, 0.726, 0.730, 0.761, 0.781, 0.794, 0.803, 0.818, 0.827],  # 7
+    [  np.nan, np.nan, 0.731, 0.688, 0.702, 0.718, 0.760, 0.783, 0.797, 0.807, 0.822, 0.830],  # 10
+    [  np.nan, np.nan, 0.696, 0.694, 0.714, 0.730, 0.772, 0.794, 0.807, 0.817, 0.830, 0.838],  # 12
+    [  np.nan, np.nan, 0.761, 0.724, 0.743, 0.758, 0.795, 0.814, 0.826, 0.834, 0.845, 0.852],  # 15
+    [  np.nan, 1.141, 0.845, 0.780, 0.794, 0.806, 0.835, 0.849, 0.858, 0.863, 0.871, 0.875],  # 20
+    [  1.143, 1.051, 0.889, 0.829, 0.838, 0.847, 0.868, 0.879, 0.885, 0.888, 0.894, 0.897],  # 25
+    [  1.131, 1.016, 0.916, 0.868, 0.873, 0.880, 0.895, 0.903, 0.907, 0.910, 0.914, 0.915],  # 30
+    [  1.074, 1.001, 0.935, 0.899, 0.902, 0.906, 0.918, 0.923, 0.926, 0.928, 0.930, 0.932],  # 35
+    [  1.040, 0.994, 0.950, 0.923, 0.924, 0.927, 0.936, 0.940, 0.942, 0.943, 0.944, 0.946],  # 40
+    [  1.021, 0.993, 0.962, 0.942, 0.942, 0.944, 0.951, 0.953, 0.955, 0.956, 0.956, 0.957],  # 45
+    [  1.013, 0.993, 0.972, 0.958, 0.957, 0.959, 0.963, 0.965, 0.966, 0.966, 0.967, 0.968],  # 50
+    [  1.007, 0.994, 0.979, 0.969, 0.970, 0.970, 0.973, 0.974, 0.975, 0.975, 0.975, 0.976],  # 55
+    [  1.004, 0.995, 0.985, 0.978, 0.979, 0.980, 0.981, 0.982, 0.982, 0.982, 0.982, 0.983],  # 60
+    [  1.002, 0.996, 0.990, 0.985, 0.986, 0.987, 0.988, 0.988, 0.988, 0.988, 0.988, 0.989],  # 65
+    [  1.001, 0.998, 0.994, 0.990, 0.991, 0.992, 0.993, 0.993, 0.993, 0.993, 0.993, 0.993],  # 70
+    [  1.001, 0.998, 0.996, 0.993, 0.993, 0.994, 0.995, 0.995, 0.995, 0.995, 0.995, 0.995],  # 73
+    [  1.001, 0.999, 0.997, 0.995, 0.995, 0.995, 0.996, 0.996, 0.996, 0.996, 0.996, 0.997],  # 75
+    [  1.000, 0.999, 0.998, 0.997, 0.997, 0.997, 0.998, 0.998, 0.998, 0.998, 0.998, 0.998],  # 78
+    [  1.000, 0.999, 0.999, 0.998, 0.998, 0.998, 0.998, 0.999, 0.999, 0.999, 0.999, 0.998],  # 80
+    [  1.000, 1.000, 0.999, 0.999, 0.999, 0.999, 0.999, 0.999, 0.999, 0.999, 0.999, 0.999],  # 82
+    [  1.000, 1.000, 0.999, 0.999, 0.999, 0.999, 0.999, 1.000, 1.000, 0.999, 1.000, 1.000],  # 84
+    [  1.000, 1.000, 1.000, 0.999, 1.000, 1.000, 0.999, 1.000, 1.000, 1.000, 1.000, 1.000],  # 85
+    [  1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000],  # 86
+    [  1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000],  # 87
+    [  1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000],  # 88
+    [  1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000],  # 89
+    [  1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000],  # 90
+], dtype=np.float64)
+
+
+
+# --------------------------------------- seed data: TG-43U1S2 consensus (2017)
+# AAPM + GEC-ESTRO consensus dataset for the IsoRay model CS-1 Rev2 131Cs
+# source, Rivard et al., Med. Phys. 44(9):e297-e338 (2017), Appendix A11:
+#   CON Lambda = 1.056 +/- 0.013 cGy h^-1 U^-1 (Table AI; mean of EXP 1.063,
+#                Tailor TLD, and MC 1.050, six MC studies averaged)
+#   CON L      = 0.40 cm (Table AI)
+#   CON g_L(r) = Table AII, IsoRay CS-1 Rev2 column (Rivard 2007 MC)
+#   CON F(r,theta) = Table AXIII (Rivard 2007 MC, erratum-corrected, no
+#                angular averaging); F(r, 90 deg) = 1 by definition and is
+#                not printed in the report.
+# Physical capsule per A11: Ti tube 0.824 mm outer diameter, 4.50 mm long.
+_CON_LAMBDA = 1.056
+_CON_L = 0.40
+_CON_G_RADII = np.array([0.10, 0.15, 0.25, 0.50, 0.75, 1.00, 1.50, 2.00,
+                         3.00, 4.00, 5.00, 6.00, 7.00, 8.00, 9.00, 10.00])
+_CON_G_VALUES = np.array([0.960, 0.971, 0.989, 1.006, 1.009, 1.000, 0.962,
+                          0.908, 0.777, 0.642, 0.518, 0.411, 0.323, 0.251,
+                          0.1931, 0.1481])
+_CON_F_THETAS = np.array([0, 2, 5, 7, 10, 15, 20, 25, 30, 40, 50, 60, 70,
+                          80, 90], dtype=np.float64)
+_CON_F_RADII = np.array([0.1, 0.25, 0.5, 0.7, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0])
+_CON_F_TABLE = np.array([
+    #   0.1     0.25   0.5    0.7    1.0    2.0    3.0    5.0    7.0    10.0
+    [np.nan, 0.622, 0.829, 0.851, 0.845, 0.837, 0.838, 0.843, 0.853, 0.833],  # 0
+    [np.nan, 0.670, 0.796, 0.806, 0.818, 0.839, 0.842, 0.846, 0.845, 0.847],  # 2
+    [np.nan, 0.731, 0.781, 0.761, 0.750, 0.764, 0.780, 0.800, 0.810, 0.819],  # 5
+    [np.nan, 0.730, 0.718, 0.706, 0.713, 0.746, 0.769, 0.794, 0.808, 0.816],  # 7
+    [np.nan, 0.707, 0.678, 0.690, 0.709, 0.752, 0.776, 0.801, 0.815, 0.826],  # 10
+    [np.nan, 0.759, 0.720, 0.734, 0.753, 0.791, 0.811, 0.831, 0.840, 0.847],  # 15
+    [np.nan, 0.843, 0.778, 0.788, 0.803, 0.832, 0.847, 0.862, 0.868, 0.871],  # 20
+    [1.161,  0.887, 0.828, 0.834, 0.845, 0.866, 0.876, 0.886, 0.891, 0.896],  # 25
+    [1.113,  0.915, 0.868, 0.870, 0.878, 0.894, 0.902, 0.910, 0.912, 0.916],  # 30
+    [1.031,  0.949, 0.923, 0.923, 0.926, 0.935, 0.939, 0.943, 0.944, 0.944],  # 40
+    [1.009,  0.971, 0.958, 0.957, 0.959, 0.963, 0.964, 0.966, 0.967, 0.966],  # 50
+    [1.002,  0.985, 0.978, 0.978, 0.980, 0.981, 0.982, 0.982, 0.982, 0.983],  # 60
+    [1.000,  0.993, 0.990, 0.991, 0.992, 0.993, 0.993, 0.993, 0.993, 0.992],  # 70
+    [1.000,  0.998, 0.998, 0.997, 0.998, 0.999, 0.999, 0.999, 0.998, 0.998],  # 80
+    [1.000,  1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000],  # 90
+], dtype=np.float64)
+
+
+@dataclass(frozen=True)
+class SeedDataset:
+    """One self-consistent TG-43 parameter set for a seed model.
+
+    ``g_radii``/``g_values`` hold a *tabulated* g_L(r) (interpolated
+    log-linearly per TG-43U1S1); alternatively ``g_fit_coeffs`` holds the
+    CLRP modified-polynomial fit used inside ``g_fit_range``. Either way,
+    r below the first data point takes the nearest-neighbour value and r
+    beyond the last is extrapolated with a single exponential through the
+    two outermost points ``g_extrap_radii`` (TG-43U1S1 Eq. 4).
+    """
+
+    name: str
+    citation: str
+    dose_rate_constant: float          # cGy h^-1 U^-1, at (1 cm, 90 deg)
+    active_length_cm: float            # L used for G_L and by the data
+    f_radii: np.ndarray
+    f_thetas: np.ndarray
+    f_table: np.ndarray                # NaN where the point is inside the seed
+    g_extrap_radii: Tuple[float, float]
+    g_radii: Optional[np.ndarray] = None
+    g_values: Optional[np.ndarray] = None
+    g_fit_coeffs: Optional[np.ndarray] = None
+    g_fit_range: Optional[Tuple[float, float]] = None
+
+    @property
+    def g_rmin(self) -> float:
+        return float(self.g_fit_range[0] if self.g_fit_coeffs is not None
+                     else self.g_radii[0])
+
+    @property
+    def g_rmax(self) -> float:
+        return float(self.g_fit_range[1] if self.g_fit_coeffs is not None
+                     else self.g_radii[-1])
+
+
+TG43U1S2_CONSENSUS = SeedDataset(
+    name="tg43u1s2",
+    citation="Rivard et al., AAPM+GEC-ESTRO TG-43U1S2, Med Phys 44:e297 "
+             "(2017), Tables AI/AII/AXIII (IsoRay CS-1 Rev2)",
+    dose_rate_constant=_CON_LAMBDA,
+    active_length_cm=_CON_L,
+    f_radii=_CON_F_RADII, f_thetas=_CON_F_THETAS, f_table=_CON_F_TABLE,
+    g_radii=_CON_G_RADII, g_values=_CON_G_VALUES,
+    g_extrap_radii=(9.0, 10.0),
+)
+
+CLRP_V2 = SeedDataset(
+    name="clrp_v2",
+    citation="CLRP TG-43 parameter database v2 (2019), Proxcelan CS-1 Rev2 "
+             "(egs_brachy MC), with the TG-43U1S2 consensus Lambda",
+    dose_rate_constant=_CLRP_LAMBDA,
+    active_length_cm=_CLRP_L,
+    f_radii=_CLRP_F_RADII, f_thetas=_CLRP_F_THETAS, f_table=_CLRP_F_TABLE,
+    g_fit_coeffs=_CLRP_GR_COEFFS, g_fit_range=(0.05, 10.0),
+    g_extrap_radii=(9.5, 10.0),
+)
+
+DATASETS = {"tg43u1s2": TG43U1S2_CONSENSUS, "clrp_v2": CLRP_V2}
 
 
 class TG43Engine:
     """Vectorized TG-43U1 2D line-source engine for IsoRay Proxcelan CS-1 Rev2.
 
-    All public evaluation methods accept scalars or numpy arrays (broadcast
-    together) and return the matching scalar/array.
+    ``dataset`` selects the parameter set: ``"tg43u1s2"`` (default, the
+    AAPM+GEC-ESTRO consensus) or ``"clrp_v2"`` (Carleton database v2), or
+    any :class:`SeedDataset`. All public evaluation methods accept scalars
+    or numpy arrays (broadcast together) and return the matching
+    scalar/array.
     """
 
-    # ---------------------------------------------------------------- seed data
-    # Copied EXACTLY from gtcore.dose.tg43.DoseInterpolator — do not retune.
-    _LAMBDA = 1.056                # Dose-rate constant (cGy h^-1 U^-1)
-    _L = 0.40                      # Active source length (cm)
-    # g_L(r) = (a0*r^-2 + a1*r^-1 + a2 + a3*r + a4*r^2 + a5*r^3) * exp(-a6*r)
-    _GR_COEFFS = np.array([7.38e-04, -1.198e-02, 9.991e-01, 4.979e-01,
-                           1.07e-02, 1.39e-03, 4.055e-01])
-    # Anisotropy table F(r, theta) — V2 (2019) Proxcelan CS-1 Rev2
-    _F_THETAS = np.array([
-        0, 1, 2, 3, 5, 7, 10, 12, 15, 20, 25, 30, 35, 40, 45,
-        50, 55, 60, 65, 70, 73, 75, 78, 80, 82, 84, 85, 86, 87, 88, 89, 90
-    ], dtype=np.float64)
-
-    _F_RADII = np.array([
-        0.10, 0.15, 0.25, 0.50, 0.75, 1.00, 2.00, 3.00, 4.00, 5.00, 7.50, 10.00
-    ], dtype=np.float64)
-    _F_TABLE = np.array([
-        #  0.10   0.15   0.25   0.50   0.75   1.00   2.00   3.00   4.00   5.00   7.50  10.00
-        [  np.nan, np.nan, 0.617, 0.883, 0.903, 0.900, 0.889, 0.884, 0.882, 0.882, 0.880, 0.874],  # 0
-        [  np.nan, np.nan, 0.648, 0.864, 0.890, 0.893, 0.891, 0.889, 0.887, 0.885, 0.879, 0.875],  # 1
-        [  np.nan, np.nan, 0.679, 0.847, 0.868, 0.878, 0.877, 0.882, 0.878, 0.875, 0.869, 0.866],  # 2
-        [  np.nan, np.nan, 0.709, 0.837, 0.860, 0.867, 0.850, 0.847, 0.848, 0.849, 0.850, 0.852],  # 3
-        [  np.nan, np.nan, 0.762, 0.822, 0.793, 0.779, 0.787, 0.798, 0.807, 0.814, 0.826, 0.832],  # 5
-        [  np.nan, np.nan, 0.786, 0.742, 0.726, 0.730, 0.761, 0.781, 0.794, 0.803, 0.818, 0.827],  # 7
-        [  np.nan, np.nan, 0.731, 0.688, 0.702, 0.718, 0.760, 0.783, 0.797, 0.807, 0.822, 0.830],  # 10
-        [  np.nan, np.nan, 0.696, 0.694, 0.714, 0.730, 0.772, 0.794, 0.807, 0.817, 0.830, 0.838],  # 12
-        [  np.nan, np.nan, 0.761, 0.724, 0.743, 0.758, 0.795, 0.814, 0.826, 0.834, 0.845, 0.852],  # 15
-        [  np.nan, 1.141, 0.845, 0.780, 0.794, 0.806, 0.835, 0.849, 0.858, 0.863, 0.871, 0.875],  # 20
-        [  1.143, 1.051, 0.889, 0.829, 0.838, 0.847, 0.868, 0.879, 0.885, 0.888, 0.894, 0.897],  # 25
-        [  1.131, 1.016, 0.916, 0.868, 0.873, 0.880, 0.895, 0.903, 0.907, 0.910, 0.914, 0.915],  # 30
-        [  1.074, 1.001, 0.935, 0.899, 0.902, 0.906, 0.918, 0.923, 0.926, 0.928, 0.930, 0.932],  # 35
-        [  1.040, 0.994, 0.950, 0.923, 0.924, 0.927, 0.936, 0.940, 0.942, 0.943, 0.944, 0.946],  # 40
-        [  1.021, 0.993, 0.962, 0.942, 0.942, 0.944, 0.951, 0.953, 0.955, 0.956, 0.956, 0.957],  # 45
-        [  1.013, 0.993, 0.972, 0.958, 0.957, 0.959, 0.963, 0.965, 0.966, 0.966, 0.967, 0.968],  # 50
-        [  1.007, 0.994, 0.979, 0.969, 0.970, 0.970, 0.973, 0.974, 0.975, 0.975, 0.975, 0.976],  # 55
-        [  1.004, 0.995, 0.985, 0.978, 0.979, 0.980, 0.981, 0.982, 0.982, 0.982, 0.982, 0.983],  # 60
-        [  1.002, 0.996, 0.990, 0.985, 0.986, 0.987, 0.988, 0.988, 0.988, 0.988, 0.988, 0.989],  # 65
-        [  1.001, 0.998, 0.994, 0.990, 0.991, 0.992, 0.993, 0.993, 0.993, 0.993, 0.993, 0.993],  # 70
-        [  1.001, 0.998, 0.996, 0.993, 0.993, 0.994, 0.995, 0.995, 0.995, 0.995, 0.995, 0.995],  # 73
-        [  1.001, 0.999, 0.997, 0.995, 0.995, 0.995, 0.996, 0.996, 0.996, 0.996, 0.996, 0.997],  # 75
-        [  1.000, 0.999, 0.998, 0.997, 0.997, 0.997, 0.998, 0.998, 0.998, 0.998, 0.998, 0.998],  # 78
-        [  1.000, 0.999, 0.999, 0.998, 0.998, 0.998, 0.998, 0.999, 0.999, 0.999, 0.999, 0.998],  # 80
-        [  1.000, 1.000, 0.999, 0.999, 0.999, 0.999, 0.999, 0.999, 0.999, 0.999, 0.999, 0.999],  # 82
-        [  1.000, 1.000, 0.999, 0.999, 0.999, 0.999, 0.999, 1.000, 1.000, 0.999, 1.000, 1.000],  # 84
-        [  1.000, 1.000, 1.000, 0.999, 1.000, 1.000, 0.999, 1.000, 1.000, 1.000, 1.000, 1.000],  # 85
-        [  1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000],  # 86
-        [  1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000],  # 87
-        [  1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000],  # 88
-        [  1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000],  # 89
-        [  1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000],  # 90
-    ], dtype=np.float64)
+    # Legacy class-level aliases of the CLRP v2 data (v1 provenance checks).
+    _LAMBDA = _CLRP_LAMBDA
+    _L = _CLRP_L
+    _GR_COEFFS = _CLRP_GR_COEFFS
+    _F_THETAS = _CLRP_F_THETAS
+    _F_RADII = _CLRP_F_RADII
+    _F_TABLE = _CLRP_F_TABLE
 
     # ------------------------------------------------------------ decay physics
     #: Cs-131 half-life: 9.689 days = 232.536 hours (NNDC).
@@ -171,20 +331,24 @@ class TG43Engine:
     # --------------------------------------------------------- geometry limits
     #: Radial floor [cm]: r below this is evaluated AT the floor (one clip,
     #: applied once in the core rate function, feeding G_L, g_L and F alike).
+    #: 0.05 cm is the CLRP fit's r_min and lies inside the capsule radius
+    #: everywhere except a 0.09 mm ring beside the capsule side.
     R_FLOOR_CM = 0.05
-    #: Outer edge of the tabulated / fitted data [cm]. g_L and F are held at
-    #: their value here for larger r; the geometry factor is NOT clamped.
+    #: Outer edge of the tabulated data [cm] for both datasets. Beyond it,
+    #: F takes its nearest-neighbour value and g_L is extrapolated with a
+    #: single exponential (TG-43U1S1); the geometry factor is never clamped.
     R_DATA_MAX_CM = 10.0
     #: Kept for callers that read the old pair; (floor, data-domain edge).
     R_CLIP_CM = (R_FLOOR_CM, R_DATA_MAX_CM)
-    #: Physical capsule radius [cm] (CS-1 capsule is 0.8 mm diameter x 4.5 mm).
-    #: Field points inside the capsule cylinder clamp G_L to its surface value.
-    _RHO_SURFACE = 0.04
-    # PHYSICAL capsule half-length (4.5 mm titanium can), cm. The clamp for
-    # "inside the source" must use this, not the ACTIVE half-length L/2 =
-    # 0.20 cm: with the active length, on-axis points at z in (0.20, 0.225]
-    # cm -- still inside the titanium -- hit the analytic 1/(z^2 - L^2/4)
-    # limit near its pole and spiked ~50x (review finding).
+    #: Physical capsule radius [cm]: Ti tube outer diameter 0.824 mm
+    #: (TG-43U1S2 A11; CLRP models 0.830 mm). Field points inside the
+    #: capsule project to its surface (fix 1).
+    _RHO_SURFACE = 0.0412
+    # PHYSICAL capsule half-length (4.50 mm titanium can, TG-43U1S2 A11),
+    # cm. The projection for "inside the source" must use this, not the
+    # ACTIVE half-length L/2 = 0.20 cm: with the active length, on-axis
+    # points at z in (0.20, 0.225] cm -- still inside the titanium -- hit the
+    # analytic 1/(z^2 - L^2/4) limit near its pole and spiked ~50x.
     _CAP_HALF_CM = 0.225
     #: Perpendicular distances below this [cm] count as "on axis" and take the
     #: analytic on-axis limit (only reachable beyond the tip, see fix 1).
@@ -200,14 +364,32 @@ class TG43Engine:
     #: clamps r (the exact path does not). 50 cm exceeds any head-CT extent.
     KERNEL_R_MAX_CM = 50.0
 
-    def __init__(self):
+    def __init__(self, dataset="tg43u1s2"):
+        if isinstance(dataset, str):
+            try:
+                dataset = DATASETS[dataset]
+            except KeyError:
+                raise ValueError("unknown dataset %r; choose from %s"
+                                 % (dataset, sorted(DATASETS)))
+        if not isinstance(dataset, SeedDataset):
+            raise TypeError("dataset must be a name or a SeedDataset")
+        self.dataset = dataset
+        self.LAMBDA = float(dataset.dose_rate_constant)
+        self.L = float(dataset.active_length_cm)
+        self.F_RADII = np.asarray(dataset.f_radii, dtype=float)
+        self.F_THETAS = np.asarray(dataset.f_thetas, dtype=float)
+        self.F_TABLE = np.asarray(dataset.f_table, dtype=float)
+        if self.F_TABLE.shape != (self.F_THETAS.size, self.F_RADII.size):
+            raise ValueError("F table shape does not match its axes")
+        if self.F_THETAS[0] != 0.0 or self.F_THETAS[-1] != 90.0:
+            raise ValueError("F table must span theta = 0..90 deg")
         # Fix 3: precompute the NaN-filled anisotropy table ONCE. The NaN
-        # holes sit in the leading (small-r) columns of rows theta <= 20 deg,
-        # so "nearest valid value along r at the same theta" is the first
-        # non-NaN entry of the row; every hole is back-filled with it. This
-        # matches v1's dynamic scan-right fill value-for-value, but the borrow
-        # from larger radii is now explicit and happens exactly once.
-        filled = self._F_TABLE.copy()
+        # holes sit in the leading (small-r) columns of the small-theta rows
+        # (points inside the seed), so "nearest valid value along r at the
+        # same theta" is the first non-NaN entry of the row; every hole is
+        # back-filled with it. This is the TG-43U1S1 zeroth-order (nearest
+        # neighbour) extrapolation in r, applied explicitly and exactly once.
+        filled = self.F_TABLE.copy()
         for row in filled:
             valid = np.flatnonzero(~np.isnan(row))
             if valid.size == 0:      # pragma: no cover - table is never empty
@@ -220,10 +402,30 @@ class TG43Engine:
             if np.isnan(row).any():  # pragma: no cover - guarded by data
                 idx = np.flatnonzero(np.isnan(row))
                 for i in idx:
-                    j = valid[np.argmin(np.abs(self._F_RADII[valid]
-                                               - self._F_RADII[i]))]
+                    j = valid[np.argmin(np.abs(self.F_RADII[valid]
+                                               - self.F_RADII[i]))]
                     row[i] = row[j]
         self._F_FILLED = filled
+        # Radial dose function: tabulated (log-linear) or the CLRP fit; both
+        # get the TG-43U1S1 single-exponential tail beyond the data.
+        r1, r2 = dataset.g_extrap_radii
+        if not (r1 < r2 <= dataset.g_rmax):
+            raise ValueError("g_extrap_radii must be two increasing radii "
+                             "inside the data domain")
+        if dataset.g_fit_coeffs is None:
+            gr = np.asarray(dataset.g_radii, dtype=float)
+            gv = np.asarray(dataset.g_values, dtype=float)
+            if gr.ndim != 1 or gr.shape != gv.shape or np.any(np.diff(gr) <= 0):
+                raise ValueError("g_radii must be increasing and match g_values")
+            if np.any(gv <= 0.0):
+                raise ValueError("g_values must be positive")
+            self._g_radii, self._g_ln = gr, np.log(gv)
+        else:
+            self._g_radii = self._g_ln = None
+        g1, g2 = (float(self._g_inside(np.array(r1))),
+                  float(self._g_inside(np.array(r2))))
+        self._g_tail_r1, self._g_tail_g1 = r1, g1
+        self._g_tail_slope = (math.log(g2) - math.log(g1)) / (r2 - r1)
         # Reference geometry factor G_L(r0=1 cm, theta0=90 deg).
         self._GL_ref = float(self._geometry_factor(np.array(1.0),
                                                    np.array(90.0)))
@@ -270,7 +472,7 @@ class TG43Engine:
         On the long axis (y ~ 0, only reachable beyond the tip, z > L/2)
         the analytic limit 1 / (z^2 - L^2/4) is positive and finite.
         """
-        L = self._L
+        L = self.L
         half = L / 2.0
         near_axis = y < self._Y_EPS
         y_safe = np.maximum(y, self._Y_EPS)       # keep atan2/div well-posed
@@ -293,26 +495,49 @@ class TG43Engine:
         y_eff, z_eff, _side = self._project_to_capsule(y, z)
         return self._geometry_factor_yz(y_eff, z_eff)
 
-    def _radial_dose(self, r_cm):
-        """g_L(r) — CLRP v2 polynomial fit, vectorized.
+    def _g_inside(self, r):
+        """g_L(r) inside the data domain: log-linear interpolation of the
+        tabulated values (TG-43U1S1 Eq. 3) or the CLRP polynomial fit."""
+        ds = self.dataset
+        if ds.g_fit_coeffs is not None:
+            a = ds.g_fit_coeffs
+            return (a[0] * r**-2 + a[1] * r**-1 + a[2] + a[3] * r
+                    + a[4] * r**2 + a[5] * r**3) * np.exp(-a[6] * r)
+        return np.exp(np.interp(r, self._g_radii, self._g_ln))
 
-        Expects r >= R_FLOOR_CM; r beyond R_DATA_MAX_CM is held at the edge
-        value (the fit is not validated outside its data domain).
+    def _radial_dose(self, r_cm):
+        """g_L(r), vectorized, per TG-43U1 / TG-43U1S1:
+
+        - inside [r_min, r_max]: log-linear interpolation between the two
+          adjacent tabulated points (Eq. 3), or the dataset's fit;
+        - r < r_min: nearest neighbour, g_L(r_min) (zeroth order);
+        - r > r_max: single exponential through the two outermost data
+          points (Eq. 4) -- the AAPM explicitly asks TPS vendors NOT to
+          hold g_L constant beyond r_max.
         """
-        r = np.minimum(np.asarray(r_cm, dtype=float), self.R_DATA_MAX_CM)
-        a = self._GR_COEFFS
-        return (a[0] * r**-2 + a[1] * r**-1 + a[2] + a[3] * r
-                + a[4] * r**2 + a[5] * r**3) * np.exp(-a[6] * r)
+        r = np.asarray(r_cm, dtype=float)
+        ds = self.dataset
+        r_in = np.clip(r, ds.g_rmin, ds.g_rmax)
+        g = self._g_inside(r_in)
+        tail = r > ds.g_rmax
+        if np.any(tail):
+            g_tail = self._g_tail_g1 * np.exp(self._g_tail_slope
+                                              * (r - self._g_tail_r1))
+            g = np.where(tail, g_tail, g)
+        return g
 
     def _anisotropy(self, r_cm, theta_deg):
         """F(r, theta) — bilinear interpolation on the NaN-filled table.
 
+        Linear-linear interpolation on the two adjacent points in each
+        variable, as recommended by TG-43U1 and reaffirmed by TG-43U1S1.
         Lookups are clamped to the table domain (r in [0.10, 10.0] cm,
-        theta in [0, 90] deg); this is domain clamping of the interpolation,
-        identical to v1, not an extra radial dose clip.
+        theta in [0, 90] deg): nearest-neighbour (zeroth-order)
+        extrapolation in r, the TG-43U1S1 recommendation for both
+        r < r_min and r > r_max.
         """
-        radii = self._F_RADII
-        thetas = self._F_THETAS
+        radii = self.F_RADII
+        thetas = self.F_THETAS
         table = self._F_FILLED
 
         r_c = np.clip(r_cm, radii[0], radii[-1])
@@ -359,7 +584,7 @@ class TG43Engine:
         GL = self._geometry_factor_yz(y_eff, z_eff)
         gL = self._radial_dose(r_eval)
         F = self._anisotropy(r_eval, th_eval)
-        return self._LAMBDA * (GL / self._GL_ref) * gL * F
+        return self.LAMBDA * (GL / self._GL_ref) * gL * F
 
     def dose_rate(self, theta_deg, r_cm):
         """TG-43U1 2D dose rate [cGy h^-1 U^-1], vectorized and exact.

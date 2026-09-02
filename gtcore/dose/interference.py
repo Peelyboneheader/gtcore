@@ -128,10 +128,12 @@ MU_SEED_CORE_CM1 = 2.33
 TILE_CARRIER_DENSITY_G_CM3 = 0.30
 
 # ------------------------------------------------------------------ geometry
-#: IsoRay Proxcelan CS-1 Rev2 capsule: 0.8 mm outer diameter x 4.5 mm long.
-CAPSULE_OUTER_RADIUS_MM = 0.40
-#: Titanium wall thickness [mm] (0.05 mm is the CS-1 nominal wall).
-CAPSULE_WALL_MM = 0.05
+#: IsoRay Proxcelan CS-1 Rev2 capsule per TG-43U1S2 Appendix A11: titanium
+#: tube 0.713 mm inner / 0.824 mm outer diameter, 4.50 mm long. Matches
+#: ``TG43Engine._RHO_SURFACE`` (0.0412 cm).
+CAPSULE_OUTER_RADIUS_MM = 0.412
+#: Titanium wall thickness [mm]: (0.824 - 0.713) / 2 (TG-43U1S2 A11).
+CAPSULE_WALL_MM = 0.0555
 #: Physical capsule length [mm]; matches ``TG43Engine._CAP_HALF_CM * 2``.
 CAPSULE_LENGTH_MM = 4.5
 #: TG-43 *active* length [mm]; matches ``TG43Engine._L`` (0.40 cm).
