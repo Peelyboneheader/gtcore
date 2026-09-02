@@ -13,11 +13,20 @@ geometry lives in :mod:`gtcore.interact` (pure numpy/trimesh).
 Dose contract (implemented by :mod:`gtcore.dose`, loaded lazily on 'u')::
 
     compute_dose_grid(seed_centers, seed_axes, bounds_ras,
-                      spacing_mm=2.0, sk_per_seed_u=3.5) -> Volume
+                      spacing_mm=2.0, sk_per_seed_u=3.5,
+                      interference=None) -> Volume
     isodose_surfaces(dose_volume, levels_cgy) -> {level_cgy: trimesh.Trimesh}
+    InterferenceModel.from_implant(seed_centers, seed_axes) -> model
 
 ``bounds_ras`` is a (2, 3) array of RAS min/max corners.  If the functions
 are missing or fail, the planner shows a message and keeps running.
+
+'i' toggles inter-seed attenuation (:mod:`gtcore.dose.interference`): the
+seeds and tiles already on the board shadow one another, which plain TG-43
+superposition cannot express.  It is off by default so what the planner
+shows matches the formalism unless the user asks for the correction; tile
+carriers stay out of the model entirely, since their contribution rests on
+an unmeasured density (see docs/interference-notes.md).
 """
 from __future__ import annotations
 
@@ -79,6 +88,7 @@ class _PlannerApp:
         self._next_id = 0
         self.selected = -1
         self.next_kind = "full"
+        self.interference = False
 
         self.pl = pv.Plotter(window_size=(1280, 900), title=title,
                              off_screen=off_screen)
@@ -140,6 +150,7 @@ class _PlannerApp:
             ("Tab", self._cycle_selection),
             ("x", self._delete_selected),
             ("u", self.update_dose),
+            ("i", self._toggle_interference),
         ):
             try:
                 pl.add_key_event(key, fn)
@@ -311,6 +322,17 @@ class _PlannerApp:
             pass
 
     # ------------------------------------------------------------------- dose
+    def _toggle_interference(self):
+        """Flip inter-seed attenuation on/off for the next dose update.
+
+        Deliberately does NOT recompute: a dose update takes seconds, and a
+        surgeon tapping a key should not trigger one by surprise.
+        """
+        self.interference = not self.interference
+        self._update_status(
+            "inter-seed attenuation %s -- press 'u' to recompute"
+            % ("ON" if self.interference else "OFF"))
+
     def update_dose(self):
         """Recompute + redraw isodose surfaces over detected + placed seeds."""
         try:
@@ -333,7 +355,23 @@ class _PlannerApp:
         bounds = np.vstack([centers.min(axis=0) - DOSE_PAD_MM,
                             centers.max(axis=0) + DOSE_PAD_MM])
         levels = [frac * self.rx_cgy for frac, _n, _c in _ISO_STYLE]
+        model = None
+        if self.interference:
+            # Capsules only: the carrier term rests on an unmeasured density
+            # (see docs/interference-notes.md), so the planner never applies
+            # it.  An older dose module without the model still works.
+            try:
+                model = dose_mod.InterferenceModel.from_implant(centers, axes)
+            except (AttributeError, ValueError):
+                model = None
         try:
+            dose_volume = compute_dose_grid(centers, axes, bounds,
+                                            spacing_mm=DOSE_SPACING_MM,
+                                            interference=model)
+            surfaces = isodose_surfaces(dose_volume, levels)
+        except TypeError:
+            # Dose engine predates the interference parameter.
+            model = None
             dose_volume = compute_dose_grid(centers, axes, bounds,
                                             spacing_mm=DOSE_SPACING_MM)
             surfaces = isodose_surfaces(dose_volume, levels)
@@ -369,9 +407,10 @@ class _PlannerApp:
                              opacity=0.35)
             shown.append("%d%%" % round(100 * frac))
         self._update_status(
-            "isodose over %d seeds: %s of rx %.0f cGy"
+            "isodose over %d seeds: %s of rx %.0f cGy%s"
             % (len(centers), "/".join(shown) if shown else "none in grid",
-               self.rx_cgy))
+               self.rx_cgy,
+               " | inter-seed attenuation ON" if model is not None else ""))
 
     # -------------------------------------------------------------------- run
     def show(self):
@@ -404,7 +443,9 @@ def snapshot_planner(result: PipelineResult, actions: Sequence, path: str,
     - a 3-vector: drop a full tile at that cavity point,
     - ``{"point": xyz, "kind": "full"|"half"}``: drop a tile of that kind,
     - ``"update"`` or ``{"update": True}``: run the isodose update (a no-op
-      message if the dose engine is not importable yet).
+      message if the dose engine is not importable yet),
+    - ``"interference"`` or ``{"interference": True|False}``: toggle or set
+      inter-seed attenuation for subsequent updates.
     """
     app = _PlannerApp(result, rx_cgy=rx_cgy, off_screen=True)
     try:
@@ -412,9 +453,13 @@ def snapshot_planner(result: PipelineResult, actions: Sequence, path: str,
             if isinstance(act, str):
                 if act == "update":
                     app.update_dose()
+                elif act == "interference":
+                    app._toggle_interference()
                 continue
             if isinstance(act, dict):
-                if act.get("update"):
+                if "interference" in act:
+                    app.interference = bool(act["interference"])
+                elif act.get("update"):
                     app.update_dose()
                 else:
                     app.drop_at(act["point"], act.get("kind", "full"))

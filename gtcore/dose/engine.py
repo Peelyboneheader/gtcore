@@ -306,7 +306,8 @@ class TG43Engine:
 # ---------------------------------------------------------------------- grids
 def compute_dose_grid(seed_centers, seed_axes, bounds_ras, spacing_mm=2.0,
                       sk_per_seed_u=TG43Engine.DEFAULT_SK_U,
-                      engine=None, max_chunk_points=262144):
+                      engine=None, max_chunk_points=262144,
+                      interference=None):
     """Total-to-decay dose [cGy] on an axis-aligned RAS grid.
 
     Parameters
@@ -327,6 +328,14 @@ def compute_dose_grid(seed_centers, seed_axes, bounds_ras, spacing_mm=2.0,
     max_chunk_points : int
         Grid points per k-slab chunk; bounds peak memory to a few float64
         arrays of this length per seed evaluation.
+    interference : InterferenceModel, optional
+        Inter-seed / tile-carrier attenuation
+        (:mod:`gtcore.dose.interference`).  ``None`` (the default) is plain
+        TG-43 superposition -- every seed alone in water -- which is what the
+        formalism is defined for and what the regression tests pin.  Given a
+        model, each seed's dose rate is multiplied by the line-of-sight
+        transmission to the field point before summing.  The model's capsule
+        order must match ``seed_centers``; that is checked here, not assumed.
 
     Returns
     -------
@@ -364,6 +373,8 @@ def compute_dose_grid(seed_centers, seed_axes, bounds_ras, spacing_mm=2.0,
     affine[:3, 3] = lo
 
     eng = engine if engine is not None else TG43Engine()
+    if interference is not None:
+        interference.validate_against(centers)
 
     dose = np.zeros((nz, ny, nx), dtype=np.float64)
     # Chunk over k-slabs so peak memory stays bounded regardless of grid size.
@@ -391,6 +402,11 @@ def compute_dose_grid(seed_centers, seed_axes, bounds_ras, spacing_mm=2.0,
             # transverse plane (r clips to the floor anyway).
             theta = np.where(r_mm < 1.0e-12, 90.0, theta)
             rate = eng.dose_rate(theta, r_mm / 10.0)      # mm -> cm
+            if interference is not None:
+                # Ray geometry is already in hand; hand it over rather than
+                # recomputing (P, 3) differences and norms per seed.
+                rate = rate * interference.transmission_cached(
+                    s, flat, d, r_mm)
             acc += rate * sk[s]
 
         dose[k0:k1] = (acc * eng.TAU_HOURS).reshape(k1 - k0, ny, nx)
@@ -402,6 +418,8 @@ def compute_dose_grid(seed_centers, seed_axes, bounds_ras, spacing_mm=2.0,
         "n_seeds": int(centers.shape[0]),
         "sk_per_seed_u": np.asarray(sk).tolist(),
         "tau_hours": eng.TAU_HOURS,
+        "interference": (None if interference is None
+                         else interference.describe()),
     }
     return Volume(dose, affine, meta)
 

@@ -17,12 +17,13 @@ From this folder (`gt.bat` wraps the project venv — no activation needed):
 .\gt plan  <dicom-folder-or-file>   pipeline + interactive tile planner (drag/drop + isodoses)
 .\gt view                           either command, phantom mode (synthetic ground truth)
 .\gt demo                           full phantom demo -> output\ (NRRD, PLY meshes, figures, CSV)
-.\gt test                           run the test suite (163 tests)
+.\gt test                           run the test suite (200 tests)
 ```
 
 Planner controls: pick on the cavity wall to drop a conformed tile (`h` = half
 tile), `tab` select, arrows translate along the wall, `[` `]` rotate, `x`
-delete, `u` = recompute TG-43 dose and redraw 100/50/25% isodose shells.
+delete, `i` = toggle inter-seed attenuation, `u` = recompute TG-43 dose and
+redraw 100/50/25% isodose shells.
 
 ## Pipeline (and why the order matters)
 
@@ -51,6 +52,13 @@ delete, `u` = recompute TG-43 dose and redraw 100/50/25% isodose shells.
    `isodose_surfaces`). The five physics defects of the AAPM-era port are
    fixed and regression-pinned (`docs/tg43-port-notes.md`); S_K per seed is an
    explicit parameter to be fed from the assay certificate.
+   `dose.InterferenceModel` adds what superposition cannot express — seeds
+   and tile carriers attenuating each other along the line of sight
+   (`docs/interference-notes.md`). It is **opt-in**
+   (`compute_dose_grid(..., interference=model)`), so bare TG-43 stays the
+   default and stays regression-pinned; seed capsules cost -0.3 to -0.7% of
+   mean dose in the treated volume with 15% local shadows, while the collagen
+   carrier term is off entirely because it rests on an unmeasured density.
 7. **`gtcore.interact` / `gtcore.planner`** — snap-to-wall + curvature
    conforming for placed tiles (pure geometry, unit-tested against phantom
    truth) and the interactive planner on top.
@@ -60,7 +68,7 @@ delete, `u` = recompute TG-43 dose and redraw 100/50/25% isodose shells.
 (skull + craniotomy + lumpy cavity + wall-conformed tiles) that validates
 every stage.
 
-## Validation snapshot (2026-09-02 overnight run; 163 tests green)
+## Validation snapshot (2026-09-02 overnight run; 200 tests green)
 
 | Claim | Measured |
 |---|---|
@@ -70,6 +78,8 @@ every stage.
 | Tile pose | centre ≤0.14 mm mean, normal ≤0.9° mean; fit <10 ms |
 | TG-43 v2 vs independent quadrature | ≤1e-9 relative on G_L; grid 12 seeds/2 mm/100 mm in 0.35 s |
 | Slice-spacing robustness (adaptive params) | recall 1.00 at 1.4/2.1/2.8 mm (fixed params: 0.58/0/0); figure `output/validation_spacing.png` |
+| Inter-seed attenuation (12 seeds, capsules only) | mean -0.27% (flat grid) / -0.66% (conformed) at >=25% rx; worst voxel 0.84; +17% runtime |
+| Tile-carrier term (unmeasured density) | swings +19% to 0% over rho 0.15->1.00 g/cm^3 — **off by default**; figure `output/validation_interference.png` |
 | Real post-op CT (degraded export: 2 mm + gaps) | 4 complete tiles recovered, grid residuals 0.28–0.94 mm |
 | Physical 8-tile printed phantom (157 slices, 1 mm, O-MAR) | **32/32 seeds, 8/8 tiles**, residuals 0.32–1.38 mm; one physically crumpled tile recovered via the count constraint and flagged degraded |
 
@@ -83,8 +93,8 @@ gtcore/viz.py      optional PyVista viewer   (only files allowed to render)
 gtcore/planner.py  optional PyVista planner
 gtcore/cli.py      the `gt` command
 scripts/           demo + validation studies
-tests/             163 tests, all stages scored against phantom ground truth
-docs/              TG-43 physics notes, data notes
+tests/             200 tests, all stages scored against phantom ground truth
+docs/              TG-43 physics notes, interference notes, data notes
 output/            generated volumes, meshes, figures (gitignored)
 ```
 
