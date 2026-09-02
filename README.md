@@ -17,7 +17,7 @@ From this folder (`gt.bat` wraps the project venv — no activation needed):
 .\gt plan  <dicom-folder-or-file>   pipeline + interactive tile planner (drag/drop + isodoses)
 .\gt view                           either command, phantom mode (synthetic ground truth)
 .\gt demo                           full phantom demo -> output\ (NRRD, PLY meshes, figures, CSV)
-.\gt test                           run the test suite (189 tests)
+.\gt test                           run the test suite (206 tests)
 ```
 
 Planner controls: pick on the cavity wall to drop a conformed tile (`h` = half
@@ -68,7 +68,7 @@ report the cavity-wall area fraction receiving ≥ rx at 5 mm depth.
 (skull + craniotomy + lumpy cavity + wall-conformed tiles) that validates
 every stage.
 
-## Validation snapshot (2026-09-02 overnight run + dose-engine refinement; 189 tests green)
+## Validation snapshot (2026-09-02 overnight run + dose-engine refinement; 206 tests green)
 
 | Claim | Measured |
 |---|---|
@@ -92,7 +92,7 @@ gtcore/viz.py      optional PyVista viewer   (only files allowed to render)
 gtcore/planner.py  optional PyVista planner
 gtcore/cli.py      the `gt` command
 scripts/           demo + validation studies
-tests/             189 tests, all stages scored against phantom ground truth
+tests/             206 tests, all stages scored against phantom ground truth
 docs/              TG-43 physics notes, data notes
 output/            generated volumes, meshes, figures (gitignored)
 ```
