@@ -200,3 +200,25 @@ tables, not consensus parameters.
 - Anything inside the titanium capsule: TG-43 does not define dose there;
   the engine's nearest-surface projection is an engineering choice and is
   documented as such.
+---
+
+## 6. Superposition ignores the seeds getting in each other's way
+
+Not a port defect — a limit of the formalism itself, recorded here because it
+is the next thing that bites anyone quoting absolute dose from this engine.
+TG-43U1 is defined for one seed alone in unbounded water, so summing per-seed
+grids assumes the other seeds and the collagen tile carriers are not there.
+At 30 keV a titanium capsule is an aggressive absorber, so they are.
+
+**Status: ADDRESSED, opt-in, in `gtcore/dose/interference.py`.**
+`InterferenceModel` applies a primary-fluence Beer-Lambert transmission along
+each seed-to-point ray, using excess attenuation relative to the displaced
+water. Passing `compute_dose_grid(..., interference=model)` enables it;
+omitting it reproduces the plain formalism bit for bit, so every regression
+pin above still means what it says. Seed capsules cost -0.3 to -0.7% of mean
+dose in the treated volume with local shadows near 15%. The collagen carrier
+term is **not** enabled by default: its magnitude is set by an unmeasured
+density and, at the dry-sponge value, exceeds the interseed shadow and flips
+its sign. Scatter refilling the shadow is not modelled, so the correction
+overestimates shadow depth. Full derivation, coefficients and measurements:
+`docs/interference-notes.md`.
