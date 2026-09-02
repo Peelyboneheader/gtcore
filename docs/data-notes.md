@@ -58,3 +58,19 @@ Cavity mask is 0 voxels on this export under every prior (none / all 53 / the
 segmentation depends on, and the brain mask collapses to a degenerate blob.
 The planner now says "no cavity surface in this scan" instead of eating
 clicks. Expect both to work on the original thin-cut series.
+
+## Automatic implant detection (assess_implant) — capabilities and limits
+Tri-state verdict (confirmed / uncertain / absent) from manufactured-geometry
+evidence: gate-passing 4-seed quads, non-bone context, grouping within one
+cavity-sized region. Correct on every implanted scan tested (synthetic,
+8-tile physical, PostOp real) and on synthetic negatives (scatter, chains).
+KNOWN LIMITATION, measured on the DOE pre-implant negative control: dense
+physiologic calcifications (pineal/choroid/falx) cluster near the third
+ventricle, survive the shape filters (which select rod-like blobs by
+construction), and form 6 chance quads with genuinely tile-like geometry
+(residual 0.2-0.7 mm, axis coherence 0.94-0.98) -> false "confirmed".
+No cheap feature separates them (tried: linkage clustering, bone masks,
+shell-HU context, peak HU, elongation). Resolution: the verdict is EVIDENCE,
+not authority -- surgeon knows whether an implant exists; the principled
+discriminator (model-selection with deformable tile physics) is the
+feature/tile-autogen work.

@@ -184,7 +184,19 @@ total (a test pins this, and it is what catches an over-eager prune).
 
 `find_shadowing_tiles(tiles, threshold_pct=2.0)` reduces that to the same
 shape `find_overlapping_tiles` returns, plus the percentage, so the planner
-flags both the same way. It reports on tile changes but is skipped mid-drag.
+flags both the same way: an overlap is a `WARNING` (two sheets cannot occupy
+one space), shadowing is a `NOTE` (the plan is legal but costs dose).
+
+The sweep is skipped in three cases, all for latency rather than
+correctness:
+
+- **mid-drag**, since that path budgets tens of milliseconds and the sweep
+  costs hundreds;
+- **above 16 tiles**, where the pairwise cost stops being interactive;
+- **during startup adoption of the fitted implant.** The planner opens with
+  the tiles recovered from the scan already on the board, and running the
+  sweep there would spend up to half a second of launch latency answering a
+  question the user has not asked. The first real edit runs it.
 
 ### What it finds, and what it correctly ignores
 

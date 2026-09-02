@@ -129,40 +129,86 @@ def _stacked_tiles():
     return [make(0.0), make(-4.0)]
 
 
-def test_planner_flags_dosimetric_shadowing():
-    """Tiles standing in each other's line of fire get flagged, and the
-    warning reaches the status text a surgeon actually reads."""
+def _shadow_app(tiles=None, **overrides):
+    """A bare planner carrying only the state `_refresh_shadowing` reads.
+
+    Built with __new__ so no window, pipeline or GPU is needed. Every field
+    the sweep and its guards consult is set here in one place, so a planner
+    refactor that adds guard state fails with a clear name rather than
+    scattering AttributeErrors across several tests.
+    """
     from gtcore.planner import _PlannerApp
 
     app = _PlannerApp.__new__(_PlannerApp)
-    app.tiles = _stacked_tiles()
-    app._drag_idx = -1
-    app._overlap_pairs = []
+    app.tiles = _stacked_tiles() if tiles is None else tiles
+    app._drag_idx = -1        # not dragging
+    app._adopting = False     # not in startup adoption
     app._shadow_pairs = []
-    app.selected = -1
-    app.next_kind = "full"
-    app._last_status = ""
-    app.pl = None
+    for key, value in overrides.items():
+        setattr(app, key, value)
+    return app
 
+
+def test_planner_flags_dosimetric_shadowing():
+    """Tiles standing in each other's line of fire get flagged."""
+    app = _shadow_app()
     app._refresh_shadowing()
+
     assert len(app._shadow_pairs) == 1
     i, j, pct = app._shadow_pairs[0]
     assert (i, j) == (0, 1)
     assert pct > 2.0
 
-    app._update_status()
-    assert "shadow each other" in app._last_status
-    assert "tiles 1 & 2" in app._last_status
+
+def test_planner_shadowing_reaches_the_status_text():
+    """The flag is worthless unless it reaches the line a surgeon reads.
+
+    Exercises the real `_update_status` on a real off-screen planner rather
+    than a hand-built stub, so it stays honest about the merged status
+    layout (header, WARNING lines, then NOTE lines).
+    """
+    vol, _truth = make_head_phantom(spacing=1.0)
+    result = reconstruct(vol, verbose=False)
+    if "cavity" not in result.meshes:
+        pytest.skip("pipeline found no cavity on this phantom")
+
+    from gtcore.planner import _PlannerApp
+
+    try:
+        app = _PlannerApp(result, off_screen=True)
+    except Exception as exc:  # headless CI without OpenGL etc.
+        pytest.skip("off-screen rendering unavailable: %r" % (exc,))
+    try:
+        app.tiles = _stacked_tiles()
+        app._overlap_pairs = [(0, 1)]
+        app._shadow_pairs = [(0, 1, 5.7)]
+        app._update_status()
+        # Both checks report, and the overlap WARNING stays ahead of the
+        # shadowing NOTE -- other planner tests substring-match that order.
+        assert "WARNING: tiles 1 & 2 overlap" in app._last_status
+        assert "shadow each other" in app._last_status
+        assert "tiles 1 & 2 shadow" in app._last_status
+        assert (app._last_status.index("WARNING: tiles 1 & 2 overlap")
+                < app._last_status.index("tiles 1 & 2 shadow"))
+    finally:
+        app.close()
 
 
 def test_planner_shadowing_is_skipped_mid_drag():
     """The drag path budgets tens of milliseconds; the sweep costs more."""
-    from gtcore.planner import _PlannerApp
+    app = _shadow_app(_drag_idx=0, _shadow_pairs=[(0, 1, 9.9)])
+    app._refresh_shadowing()
+    assert app._shadow_pairs == []
 
-    app = _PlannerApp.__new__(_PlannerApp)
-    app.tiles = _stacked_tiles()
-    app._drag_idx = 0            # a drag is in progress
-    app._shadow_pairs = [(0, 1, 9.9)]
+
+def test_planner_shadowing_is_skipped_during_startup_adoption():
+    """Adopting the fitted implant must not add half a second to launch.
+
+    At startup the user has not asked a question yet, so the sweep waits for
+    the first real edit rather than spending launch latency on an answer
+    nobody requested.
+    """
+    app = _shadow_app(_adopting=True, _shadow_pairs=[(0, 1, 9.9)])
     app._refresh_shadowing()
     assert app._shadow_pairs == []
 
@@ -170,13 +216,8 @@ def test_planner_shadowing_is_skipped_mid_drag():
 def test_planner_shadowing_survives_a_broken_check():
     """Advisory feature: a failure must never take the planner down."""
     import gtcore.dose.interference as mod
-    from gtcore.planner import _PlannerApp
 
-    app = _PlannerApp.__new__(_PlannerApp)
-    app.tiles = _stacked_tiles()
-    app._drag_idx = -1
-    app._shadow_pairs = []
-
+    app = _shadow_app()
     real = mod.find_shadowing_tiles
     mod.find_shadowing_tiles = lambda *a, **k: 1 / 0
     try:
