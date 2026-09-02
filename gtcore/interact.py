@@ -356,6 +356,41 @@ def tiles_to_seed_arrays(tiles):
     return centers, axes
 
 
+# ------------------------------------------------------------------- export
+def export_plan_csv(path, tiles, detected_centers=None, detected_axes=None,
+                    rx_cgy=None):
+    """Write every seed on the board to ``path`` as CSV; returns the count.
+
+    Columns: ``source`` (detected/placed), ``tile`` (1-based placed tile
+    number, blank for detected seeds), ``kind``, ``seed`` (index within the
+    tile), RAS centre ``x_mm y_mm z_mm`` and unit long axis ``ax ay az``.
+    A ``# rx_cgy=...`` comment line records the prescription when given.
+    """
+    import csv
+
+    det_c = np.zeros((0, 3)) if detected_centers is None \
+        else np.asarray(detected_centers, dtype=float).reshape(-1, 3)
+    det_a = np.zeros((0, 3)) if detected_axes is None \
+        else np.asarray(detected_axes, dtype=float).reshape(-1, 3)
+    n = 0
+    with open(path, "w", newline="") as fh:
+        if rx_cgy is not None:
+            fh.write("# rx_cgy=%.1f\n" % float(rx_cgy))
+        w = csv.writer(fh)
+        w.writerow(["source", "tile", "kind", "seed",
+                    "x_mm", "y_mm", "z_mm", "ax", "ay", "az"])
+        for i, (c, a) in enumerate(zip(det_c, det_a)):
+            w.writerow(["detected", "", "", i] + ["%.3f" % v for v in c]
+                       + ["%.4f" % v for v in a])
+            n += 1
+        for t_i, tile in enumerate(tiles):
+            for s_i, (c, a) in enumerate(zip(tile.seed_centers, tile.seed_axes)):
+                w.writerow(["placed", t_i + 1, tile.kind, s_i]
+                           + ["%.3f" % v for v in c] + ["%.4f" % v for v in a])
+                n += 1
+    return n
+
+
 # ------------------------------------------------------------ overlap detection
 _OVERLAP_GRID_N = 7          # NxN footprint sampling grid
 _OVERLAP_NORMAL_DOT = 0.5    # local normals must agree this much (same wall)

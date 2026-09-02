@@ -489,8 +489,16 @@ def _prepare_seeds(seed_centers, seed_axes, sk_per_seed_u):
     return centers, axes, sk
 
 
-def _sum_seed_rates(points_mm, centers, axes, sk, eng, exact):
-    """S_K-weighted sum of per-seed rates at (M, 3) RAS points [cGy/h]."""
+def _sum_seed_rates(points_mm, centers, axes, sk, eng, exact,
+                    interference=None):
+    """S_K-weighted sum of per-seed rates at (M, 3) RAS points [cGy/h].
+
+    With an ``interference`` model, each seed's rate is multiplied by the
+    line-of-sight transmission from that seed to the point before it is
+    summed -- the one place superposition can express occluders at all.  The
+    ray geometry is already in hand here, so it is handed over rather than
+    recomputed inside the model.
+    """
     acc = np.zeros(points_mm.shape[0], dtype=np.float64)
     rate_fn = eng._rate_folded if exact else eng._rate_tabulated_folded
     for s in range(centers.shape[0]):
@@ -504,8 +512,13 @@ def _sum_seed_rates(points_mm, centers, axes, sk, eng, exact):
         # a point exactly on the centre (y = z = 0) lands on 90 deg, the
         # transverse plane, and r floors anyway.
         theta = np.degrees(np.arctan2(y, np.abs(z)))
-        r_cm = np.maximum(np.sqrt(r2) / 10.0, eng.R_FLOOR_CM)
-        acc += rate_fn(theta, r_cm) * sk[s]
+        r_mm = np.sqrt(r2)
+        r_cm = np.maximum(r_mm / 10.0, eng.R_FLOOR_CM)
+        rate = rate_fn(theta, r_cm)
+        if interference is not None:
+            rate = rate * interference.transmission_cached(
+                s, points_mm, d, r_mm)
+        acc += rate * sk[s]
     return acc
 
 
@@ -513,7 +526,7 @@ def _sum_seed_rates(points_mm, centers, axes, sk, eng, exact):
 def compute_dose_grid(seed_centers, seed_axes, bounds_ras, spacing_mm=2.0,
                       sk_per_seed_u=TG43Engine.DEFAULT_SK_U,
                       engine=None, max_chunk_points=262144,
-                      elapsed_hours=None, exact=False):
+                      elapsed_hours=None, exact=False, interference=None):
     """Dose [cGy] on an axis-aligned RAS grid.
 
     Parameters
@@ -540,6 +553,14 @@ def compute_dose_grid(seed_centers, seed_axes, bounds_ras, spacing_mm=2.0,
         of the total-to-decay dose (``None``).
     exact : bool
         Use the analytic rate instead of the tabulated kernel.
+    interference : InterferenceModel, optional
+        Inter-seed / tile-carrier attenuation
+        (:mod:`gtcore.dose.interference`).  ``None`` (the default) is plain
+        TG-43 superposition -- every seed alone in water -- which is what the
+        formalism is defined for and what the regression tests pin.  Given a
+        model, each seed's dose rate is multiplied by the line-of-sight
+        transmission to the field point before summing.  The model's capsule
+        order must match ``seed_centers``; that is checked here, not assumed.
 
     Returns
     -------
@@ -567,6 +588,8 @@ def compute_dose_grid(seed_centers, seed_axes, bounds_ras, spacing_mm=2.0,
     affine[:3, 3] = lo
 
     eng = engine if engine is not None else TG43Engine()
+    if interference is not None:
+        interference.validate_against(centers)
     fraction = float(eng.delivered_fraction(elapsed_hours))
     scale = eng.TAU_HOURS * fraction
 
@@ -583,7 +606,8 @@ def compute_dose_grid(seed_centers, seed_axes, bounds_ras, spacing_mm=2.0,
         pts[..., 1] = yy[None, :, :]
         pts[..., 2] = zz[:, None, None]
         flat = pts.reshape(-1, 3)
-        acc = _sum_seed_rates(flat, centers, axes, sk, eng, exact)
+        acc = _sum_seed_rates(flat, centers, axes, sk, eng, exact,
+                              interference=interference)
         dose[k0:k1] = (acc * scale).reshape(k1 - k0, ny, nx)
 
     meta = {
@@ -597,31 +621,37 @@ def compute_dose_grid(seed_centers, seed_axes, bounds_ras, spacing_mm=2.0,
         "elapsed_hours": None if elapsed_hours is None else float(elapsed_hours),
         "delivered_fraction": fraction,
         "kernel": "exact" if exact else "table",
+        "interference": (None if interference is None
+                         else interference.describe()),
     }
     return Volume(dose, affine, meta)
 
 
 def dose_at_points(seed_centers, seed_axes, points_ras,
                    sk_per_seed_u=TG43Engine.DEFAULT_SK_U, engine=None,
-                   elapsed_hours=None, exact=True, max_chunk_points=262144):
+                   elapsed_hours=None, exact=True, max_chunk_points=262144,
+                   interference=None):
     """Dose [cGy] at arbitrary RAS points, no grid.
 
-    Same seed / S_K / elapsed-time semantics as :func:`compute_dose_grid`;
-    defaults to the exact analytic rate. Returns ``(M,)`` for ``(M, 3)``
-    input or a float for a single point.
+    Same seed / S_K / elapsed-time / ``interference`` semantics as
+    :func:`compute_dose_grid`; defaults to the exact analytic rate. Returns
+    ``(M,)`` for ``(M, 3)`` input or a float for a single point.
     """
     centers, axes, sk = _prepare_seeds(seed_centers, seed_axes, sk_per_seed_u)
     pts = np.asarray(points_ras, dtype=float)
     single = pts.ndim == 1
     pts = np.atleast_2d(pts).reshape(-1, 3)
     eng = engine if engine is not None else TG43Engine()
+    if interference is not None:
+        interference.validate_against(centers)
     scale = eng.TAU_HOURS * float(eng.delivered_fraction(elapsed_hours))
     out = np.empty(pts.shape[0], dtype=np.float64)
     step = max(1, int(max_chunk_points))
     for i0 in range(0, pts.shape[0], step):
         chunk = pts[i0:i0 + step]
         out[i0:i0 + step] = _sum_seed_rates(chunk, centers, axes, sk, eng,
-                                            exact) * scale
+                                            exact,
+                                            interference=interference) * scale
     return float(out[0]) if single else out
 
 

@@ -19,14 +19,27 @@ From this folder (`gt.bat` wraps the project venv — no activation needed):
 .\gt plan  <scan> --suggest         ... starting from the auto-inferred tiles (planner key 'g')
 .\gt view                           either command, phantom mode (synthetic ground truth)
 .\gt demo                           full phantom demo -> output\ (NRRD, PLY meshes, figures, CSV)
-.\gt test                           run the test suite (206 tests)
+.\gt test                           run the test suite (402 tests)
 ```
 
-Planner controls: pick on the cavity wall to drop a conformed tile (`h` = half
-tile), `tab` select, arrows translate along the wall, `[` `]` rotate, `x`
-delete, `g` = suggest tiles from the detected seeds (auto count),
-`u` = recompute TG-43 dose, redraw 100/50/25% isodose shells and
-report the cavity-wall area fraction receiving ≥ rx at 5 mm depth.
+Planner controls (the same legend is on screen; `?` collapses it):
+
+| Group | Key / mouse | Action |
+|---|---|---|
+| Place | hover the blue wall | white **ghost tile** previews the next drop (red = would overlap) |
+| | right-click or `P` | drop the tile there; `H` = next tile full / half |
+| | `T` | **suggest tiles**: infer the implant configuration from the detected seeds with no count (`gt plan --suggest` starts this way); suggestions are ordinary tiles afterwards |
+| Adjust | left-drag on a tile | grab it by its quad or seed capsules (no modifier) and slide it along the wall; hovered tile lights up |
+| | Ctrl + left-drag on the wall | slide the *selected* tile from anywhere (forgiving mode); a press that grabs nothing says so in the status bar |
+| | gold outline | tile fitted **from the scan** (the implant); green = placed by hand. Backspace clears only hand-placed tiles |
+| | `Tab`, arrows, `[` `]` | select next tile, nudge 2 mm, rotate 10 deg |
+| | `X` / `Del`, `Backspace`, `Z` | delete tile, delete all hand-placed tiles, undo (50 steps) |
+| Dose | `U` | TG-43 dose grid, 100/50/25 % isodoses (red/orange/yellow) and the **dose panel** (D90/D50/Dmin/V100/V150 on the cavity wall and +5/+10 mm tissue shells + shell DVH; flagged STALE when a tile moves) |
+| | `+` `-` | prescription +/- 100 cGy, isodoses re-cut from the grid |
+| | `A` | inter-seed attenuation on/off for the next `U` (capsule shadowing; carriers excluded, see `docs/interference-notes.md`); the panel also reports the cavity-wall area fraction receiving >= rx at 5 mm depth |
+| | `I`, `C`, `D` | isodoses on/off, clear isodoses, dose panel on/off (also clickable buttons above the DVH chart) |
+| Export | `S` | save every seed (detected + placed, RAS mm + axis) to `output/plan_<timestamp>.csv` |
+| View | left/right/middle-drag, `R`, `G`, `B` | rotate (off tiles) / zoom / pan, reset camera, ghost preview on/off, background colour |
 
 ## Pipeline (and why the order matters)
 
@@ -71,16 +84,25 @@ report the cavity-wall area fraction receiving ≥ rx at 5 mm depth.
    `sk_decayed` / `delivered_fraction` for assay→implant decay and dose at a
    given time. `dose.metrics` adds the clinical readouts: DVH (D90/V100/
    V150/V200), the 5 mm cavity rind, and wall coverage at depth.
+   `dose.InterferenceModel` adds what superposition cannot express — seeds
+   and tile carriers attenuating each other along the line of sight
+   (`docs/interference-notes.md`). It is **opt-in**
+   (`compute_dose_grid(..., interference=model)`), so bare TG-43 stays the
+   default and stays regression-pinned; seed capsules cost -0.3 to -0.7% of
+   mean dose in the treated volume with 15% local shadows, while the collagen
+   carrier term is off entirely because it rests on an unmeasured density.
 7. **`gtcore.interact` / `gtcore.planner`** — snap-to-wall + curvature
    conforming for placed tiles (pure geometry, unit-tested against phantom
-   truth) and the interactive planner on top.
+   truth) and the interactive planner on top; `gtcore.dose.dvh` scores
+   cavity-wall shells (offset outward into tissue) for the planner's dose
+   panel.
 
 `gtcore.pipeline.reconstruct(vol, n_full_tiles=..., n_half_tiles=...)` runs
 1→5 in one call; `gtcore.phantom` provides the synthetic ground-truth head
 (skull + craniotomy + lumpy cavity + wall-conformed tiles) that validates
 every stage.
 
-## Validation snapshot (2026-09-02 overnight run + dose-engine refinement; 206 tests green)
+## Validation snapshot (2026-09-02 overnight run + dose-engine refinement + tile interference + planner UI v3; 402 tests green)
 
 | Claim | Measured |
 |---|---|
@@ -91,6 +113,8 @@ every stage.
 | TG-43 v2 vs independent quadrature | ≤1e-9 relative on G_L; tabulated kernel ≤1e-3 vs analytic (r ≥ 2.5 mm); grid 12 seeds/2 mm/100 mm in 0.17 s, 1 mm in 1.1 s |
 | Isodose surface placement (log-dose marching cubes, 2 mm grid) | 0.04 mm rms, 0.09 mm max vs analytic isodose radius |
 | Slice-spacing robustness (adaptive params) | recall 1.00 at 1.4/2.1/2.8 mm (fixed params: 0.58/0/0); figure `output/validation_spacing.png` |
+| Inter-seed attenuation (12 seeds, capsules only) | mean -0.27% (flat grid) / -0.65% (conformed) at >=25% rx; worst voxel 0.84; +14-20% runtime |
+| Tile-carrier term (unmeasured density) | swings +19% to 0% over rho 0.15->1.00 g/cm^3 — **off by default**; figure `output/validation_interference.png` |
 | Real post-op CT (degraded export: 2 mm + gaps) | 4 complete tiles recovered, grid residuals 0.28–0.94 mm |
 | Physical 8-tile printed phantom (157 slices, 1 mm, O-MAR) | **32/32 seeds, 8/8 tiles**, residuals 0.32–1.38 mm; one physically crumpled tile recovered via the count constraint and flagged degraded |
 | **Automatic tile creation, no count** (`scripts/validation_autogen.py`) | synthetic 54/60 exact (30/30 at 0.8 mm; the 6 misses at 1.2 mm are seed-detection misses the counted fit shares), centre 0.12 mm mean, normal 2.4°; printed phantom **8/8 incl. the crumpled tile** (0.46 mm rms, 288° fold, no count fallback); post-op cluster n = 4 by score saturation |
@@ -105,8 +129,8 @@ gtcore/viz.py      optional PyVista viewer   (only files allowed to render)
 gtcore/planner.py  optional PyVista planner
 gtcore/cli.py      the `gt` command
 scripts/           demo + validation studies
-tests/             206 tests, all stages scored against phantom ground truth
-docs/              TG-43 physics notes, data notes
+tests/             402 tests, all stages scored against phantom ground truth
+docs/              TG-43 physics notes, interference notes, data notes
 output/            generated volumes, meshes, figures (gitignored)
 ```
 
