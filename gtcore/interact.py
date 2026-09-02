@@ -43,6 +43,7 @@ __all__ = [
     "translate_on_wall",
     "rotate_on_wall",
     "tiles_to_seed_arrays",
+    "find_overlapping_tiles",
 ]
 
 SEED_WALL_OFFSET_MM = 2.0     # seed centre this far off the wall, cavity side
@@ -348,3 +349,245 @@ def tiles_to_seed_arrays(tiles):
     centers = np.vstack([t.seed_centers for t in tiles])
     axes = np.vstack([t.seed_axes for t in tiles])
     return centers, axes
+
+
+# ------------------------------------------------------------ overlap detection
+_OVERLAP_GRID_N = 7          # NxN footprint sampling grid
+_OVERLAP_NORMAL_DOT = 0.5    # local normals must agree this much (same wall)
+
+
+def _footprint_surface(tile, n_grid=_OVERLAP_GRID_N):
+    """Sample a placed tile's conformed collagen footprint from its own fields.
+
+    The physical footprint is the 20x20 mm (full) / 10x20 mm (half) collagen
+    sheet draped on the wall.  ``find_overlapping_tiles`` gets no mesh, so the
+    curved sheet is reconstructed from the conformed points the tile already
+    carries: the 4 corners, the seed centres, and the anchor pushed
+    ``SEED_WALL_OFFSET_MM`` along the anchor normal (all of which lie ON the
+    conformed sheet, 2 mm off the wall).  In the anchor tangent frame
+    ``(t1, t2, n)`` a quadratic height field ``z(u, v)`` is least-squares
+    fitted through those 7-9 points -- a bilinear patch over the 4 corners
+    alone is NOT good enough here: on this cavity's curvature the corners sag
+    several mm below the tangent plane, so a bilinear centre would float mm
+    off the real sheet, while the quadratic tracks it to well under 1 mm.
+
+    Returns ``(points (n_grid**2, 3), normals (n_grid**2, 3))`` with normals
+    unit and oriented INTO the cavity (same sense as ``tile.normal_ras``).
+    """
+    n = _unit(tile.normal_ras)
+    t1 = _unit(tile.axis_ras - float(tile.axis_ras @ n) * n)
+    t2 = _unit(np.cross(n, t1))
+    anchor = tile.anchor_ras
+
+    pts = np.vstack([
+        tile.corners_ras,
+        tile.seed_centers,
+        anchor + SEED_WALL_OFFSET_MM * n,
+    ])
+    rel = pts - anchor[None, :]
+    u = rel @ t1
+    v = rel @ t2
+    z = rel @ n
+
+    # quadratic height field z(u, v) = c . [1, u, v, u^2, u*v, v^2], fitted in
+    # coordinates scaled by the tile half-size for conditioning.  rcond=1e-6
+    # (not None) is essential: at a symmetric placement the u^2 and v^2
+    # columns coincide across every fit point (corners/seeds all at |u|=|v|),
+    # and keeping the resulting near-zero singular value would amplify fp
+    # noise into wildly curved surfaces; the cutoff drops it and lstsq falls
+    # back to the benign minimum-norm fit.
+    sc = TILE_HALF_SIZE_MM
+    us, vs = u / sc, v / sc
+    basis = np.column_stack(
+        [np.ones_like(us), us, vs, us * us, us * vs, vs * vs]
+    )
+    coef, _res, _rank, _sv = np.linalg.lstsq(basis, z, rcond=1e-6)
+
+    # sample the (u, v) domain as the bilinear span of the 4 corners' own
+    # tangent coordinates (loop order c0, c1, c2, c3 -> bilinear corners
+    # p00, p10, p11, p01), so a warped/rotated quad is covered exactly
+    cu, cv = u[:4], v[:4]
+    s = np.linspace(0.0, 1.0, n_grid)
+    S, T = np.meshgrid(s, s, indexing="ij")
+    S = S.reshape(-1)
+    T = T.reshape(-1)
+    w00, w10, w11, w01 = ((1 - S) * (1 - T), S * (1 - T), S * T, (1 - S) * T)
+    gu = w00 * cu[0] + w10 * cu[1] + w11 * cu[2] + w01 * cu[3]
+    gv = w00 * cv[0] + w10 * cv[1] + w11 * cv[2] + w01 * cv[3]
+
+    gus, gvs = gu / sc, gv / sc
+    gz = (coef[0] + coef[1] * gus + coef[2] * gvs
+          + coef[3] * gus * gus + coef[4] * gus * gvs + coef[5] * gvs * gvs)
+    points = (anchor[None, :] + gu[:, None] * t1[None, :]
+              + gv[:, None] * t2[None, :] + gz[:, None] * n[None, :])
+
+    # surface normal of z - f(u, v) = 0 is (n - f_u t1 - f_v t2), which keeps
+    # a positive component along the inward anchor normal n
+    fu = (coef[1] + 2.0 * coef[3] * gus + coef[4] * gvs) / sc
+    fv = (coef[2] + coef[4] * gus + 2.0 * coef[5] * gvs) / sc
+    normals = (n[None, :] - fu[:, None] * t1[None, :] - fv[:, None] * t2[None, :])
+    normals /= np.maximum(np.linalg.norm(normals, axis=1), 1e-12)[:, None]
+    return points, normals
+
+
+def _grid_triangles(n_grid):
+    """Vertex-index triples triangulating an ``n_grid x n_grid`` point grid."""
+    a, b = np.meshgrid(np.arange(n_grid - 1), np.arange(n_grid - 1),
+                       indexing="ij")
+    i00 = (a * n_grid + b).reshape(-1)
+    i10 = i00 + n_grid
+    i01 = i00 + 1
+    i11 = i10 + 1
+    return np.vstack([
+        np.column_stack([i00, i10, i01]),
+        np.column_stack([i10, i11, i01]),
+    ])
+
+
+def _point_triangle_dist(P, tri):
+    """Min distance from each point to each triangle: ``(p, t)`` array.
+
+    Vectorized closest-point-on-triangle (Ericson, *Real-Time Collision
+    Detection* 5.1.5) -- exact, no iteration, sizes here are ~49 x 72.
+    """
+    A = tri[None, :, 0, :]
+    B = tri[None, :, 1, :]
+    C = tri[None, :, 2, :]
+    Pp = P[:, None, :]
+    ab = B - A
+    ac = C - A
+    ap = Pp - A
+    d1 = (ab * ap).sum(-1)
+    d2 = (ac * ap).sum(-1)
+    bp = Pp - B
+    d3 = (ab * bp).sum(-1)
+    d4 = (ac * bp).sum(-1)
+    cp = Pp - C
+    d5 = (ab * cp).sum(-1)
+    d6 = (ac * cp).sum(-1)
+    va = d3 * d6 - d5 * d4
+    vb = d5 * d2 - d1 * d6
+    vc = d1 * d4 - d3 * d2
+
+    def _safe_div(num, den):
+        return num / np.where(np.abs(den) < 1e-30, 1e-30, den)
+
+    # candidate closest points for every region, then pick by first-match
+    close = np.empty(np.broadcast_shapes(Pp.shape, A.shape), dtype=float)
+    done = np.zeros(d1.shape, dtype=bool)
+
+    def _take(mask, value):
+        m = mask & ~done
+        if m.any():
+            close[m] = np.broadcast_to(value, close.shape)[m]
+            done[m] = True
+
+    _take((d1 <= 0) & (d2 <= 0), A)                              # vertex A
+    _take((d3 >= 0) & (d4 <= d3), B)                             # vertex B
+    _take((d6 >= 0) & (d5 <= d6), C)                             # vertex C
+    t_ab = _safe_div(d1, d1 - d3)[..., None]
+    _take((vc <= 0) & (d1 >= 0) & (d3 <= 0), A + t_ab * ab)      # edge AB
+    t_ac = _safe_div(d2, d2 - d6)[..., None]
+    _take((vb <= 0) & (d2 >= 0) & (d6 <= 0), A + t_ac * ac)      # edge AC
+    t_bc = _safe_div(d4 - d3, (d4 - d3) + (d5 - d6))[..., None]
+    _take((va <= 0) & (d4 - d3 >= 0) & (d5 - d6 >= 0),
+          B + t_bc * (C - B))                                    # edge BC
+    denom = _safe_div(np.ones_like(va), va + vb + vc)
+    _take(np.ones_like(done),
+          A + (vb * denom)[..., None] * ab + (vc * denom)[..., None] * ac)
+
+    return np.linalg.norm(P[:, None, :] - close, axis=-1)
+
+
+def _directed_hit(pts_a, nrm_a, pts_b, nrm_b, tris_b, tree_b, threshold,
+                  slack):
+    """True if a sample of A lies within ``threshold`` of B's footprint AND
+    the local normals agree (same wall, not the opposite one).
+
+    Two stages: sample-to-sample distances (an upper bound on the surface
+    distance) accept clear overlaps outright; only samples in the ambiguous
+    band ``(threshold, threshold + slack]`` -- within half a grid diagonal of
+    a possible surface contact -- go through the exact point-to-triangle
+    stage.  Returns ``None`` (instead of False) when A has no sample within
+    ``threshold + slack`` of B's samples at all, letting the caller skip the
+    reverse direction too.
+    """
+    d, idx = tree_b.query(pts_a, distance_upper_bound=threshold + slack)
+    cand = np.isfinite(d)
+    if not cand.any():
+        return None
+    dots = (nrm_a[cand] * nrm_b[idx[cand]]).sum(axis=1)
+    agree = dots > _OVERLAP_NORMAL_DOT
+    if bool((agree & (d[cand] <= threshold)).any()):
+        return True                                    # definite overlap
+    sub = np.flatnonzero(cand)[agree]
+    if sub.size == 0:
+        return False
+    d_exact = _point_triangle_dist(pts_a[sub], pts_b[tris_b]).min(axis=1)
+    return bool((d_exact <= threshold).any())
+
+
+def find_overlapping_tiles(tiles, threshold_mm=1.0):
+    """Detect pairs of placed tiles whose collagen footprints collide.
+
+    Two tiles overlap when their physical footprints (20x20 mm full,
+    10x20 mm half, conformed to the wall) intersect or come within
+    ``threshold_mm`` of each other.  Tiles seated on OPPOSITE walls of a
+    narrow cavity are not flagged: a close approach only counts where the
+    local footprint normals agree (``dot > 0.5``), i.e. the tiles share a
+    wall.  Runs on every drag step, so it is all vectorized numpy + one
+    cKDTree per tile (well under 50 ms for 10 tiles).
+
+    Parameters
+    ----------
+    tiles : sequence of PlacedTile
+        Any mix of full and half tiles; empty and single-element sequences
+        are fine.
+    threshold_mm : float
+        Footprints closer than this are flagged.  Edge-to-edge abutment
+        (~1-3 mm real gap) is legal at the default 1.0.
+
+    Returns
+    -------
+    list of (i, j) tuples with ``i < j``, indices into ``tiles``.
+    """
+    from scipy.spatial import cKDTree
+
+    tiles = list(tiles)
+    if len(tiles) < 2:
+        return []
+    threshold = float(threshold_mm)
+
+    pts = []
+    nrm = []
+    trees = []
+    centers = []
+    radii = []
+    for t in tiles:
+        p, nn = _footprint_surface(t)
+        pts.append(p)
+        nrm.append(nn)
+        trees.append(cKDTree(p))
+        c = p.mean(axis=0)
+        centers.append(c)
+        radii.append(float(np.linalg.norm(p - c[None, :], axis=1).max()))
+    tris = _grid_triangles(_OVERLAP_GRID_N)
+    # samples are at most half a grid diagonal from the surface they discretize
+    slack = float(max(
+        np.linalg.norm(p[_OVERLAP_GRID_N + 1] - p[0]) for p in pts
+    ))
+
+    out = []
+    for i in range(len(tiles)):
+        for j in range(i + 1, len(tiles)):
+            gap = float(np.linalg.norm(centers[i] - centers[j]))
+            if gap > radii[i] + radii[j] + threshold:
+                continue                           # bounding spheres clear
+            hit = _directed_hit(pts[i], nrm[i], pts[j], nrm[j], tris,
+                                trees[j], threshold, slack)
+            if hit is None:
+                continue                           # clouds clear even w/ slack
+            if hit or _directed_hit(pts[j], nrm[j], pts[i], nrm[i], tris,
+                                    trees[i], threshold, slack):
+                out.append((i, j))
+    return out
