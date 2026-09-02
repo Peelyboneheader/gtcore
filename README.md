@@ -17,7 +17,7 @@ From this folder (`gt.bat` wraps the project venv — no activation needed):
 .\gt plan  <dicom-folder-or-file>   pipeline + interactive tile planner (drag/drop + isodoses)
 .\gt view                           either command, phantom mode (synthetic ground truth)
 .\gt demo                           full phantom demo -> output\ (NRRD, PLY meshes, figures, CSV)
-.\gt test                           run the test suite (262 tests)
+.\gt test                           run the test suite (273 tests)
 ```
 
 Planner controls (the same legend is on screen; `?` collapses it):
@@ -26,15 +26,17 @@ Planner controls (the same legend is on screen; `?` collapses it):
 |---|---|---|
 | Place | hover the blue wall | white **ghost tile** previews the next drop (red = would overlap) |
 | | right-click or `P` | drop the tile there; `H` = next tile full / half |
-| Adjust | Ctrl + left-drag | grab a tile and slide it along the wall (hovered tile lights up) |
+| Adjust | left-drag on a tile | grab it by its quad or seed capsules (no modifier) and slide it along the wall; hovered tile lights up |
+| | Ctrl + left-drag on the wall | slide the *selected* tile from anywhere (forgiving mode); a press that grabs nothing says so in the status bar |
+| | gold outline | tile fitted **from the scan** (the implant); green = placed by hand. Backspace clears only hand-placed tiles |
 | | `Tab`, arrows, `[` `]` | select next tile, nudge 2 mm, rotate 10 deg |
-| | `X` / `Del`, `Z` | delete tile, undo last change (50 steps) |
+| | `X` / `Del`, `Backspace`, `Z` | delete tile, delete all hand-placed tiles, undo (50 steps) |
 | Dose | `U` | TG-43 dose grid, 100/50/25 % isodoses (red/orange/yellow) and the **dose panel** (D90/D50/Dmin/V100/V150 on the cavity wall and +5/+10 mm tissue shells + shell DVH; flagged STALE when a tile moves) |
 | | `+` `-` | prescription +/- 100 cGy, isodoses re-cut from the grid |
 | | `A` | inter-seed attenuation on/off for the next `U` (capsule shadowing; carriers excluded, see `docs/interference-notes.md`); the panel also reports the cavity-wall area fraction receiving >= rx at 5 mm depth |
 | | `I`, `C`, `D` | isodoses on/off, clear isodoses, dose panel on/off (also clickable buttons above the DVH chart) |
 | Export | `S` | save every seed (detected + placed, RAS mm + axis) to `output/plan_<timestamp>.csv` |
-| View | left/right/middle-drag, `R`, `G` | rotate / zoom / pan, reset camera, ghost preview on/off |
+| View | left/right/middle-drag, `R`, `G`, `B` | rotate (off tiles) / zoom / pan, reset camera, ghost preview on/off, background colour |
 
 ## Pipeline (and why the order matters)
 
@@ -88,7 +90,7 @@ Planner controls (the same legend is on screen; `?` collapses it):
 (skull + craniotomy + lumpy cavity + wall-conformed tiles) that validates
 every stage.
 
-## Validation snapshot (2026-09-02 overnight run + dose-engine refinement + tile interference + planner UI v3; 262 tests green)
+## Validation snapshot (2026-09-02 overnight run + dose-engine refinement + tile interference + planner UI v3; 273 tests green)
 
 | Claim | Measured |
 |---|---|
@@ -114,7 +116,7 @@ gtcore/viz.py      optional PyVista viewer   (only files allowed to render)
 gtcore/planner.py  optional PyVista planner
 gtcore/cli.py      the `gt` command
 scripts/           demo + validation studies
-tests/             262 tests, all stages scored against phantom ground truth
+tests/             273 tests, all stages scored against phantom ground truth
 docs/              TG-43 physics notes, interference notes, data notes
 output/            generated volumes, meshes, figures (gitignored)
 ```

@@ -177,11 +177,75 @@ def test_ctrl_left_press_off_tile_does_not_grab(app):
     _right_click(app, x, y)
     iren = _iren(app)
     iren.SetControlKey(1)
-    iren.SetEventPosition(5, 5)  # nowhere near the tile
+    iren.SetEventPosition(5, 5)  # nowhere near the tile, nor the wall
     iren.InvokeEvent("LeftButtonPressEvent")
     iren.InvokeEvent("LeftButtonReleaseEvent")
     iren.SetControlKey(0)
     assert app._drag_idx == -1
+    assert "nothing to grab" in app._last_status, "a failed grab must say so"
+
+
+def _drag(app, from_xy, to_xy, ctrl):
+    iren = _iren(app)
+    iren.SetControlKey(1 if ctrl else 0)
+    iren.SetEventPosition(*from_xy)
+    iren.InvokeEvent("LeftButtonPressEvent")
+    grabbed = app._drag_idx
+    for frac in np.linspace(0.0, 1.0, 6):
+        app._drag_last_t = float("-inf")
+        iren.SetEventPosition(int(from_xy[0] + (to_xy[0] - from_xy[0]) * frac),
+                              int(from_xy[1] + (to_xy[1] - from_xy[1]) * frac))
+        iren.InvokeEvent("MouseMoveEvent")
+    iren.InvokeEvent("LeftButtonReleaseEvent")
+    iren.SetControlKey(0)
+    return grabbed
+
+
+def test_plain_left_press_on_tile_grabs_without_modifier(app):
+    x, y = _cavity_aim(app)
+    _right_click(app, x, y)
+    start = app.tiles[0]
+    gx, gy = _display_xy(app, start.anchor_ras)
+    grabbed = _drag(app, (gx, gy), (gx + 60, gy + 15), ctrl=False)
+    assert grabbed == 0, "a press on the tile must grab it without Ctrl"
+    assert app._drag_idx == -1
+    assert np.linalg.norm(app.tiles[0].anchor_ras - start.anchor_ras) > 0.5
+
+
+def test_press_on_seed_capsule_grabs_the_tile(app):
+    x, y = _cavity_aim(app)
+    _right_click(app, x, y)
+    start = app.tiles[0]
+    # aim at a seed capsule centre, offset toward the camera so the pick ray
+    # meets the capsule (drawn on top of the quad) rather than the quad
+    sx, sy = _display_xy(app, start.seed_centers[0])
+    assert app._pick_tile_index(sx, sy) == 0, "seed capsule must be grabbable"
+    grabbed = _drag(app, (sx, sy), (sx + 60, sy + 15), ctrl=False)
+    assert grabbed == 0
+    assert np.linalg.norm(app.tiles[0].anchor_ras - start.anchor_ras) > 0.5
+
+
+def test_ctrl_press_on_wall_moves_selected_tile(app):
+    x, y = _cavity_aim(app)
+    _right_click(app, x, y)
+    start = app.tiles[0]
+    # a wall point clearly off the tile: NOT the tile, but ON the wall
+    for dx, dy in ((70, 20), (50, 15), (40, 40), (-50, 20), (30, -50), (25, 25)):
+        px, py = x + dx, y + dy
+        if app._pick_tile_index(px, py) < 0 and app._pick_cavity_point(px, py) is not None:
+            break
+    else:
+        pytest.fail("test geometry: no wall point off the tile found")
+    # without Ctrl a press on bare wall is the camera, not a grab
+    iren = _iren(app)
+    iren.SetEventPosition(px, py)
+    iren.InvokeEvent("LeftButtonPressEvent")
+    assert app._drag_idx == -1
+    iren.InvokeEvent("LeftButtonReleaseEvent")
+    # with Ctrl the same press slides the selected tile
+    grabbed = _drag(app, (px, py), (px - 30, py - 10), ctrl=True)
+    assert grabbed == 0, "Ctrl+press on the wall must grab the SELECTED tile"
+    assert np.linalg.norm(app.tiles[0].anchor_ras - start.anchor_ras) > 0.5
 
 
 # ---------------------------------------------------------------- overlaps
@@ -585,7 +649,7 @@ def test_overlay_text_is_visible_on_black(app):
 def test_delete_all_is_one_undo_step(app):
     verts = np.asarray(app.cavity.vertices)
     app.delete_all()
-    assert "no placed tiles" in app._last_status
+    assert "no tiles placed this session" in app._last_status
     x, y = _cavity_aim(app)
     _right_click(app, x, y)
     app.drop_at(verts[len(verts) // 2])
@@ -649,3 +713,70 @@ def test_attenuation_key_and_panel_flag(app):
     assert "wall area >= rx at 5 mm depth" in app._dose_panel_text
     app._toggle_interference()
     assert app.interference is False
+
+
+# ------------------------------------------------- adopted (fitted) tiles
+@pytest.fixture()
+def fitted_app():
+    """Planner opened on a scan whose implant was recovered (3 phantom tiles)."""
+    vol, _truth = make_head_phantom(spacing=1.0)
+    res = reconstruct(vol, n_full_tiles=3, verbose=False)
+    if res.tiles is None or not res.tiles.tiles:
+        pytest.skip("tile fitting recovered nothing on this phantom")
+    try:
+        planner = _PlannerApp(res, off_screen=True)
+        planner.pl.render()
+    except Exception as exc:
+        pytest.skip("off-screen rendering unavailable: %r" % (exc,))
+    yield planner
+    planner.close()
+
+
+def test_adopted_tiles_are_provenance_tracked_by_id(fitted_app):
+    from gtcore.planner import _ADOPTED_OUTLINE
+
+    app = fitted_app
+    n = len(app.result.tiles.tiles)
+    assert len(app.tiles) == n and app.selected == 0
+    assert app._adopted_ids == set(app._tile_ids)
+    assert not app._history, "adoption is the starting state, not an undo step"
+    assert "%d fitted from scan" % n in app._last_status
+    assert "fitted tiles adopted" in app._last_status, app._last_status
+    # provenance cue: gold outline on adopted tiles at rest; the interaction
+    # outline wins while selected
+    app.selected = -1
+    for i in range(n):
+        assert app._tile_style(i)["outline"] == _ADOPTED_OUTLINE
+    app.selected = 0
+    assert app._tile_style(0)["outline"] == "white"
+
+    # a hand-placed tile has no provenance outline, and edits keep the id
+    verts = np.asarray(app.cavity.vertices)
+    app.drop_at(verts[0])
+    placed_idx = len(app.tiles) - 1
+    app.selected = -1
+    assert app._tile_style(placed_idx)["outline"] is None
+    app.selected = 0
+    app._rotate_selected(0.2)
+    app._translate_selected(1.0, 0.0)
+    assert app._tile_ids[0] in app._adopted_ids
+
+    # Backspace removes only this session's tiles; adopted ones stay
+    app.delete_all()
+    assert len(app.tiles) == n and "1 tile deleted" in app._last_status
+    assert "%d fitted tiles kept" % n in app._last_status
+    app.delete_all()
+    assert "no tiles placed this session" in app._last_status
+    assert len(app.tiles) == n
+
+    # deleting one adopted tile deliberately (X) is allowed and undoable,
+    # and the id-based bookkeeping survives the index shift
+    app.selected = 0
+    first_id = app._tile_ids[0]
+    app._delete_selected()
+    assert len(app.tiles) == n - 1 and first_id not in app._tile_ids
+    assert all(tid in app._adopted_ids for tid in app._tile_ids)
+    app.undo()
+    assert len(app.tiles) == n and app._tile_ids[0] == first_id
+    app.selected = -1
+    assert app._tile_style(0)["outline"] == _ADOPTED_OUTLINE

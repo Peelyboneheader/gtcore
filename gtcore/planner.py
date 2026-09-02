@@ -88,8 +88,10 @@ UNDO_DEPTH = 50
 # place -> adjust -> evaluate -> export.  '?' collapses it to one line.
 HELP_TEXT = """GAMMATILE PLANNER                       ?  hide/show this legend
 PLACE    hover the blue wall : ghost preview of the next tile (red = overlap)
+         gold outline        : tile fitted FROM THE SCAN (green = placed by hand)
          right-click or P    : drop tile there      H : next tile full/half
-ADJUST   Ctrl + left-drag    : grab a tile and slide it along the wall
+ADJUST   left-drag ON a tile : grab it (quad or seeds) and slide it along the wall
+         Ctrl + left-drag    : slide the SELECTED tile from anywhere on the wall
          Tab                 : select next tile     arrows : nudge 2 mm
          [  ]                : rotate 10 deg        X / Del : delete tile
          Backspace           : delete ALL placed tiles
@@ -101,7 +103,7 @@ DOSE     U                   : compute TG-43 dose, isodoses + dose panel
          D                   : dose panel on/off    (or click the buttons)
          isodose colours     : 100% red   50% orange   25% yellow
 EXPORT   S                   : save plan (seed coordinates) to output/*.csv
-VIEW     left-drag rotate    right-drag zoom    middle-drag pan    R reset
+VIEW     left-drag (off tiles) rotate   right-drag zoom   middle-drag pan   R reset
          G                   : ghost preview on/off      B : background colour"""
 HELP_TEXT_COMPACT = ("? legend   right-click drop   Ctrl+drag move   "
                      "U dose   S save")
@@ -125,6 +127,7 @@ _TILE_STYLE: Dict[str, Dict] = {
 }
 _OVERLAP_COLOR = {"normal": "red", "hover": "tomato",
                   "selected": "orangered", "dragging": "orangered"}
+_ADOPTED_OUTLINE = "gold"  # provenance cue: tile recovered from the scan
 _GHOST_OVERLAP_COLOR = "red"  # otherwise the ghost takes the text colour
 # (background, text colour) pairs cycled by 'B'; text follows so the legend,
 # status, panel and ghost stay legible on every one of them
@@ -186,6 +189,10 @@ class _PlannerApp:
 
         self.tiles: List[PlacedTile] = []
         self._tile_ids: List[int] = []
+        # ids (not indices: deletes shift indices, edits keep ids) of tiles
+        # recovered FROM THE SCAN -- the implant physically in the patient,
+        # as opposed to proposals dropped by hand
+        self._adopted_ids = set()
         self._next_id = 0
         self.selected = -1
         self.next_kind = "full"
@@ -195,6 +202,7 @@ class _PlannerApp:
 
         self._cavity_actor = None
         self._tile_actors = {}       # tile id -> quad vtkActor (for grabbing)
+        self._seed_actors = {}       # tile id -> seed-capsule vtkActor (grabbable too)
         self._cavity_picker = None   # vtkCellPicker restricted to the cavity
         self._tile_picker = None     # vtkCellPicker restricted to tile quads
         self._overlap_pairs: List = []
@@ -237,7 +245,8 @@ class _PlannerApp:
         self._build_scene()
         self._bind_interaction()
         self._adopt_fitted_tiles()
-        self._update_status()
+        if not self._adopted_ids:
+            self._update_status()
 
     # ------------------------------------------------------------- base scene
     def _build_scene(self):
@@ -392,7 +401,7 @@ class _PlannerApp:
         if self._cavity_actor is not None:
             self._cavity_picker.AddPickList(self._cavity_actor)
         self._tile_picker = vtk.vtkCellPicker()
-        self._tile_picker.SetTolerance(0.005)
+        self._tile_picker.SetTolerance(0.01)  # generous: a grab must not feel dead
         self._tile_picker.PickFromListOn()
 
         def _add(event, handler):
@@ -481,10 +490,11 @@ class _PlannerApp:
             picker.InitializePickList()
             order = []
             for i, tid in enumerate(self._tile_ids):
-                actor = self._tile_actors.get(tid)
-                if actor is not None:
-                    picker.AddPickList(actor)
-                    order.append((actor, i))
+                for actor in (self._tile_actors.get(tid),
+                              self._seed_actors.get(tid)):
+                    if actor is not None:
+                        picker.AddPickList(actor)
+                        order.append((actor, i))
             if not order:
                 return -1
             picker.Pick(x, y, 0, self.pl.renderer)
@@ -510,13 +520,34 @@ class _PlannerApp:
         return False  # never abort: right-drag zoom keeps working
 
     def _on_left_press(self):
-        """Ctrl+left-press on a placed tile grabs it for dragging."""
+        """Left-press ON a tile grabs it; Ctrl+press on the wall grabs the
+        selected tile; anything else is the camera.
+
+        No modifier is needed to grab: a press that lands on any part of a
+        tile (its quad or its seed capsules) cannot mean "rotate the camera
+        around this tile", so it takes the tile.  Ctrl is the forgiving
+        mode -- with a tile selected, a press anywhere on the wall slides
+        THAT tile, so a near miss never turns into a camera spin.  A Ctrl
+        press that grabs nothing says so on screen instead of feeling dead.
+        """
         iren = getattr(self.pl.iren, "interactor", None) \
             if self.pl.iren is not None else None
         xy = self._mouse_xy()
-        idx = -1
-        if iren is not None and iren.GetControlKey() and xy is not None:
-            idx = self._pick_tile_index(xy[0], xy[1])
+        if xy is None:
+            return False
+        ctrl = bool(iren is not None and iren.GetControlKey())
+        idx = self._pick_tile_index(xy[0], xy[1])
+        if idx < 0 and ctrl:
+            if 0 <= self.selected < len(self.tiles) \
+                    and self._pick_cavity_point(xy[0], xy[1]) is not None:
+                idx = self.selected  # forgiving: slide the selection from here
+            else:
+                self._hide_ghost()
+                self._update_status(
+                    "nothing to grab: press on a tile, or hold Ctrl and press "
+                    "on the wall with a tile selected"
+                    if self.tiles else "no tiles on the board to grab")
+                return False
         if idx < 0:
             self._hide_ghost()  # camera rotate starts: no preview meanwhile
             return False
@@ -740,13 +771,18 @@ class _PlannerApp:
         else:
             sel = "no tile selected"
         # no '|' separators: VTK's text renderer draws them as wide gaps
-        text = ("tiles: %d full + %d half = %d seeds placed, %d detected"
+        n_adopted = sum(1 for tid in self._tile_ids if tid in self._adopted_ids)
+        text = ("tiles: %d full + %d half = %d seeds placed, %d detected%s"
                 "    next drop: %s    %s\n"
-                "rx %.0f cGy    dose %s    isodoses %s" % (
-                    n_full, n_half, n_placed, n_det, self.next_kind.upper(),
-                    sel, self.rx_cgy, self._dose_state(),
+                "rx %.0f cGy    dose %s    isodoses %s%s" % (
+                    n_full, n_half, n_placed, n_det,
+                    " (%d fitted from scan)" % n_adopted if n_adopted else "",
+                    self.next_kind.upper(), sel, self.rx_cgy,
+                    self._dose_state(),
                     ("none" if not self._iso_shown else
-                     "shown" if self.isodose_visible else "hidden")))
+                     "shown" if self.isodose_visible else "hidden"),
+                    "    surface: " + self._surface_label
+                    if self._surface_label != "cavity wall" else ""))
         if extra:
             text += "\n" + extra
         for i, j in self._overlap_pairs[:4]:  # tile numbers as displayed (1-based)
@@ -825,6 +861,7 @@ class _PlannerApp:
 
     def _remove_tile_actors(self, tid):
         self._tile_actors.pop(tid, None)
+        self._seed_actors.pop(tid, None)
         for suffix in ("quad", "edge", "seeds"):
             try:
                 self.pl.remove_actor("tile_%d_%s" % (tid, suffix),
@@ -840,6 +877,12 @@ class _PlannerApp:
         the fitted implant is display-only -- but adjusting the *actual*
         implant is the whole point of the planner. Each fitted pose is
         re-conformed onto the interaction surface at its own centre.
+
+        Adoption is the board's starting state, not a user action: it is not
+        on the undo stack, ``delete_all`` (Backspace) leaves adopted tiles
+        alone, and they carry a gold outline so the surgeon can tell the
+        algorithm's belief about the implant from their own proposals.  A
+        single adopted tile can still be deleted with X (and restored by Z).
         """
         fit = getattr(self.result, "tiles", None)
         if fit is None or not getattr(fit, "tiles", None):
@@ -856,6 +899,7 @@ class _PlannerApp:
                 continue
             self.tiles.append(tile)
             self._tile_ids.append(self._next_id)
+            self._adopted_ids.add(self._next_id)
             self._next_id += 1
             adopted += 1
         if adopted:
@@ -913,20 +957,30 @@ class _PlannerApp:
         self._after_change("tile deleted")
 
     def delete_all(self):
-        """Remove every placed tile (one undo step restores them all)."""
-        if not self.tiles:
-            self._update_status("no placed tiles to delete")
+        """Remove every tile placed this session (one undo step restores
+        them).  Tiles adopted from the scan stay: delete those one at a time
+        with X, deliberately."""
+        keep = [(t, tid) for t, tid in zip(self.tiles, self._tile_ids)
+                if tid in self._adopted_ids]
+        n = len(self.tiles) - len(keep)
+        if n == 0:
+            self._update_status(
+                "no tiles placed this session to delete" + (
+                    " (%d fitted tiles kept; X deletes one)" % len(keep)
+                    if keep else ""))
             return
         self._push_history()
-        n = len(self.tiles)
         self._drag_idx = -1
         self._hover_idx = -1
         for tid in list(self._tile_ids):
-            self._remove_tile_actors(tid)
-        self.tiles, self._tile_ids = [], []
-        self.selected = -1
-        self._after_change("%d tile%s deleted (Z restores them)"
-                           % (n, "" if n == 1 else "s"))
+            if tid not in self._adopted_ids:
+                self._remove_tile_actors(tid)
+        self.tiles = [t for t, _tid in keep]
+        self._tile_ids = [tid for _t, tid in keep]
+        self.selected = 0 if keep else -1
+        self._after_change("%d tile%s deleted (Z restores them)%s" % (
+            n, "" if n == 1 else "s",
+            "; %d fitted tiles kept" % len(keep) if keep else ""))
 
     def _cycle_background(self):
         self._bg_idx = (self._bg_idx + 1) % len(_BACKGROUNDS)
@@ -1015,6 +1069,11 @@ class _PlannerApp:
             style["color"] = _OVERLAP_COLOR[state]
             if style["outline"] is not None:
                 style["outline"] = "white"
+        # provenance: an adopted tile at rest keeps a gold outline; the
+        # interaction outline (hover/selected/dragging) takes over while active
+        if style["outline"] is None and self._tile_ids[i] in self._adopted_ids:
+            style["outline"] = _ADOPTED_OUTLINE
+            style["line_width"] = 2
         return style
 
     def _redraw_tile(self, i):
@@ -1037,8 +1096,9 @@ class _PlannerApp:
                 pass
         seeds = _seed_polydata(pv, tile)
         if seeds is not None:
-            pl.add_mesh(seeds, name="tile_%d_seeds" % tid, color="gold",
-                        specular=0.8, reset_camera=False)
+            self._seed_actors[tid] = pl.add_mesh(
+                seeds, name="tile_%d_seeds" % tid, color="gold",
+                specular=0.8, reset_camera=False)
 
     def _redraw_tiles(self):
         for i in range(len(self.tiles)):
