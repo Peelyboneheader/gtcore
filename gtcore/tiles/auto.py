@@ -274,7 +274,7 @@ def _deformed_pose(tile_id, idx, centers, fit, cavity_center, degraded):
 def fit_tiles_auto(centers_ras, axes_ras, cavity_center_ras=None,
                    allow_half=False, lambda_full=LAMBDA_FULL,
                    lambda_half=LAMBDA_HALF, max_tiles=None,
-                   deformable=True) -> AutoFitResult:
+                   deformable=True, mesh=None) -> AutoFitResult:
     """Infer the tile configuration from the seed cloud alone.
 
     Parameters
@@ -294,6 +294,12 @@ def fit_tiles_auto(centers_ras, axes_ras, cavity_center_ras=None,
         Score full tiles with the bent-tile fit and admit crumpled tiles
         that fail the chord gates (default).  ``False`` falls back to the
         standard geometric scores only.
+    mesh : trimesh.Trimesh, optional
+        Cavity wall.  When given, every selected tile is additionally
+        conformed onto it (:func:`gtcore.tiles.surface.fit_on_surface`,
+        plan Step 4) and ``TilePose.surface`` carries the wall footprint
+        and the attached / consistent verdict.  Selection itself is NOT
+        changed by the mesh: the surface fit is a cross-check.
 
     Returns
     -------
@@ -406,6 +412,16 @@ def fit_tiles_auto(centers_ras, axes_ras, cavity_center_ras=None,
                                   cavity_center)
             tiles.append(pose)
             assigned.update(idx)
+    if mesh is not None and len(getattr(mesh, "faces", [])) > 0:
+        from .surface import fit_on_surface
+
+        for pose in tiles:
+            try:
+                pose.surface = fit_on_surface(
+                    mesh, centers[pose.seed_indices], axes[pose.seed_indices],
+                    kind=pose.kind, init=pose.deform)
+            except Exception:
+                pose.surface = None
     result.tiles = tiles
     result.rejected_indices = [i for i in range(n) if i not in assigned]
     result.half_candidates = sorted(

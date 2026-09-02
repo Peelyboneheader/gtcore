@@ -234,7 +234,8 @@ def reconstruct(vol: Volume, verbose: bool = True,
             if auto:
                 return fit_tiles(seeds.centers_ras, seeds.axes_ras,
                                  n_full_tiles, int(n_half_tiles),
-                                 cavity_center_ras=cavity_center)
+                                 cavity_center_ras=cavity_center,
+                                 mesh=meshes.get("cavity"))
             return fit_tiles(
                 seeds.centers_ras, seeds.axes_ras,
                 int(n_full_tiles), int(n_half_tiles),
@@ -247,6 +248,10 @@ def reconstruct(vol: Volume, verbose: bool = True,
             print("  auto: %d tiles, %d candidates rejected; %s"
                   % (len(tiles.tiles), len(tiles.rejected_indices),
                      tiles.summary()))
+            for pose in tiles.tiles:
+                if pose.surface is not None:
+                    print("    tile %d: %s" % (pose.tile_id,
+                                               pose.surface.verdict()))
         elif verbose:
             print("  %d/%d tiles recovered, %d candidates rejected"
                   % (len(tiles.tiles), tiles.n_expected,

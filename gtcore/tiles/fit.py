@@ -105,6 +105,10 @@ class TilePose:
     deform: object = None           # DeformableFit (gtcore.tiles.deform) when
                                     # the bent-tile model was fitted: carries
                                     # the fold parameters and bent footprint
+    surface: object = None          # SurfaceFit (gtcore.tiles.surface) when a
+                                    # cavity mesh was available: the tile
+                                    # conformed onto the wall, its footprint,
+                                    # and the attached / consistent verdict
 
     def __post_init__(self):
         self.center_ras = np.asarray(self.center_ras, dtype=float).reshape(3)
@@ -494,7 +498,7 @@ def _complete_degraded_quads(centers, axes, dist, leftovers, missing_full,
 
 
 def fit_tiles(centers_ras, axes_ras, n_full, n_half=0, cavity_center_ras=None,
-              complete_degraded=False):
+              complete_degraded=False, mesh=None):
     """Assign seed candidates to ``n_full`` full and ``n_half`` half tiles.
 
     Parameters
@@ -522,6 +526,9 @@ def fit_tiles(centers_ras, axes_ras, n_full, n_half=0, cavity_center_ras=None,
         missing tiles explain, compact, axis-coherent, non-collinear 4-groups
         are accepted with ``degraded=True``. Missing HALF tiles are never
         completed. Default False.
+    mesh : trimesh.Trimesh, optional
+        Cavity wall; only used by ``n_full="auto"`` (surface cross-check,
+        see :func:`gtcore.tiles.auto.fit_tiles_auto`).
 
     Returns
     -------
@@ -539,7 +546,7 @@ def fit_tiles(centers_ras, axes_ras, n_full, n_half=0, cavity_center_ras=None,
 
         return fit_tiles_auto(centers_ras, axes_ras,
                               cavity_center_ras=cavity_center_ras,
-                              allow_half=bool(n_half))
+                              allow_half=bool(n_half), mesh=mesh)
     centers = np.asarray(centers_ras, dtype=float).reshape(-1, 3)
     axes = _normalize_axes(axes_ras) if centers.size else \
         np.zeros((0, 3), dtype=float)
