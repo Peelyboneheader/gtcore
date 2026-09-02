@@ -40,6 +40,7 @@ TRANSLATE_STEP_MM = 2.0
 ROTATE_STEP_RAD = np.deg2rad(10.0)
 DOSE_PAD_MM = 40.0
 DOSE_SPACING_MM = 2.0
+WALL_DEPTH_MM = 5.0        # GammaTile prescription depth (60 Gy at 5 mm)
 
 HELP_TEXT = (
     "right-click / P over the blue wall: drop tile   h: full/half for next drop\n"
@@ -368,10 +369,26 @@ class _PlannerApp:
             self.pl.add_mesh(_to_pv(self.pv, surf), name=name, color=color,
                              opacity=0.35)
             shown.append("%d%%" % round(100 * frac))
+        # Wall coverage at the prescription depth (60 Gy at 5 mm is the
+        # GammaTile prescription): area fraction of the cavity wall whose
+        # point 5 mm deep in the tissue receives >= rx.
+        coverage = ""
+        cavity = getattr(self.result, "meshes", {}).get("cavity")
+        if cavity is not None and getattr(cavity, "faces", None) is not None \
+                and len(cavity.faces):
+            try:
+                d = dose_mod.wall_dose(cavity, WALL_DEPTH_MM,
+                                       dose_volume=dose_volume)
+                frac = dose_mod.surface_coverage(cavity, d, self.rx_cgy)
+                if np.isfinite(frac):
+                    coverage = "; wall @%g mm >= rx: %.0f%%" % (
+                        WALL_DEPTH_MM, 100.0 * frac)
+            except Exception:  # metrics are advisory: never break the update
+                coverage = ""
         self._update_status(
-            "isodose over %d seeds: %s of rx %.0f cGy"
+            "isodose over %d seeds: %s of rx %.0f cGy%s"
             % (len(centers), "/".join(shown) if shown else "none in grid",
-               self.rx_cgy))
+               self.rx_cgy, coverage))
 
     # -------------------------------------------------------------------- run
     def show(self):
