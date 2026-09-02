@@ -17,7 +17,7 @@ From this folder (`gt.bat` wraps the project venv — no activation needed):
 .\gt plan  <dicom-folder-or-file>   pipeline + interactive tile planner (drag/drop + isodoses)
 .\gt view                           either command, phantom mode (synthetic ground truth)
 .\gt demo                           full phantom demo -> output\ (NRRD, PLY meshes, figures, CSV)
-.\gt test                           run the test suite (237 tests)
+.\gt test                           run the test suite (251 tests)
 ```
 
 Planner controls: pick on the cavity wall to drop a conformed tile (`h` = half
@@ -67,6 +67,9 @@ receiving ≥ rx at 5 mm depth.
    default and stays regression-pinned; seed capsules cost -0.3 to -0.7% of
    mean dose in the treated volume with 15% local shadows, while the collagen
    carrier term is off entirely because it rests on an unmeasured density.
+   `dose.find_shadowing_tiles` turns the same physics into a planner check:
+   which placed tiles stand in each other's line of fire at prescription
+   depth, the dosimetric counterpart to `interact.find_overlapping_tiles`.
 7. **`gtcore.interact` / `gtcore.planner`** — snap-to-wall + curvature
    conforming for placed tiles (pure geometry, unit-tested against phantom
    truth) and the interactive planner on top.
@@ -76,7 +79,7 @@ receiving ≥ rx at 5 mm depth.
 (skull + craniotomy + lumpy cavity + wall-conformed tiles) that validates
 every stage.
 
-## Validation snapshot (2026-09-02 overnight run + dose-engine refinement + tile interference; 237 tests green)
+## Validation snapshot (2026-09-02 overnight run + dose-engine refinement + tile interference; 251 tests green)
 
 | Claim | Measured |
 |---|---|
@@ -88,6 +91,7 @@ every stage.
 | Isodose surface placement (log-dose marching cubes, 2 mm grid) | 0.04 mm rms, 0.09 mm max vs analytic isodose radius |
 | Slice-spacing robustness (adaptive params) | recall 1.00 at 1.4/2.1/2.8 mm (fixed params: 0.58/0/0); figure `output/validation_spacing.png` |
 | Inter-seed attenuation (12 seeds, capsules only) | mean -0.27% (flat grid) / -0.65% (conformed) at >=25% rx; worst voxel 0.84; +14-20% runtime |
+| Tile shadowing flag (prescription depth, 5 mm) | coplanar tiles <0.1%, conformed phantom implant 0.56% (both quiet); a tile stacked 4 mm behind another 5.7% (flagged) |
 | Tile-carrier term (unmeasured density) | swings +19% to 0% over rho 0.15->1.00 g/cm^3 — **off by default**; figure `output/validation_interference.png` |
 | Real post-op CT (degraded export: 2 mm + gaps) | 4 complete tiles recovered, grid residuals 0.28–0.94 mm |
 | Physical 8-tile printed phantom (157 slices, 1 mm, O-MAR) | **32/32 seeds, 8/8 tiles**, residuals 0.32–1.38 mm; one physically crumpled tile recovered via the count constraint and flagged degraded |
@@ -102,7 +106,7 @@ gtcore/viz.py      optional PyVista viewer   (only files allowed to render)
 gtcore/planner.py  optional PyVista planner
 gtcore/cli.py      the `gt` command
 scripts/           demo + validation studies
-tests/             237 tests, all stages scored against phantom ground truth
+tests/             251 tests, all stages scored against phantom ground truth
 docs/              TG-43 physics notes, interference notes, data notes
 output/            generated volumes, meshes, figures (gitignored)
 ```

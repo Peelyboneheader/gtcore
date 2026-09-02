@@ -52,6 +52,8 @@ DOSE_SPACING_MM = 2.0
 WALL_DEPTH_MM = 5.0         # GammaTile prescription depth (60 Gy at 5 mm)
 DRAG_CONFORM_EVERY = 2      # re-conform every Nth MouseMoveEvent while dragging
 OVERLAP_THRESHOLD_MM = 1.0  # passed to interact.find_overlapping_tiles
+SHADOW_THRESHOLD_PCT = 2.0  # flag tiles shading this much of each other's dose
+SHADOW_MAX_TILES = 16       # above this the pairwise sweep is too slow to run
 
 HELP_TEXT = (
     "right-click / P over the blue wall: drop tile   h: full/half for next drop\n"
@@ -102,6 +104,7 @@ class _PlannerApp:
         self._drag_idx = -1          # index of the tile being dragged, or -1
         self._drag_moves = 0
         self._overlap_pairs: List = []
+        self._shadow_pairs: List = []   # (i, j, percent) dosimetric shadowing
         self._last_status = ""       # last status text (also for headless tests)
 
         self.pl = pv.Plotter(window_size=(1280, 900), title=title,
@@ -373,6 +376,9 @@ class _PlannerApp:
             text += "\n" + extra
         for i, j in self._overlap_pairs[:4]:  # tile numbers as displayed (1-based)
             text += "\nWARNING: tiles %d & %d overlap" % (i + 1, j + 1)
+        for i, j, pct in self._shadow_pairs[:3]:
+            text += ("\nNOTE: tiles %d & %d shadow each other (%.1f%% of dose "
+                     "at %g mm depth)" % (i + 1, j + 1, pct, WALL_DEPTH_MM))
         self._last_status = text
         try:
             self.pl.add_text(text, font_size=10, name="status",
@@ -408,9 +414,44 @@ class _PlannerApp:
                 clean.append((i, j))
         self._overlap_pairs = clean
 
+    # ------------------------------------------------------------- shadowing
+    def _refresh_shadowing(self):
+        """Recompute tile pairs that shade each other's prescription dose.
+
+        The geometric overlap check above asks whether two collagen sheets
+        collide.  This asks the dosimetric question underneath it: tiles that
+        never touch can still stand in each other's line of fire, and nothing
+        in the geometry shows that.
+
+        Costs a pairwise sweep of dose evaluations -- roughly 0.15 s at three
+        tiles, 0.4 s at eight -- so it is skipped mid-drag (the drag path
+        wants tens of milliseconds) and above ``SHADOW_MAX_TILES``.  Any
+        failure silently means "nothing to report": this is advisory, and it
+        must never take the planner down.
+        """
+        pairs = []
+        if 2 <= len(self.tiles) <= SHADOW_MAX_TILES and self._drag_idx < 0:
+            try:
+                from .dose.interference import find_shadowing_tiles
+                pairs = list(find_shadowing_tiles(
+                    self.tiles, threshold_pct=SHADOW_THRESHOLD_PCT,
+                    depth_mm=WALL_DEPTH_MM))
+            except Exception:
+                pairs = []
+        clean = []
+        for pair in pairs:
+            try:
+                i, j, pct = int(pair[0]), int(pair[1]), float(pair[2])
+            except Exception:
+                continue
+            if 0 <= i < len(self.tiles) and 0 <= j < len(self.tiles) and i != j:
+                clean.append((i, j, pct))
+        self._shadow_pairs = clean
+
     def _after_change(self, extra: str = ""):
-        """One funnel for every tile mutation: overlaps -> redraw -> status."""
+        """One funnel for every tile mutation: checks -> redraw -> status."""
         self._refresh_overlaps()
+        self._refresh_shadowing()
         self._redraw_tiles()
         self._update_status(extra)
 

@@ -165,3 +165,53 @@ Naively this is `O(points x seeds x occluders)`. Two things keep it cheap:
   (seed, chunk), and the exact intersection runs only on the points that
   survive — a small fraction of any grid, since shadows are narrow. Carriers
   are few and large, so they are traced exactly for every point instead.
+
+## Flagging tiles that shadow each other
+
+The planner already flags tiles whose collagen footprints collide
+(`gtcore.interact.find_overlapping_tiles`, red tint plus a warning). That is a
+geometric question. Underneath it sits a dosimetric one this module can now
+answer: **tiles that never touch can still stand in each other's line of
+fire**, and nothing in the geometry shows it.
+
+`tile_shadowing(tiles)` evaluates the dose at each tile's own
+prescription-depth points — 5 mm into the tissue behind each seed, where
+GammaTile prescribes — twice: once as plain TG-43, once with exactly one
+other tile's capsules attenuating. The relative drop is that ordered pair's
+shadowing. Because only one occluding tile is live at a time the loss is
+*attributable* rather than a lump sum, and the rows sum to the all-capsules
+total (a test pins this, and it is what catches an over-eager prune).
+
+`find_shadowing_tiles(tiles, threshold_pct=2.0)` reduces that to the same
+shape `find_overlapping_tiles` returns, plus the percentage, so the planner
+flags both the same way. It reports on tile changes but is skipped mid-drag.
+
+### What it finds, and what it correctly ignores
+
+| Layout | Worst pair | Flagged at 2%? |
+|---|---|---|
+| Two coplanar tiles on one wall, 22 mm apart | < 0.1% | no |
+| Phantom truth implant, 3 conformed tiles | 0.56% | no |
+| One tile stacked 4 mm behind another | 5.7% | **yes** |
+
+The quiet result on good geometry is the important one. Seeds sit on the
+wall and the prescription point is 7 mm behind it, so a ray from any seed to
+any such point leaves the seed plane immediately and clears the coplanar
+capsules. A flag that fired on every ordinary plan would be worthless; this
+one fires when a tile is genuinely parked in another's way.
+
+Shadowing is **directional** — A blocking B's rays to depth is a different
+statement from the reverse — so `loss` is not symmetric, and the pair
+listing reports the worse direction. The diagonal is a tile's *self*
+shadowing, its own four seeds shading one another, which is real and is
+usually the largest single entry (0.6–0.9% on the phantom implant).
+
+### Cost
+
+A pairwise sweep of dose evaluations: about 0.15 s at three tiles and 0.4 s
+at eight. Two things keep it from growing as T²: the tabulated kernel, and an
+exact segment-versus-sphere prune that skips the dose evaluation for tile
+pairs genuinely out of each other's way. The prune has to consider rays from
+*every* seed in the implant, not just the tile's own — the dose ratio is over
+the total — which is the subtlety that makes a naive bounding-sphere test on
+the tile pair alone silently wrong.
