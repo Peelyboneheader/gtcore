@@ -19,6 +19,9 @@ import subprocess
 import sys
 
 
+# planner / `gt plan --optimizer` default solver (SA after the V2 campaign)
+DEFAULT_OPTIMIZER = "sa"
+
 def _int_or_auto(text):
     if str(text).lower() == "auto":
         return "auto"
@@ -64,8 +67,9 @@ def cmd_plan(args):
     print("implant prior:", prior.describe())
     result = reconstruct(vol, n_seeds_expected=prior.n_seeds)
     # additive: the historical call is untouched unless --optimizer is set
+    # to something other than the planner's own default (DEFAULT_OPTIMIZER)
     extra = {}
-    if getattr(args, "optimizer", "greedy") != "greedy":
+    if getattr(args, "optimizer", DEFAULT_OPTIMIZER) != DEFAULT_OPTIMIZER:
         extra["solver"] = args.optimizer
     run_planner(result, rx_cgy=args.rx, suggest=bool(args.suggest), prior=prior, **extra)
     return 0
@@ -251,7 +255,8 @@ def main(argv=None):
                           "detection is checked against it and, on coarse "
                           "scans, the HU threshold is lowered stepwise "
                           "until that many seeds are found near the implant")
-    pln.add_argument("--optimizer", choices=("greedy", "sa", "continuous"), default="sa",
+    pln.add_argument("--optimizer", choices=("greedy", "sa", "continuous"),
+                     default=DEFAULT_OPTIMIZER,
                      help="placement optimizer solver for the planner's 'O' key "
                           "(Shift+O cycles it in the window)")
     pln.set_defaults(fn=cmd_plan)
