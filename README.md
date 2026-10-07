@@ -164,6 +164,24 @@ every stage.
 
 Per-dataset findings and data-quality caveats: `docs/data-notes.md`.
 
+### Placement optimizer (`gtcore.plan`, 2026-10-07 overnight campaign; `scripts/validation_optimize.py`, seeds 1-6 x 3 sizes = 18 synthetic cavities, 12-54 mL; conflict rule = planner rule ∪ geometric proxy; commit 93696e2)
+
+| Claim | Measured |
+|---|---|
+| Go/no-go (§8): greedy vs uniform heuristic, h 3 mm / 6 spins | +20.3 to +22.3 pp V100 at N 4 (6/6 cavities), +7.8 to +20.7 pp at N 6 (5/6); N 8 packing-limited |
+| **Primary endpoint**: SA vs uniform V100 (+5 mm shell) at N* | **+22.8 pp [95 % CI 19.3, 26.4]**, n 15, Wilcoxon p 6e-5 (uniform never reached D90 ≥ rx; N* = largest N both arms placed, flagged) |
+| SA vs greedy (paired, +5 mm shell) | +3.9 [1.9, 6.0] pp at N 4, +4.6 [2.7, 6.5] at N 6, +7.0 [4.2, 9.9] at N 8, +12.8 [6.4, 19.3] at N 10 |
+| Optimality gap vs exact enumeration (h 6 mm / 2 spins / M 300, N 4-8) | SA = optimum on 9/12 solved instances; −5.3 / −5.7 / −18.7 % on 3; N 8 provably unpackable on 3/6 cavities at that grid |
+| Continuous multi-start solver vs SA (60 s budget) | −1.6 [−2.9, −0.3] (N 4), −6.2 [−8.5, −3.9] (N 6), −5.0 [−8.6, −1.5] pp (N 8) → SA stays the default |
+| Discretization (V4, N 8) | h 4 mm / 3 spins cannot pack 8 on the 24 mL cavity; 6 spins packs at V100 ≥ 0.999 (SA); E5 polish gain ≈ 0; conflict-graph build dominates runtime (7 s at C 433, 117 s at C 1737) |
+| Sensitivity (V5): seed-plane 2.25/3.75 mm, S_K ±5 %, interseed attenuation on, M_opt 4000 | arm ranking (greedy, SA, truth) preserved: Kendall τ = 1 on 17/18 perturbation rows (0.82 once) |
+| **8-tile printed phantom** (HR-CTV = +5 mm shell of the visible inner wall, 4651 mm², 4210 target points) | as-implanted V100 0.654 / D90 2349 cGy → conformer substitution alone +1.75 pp → **SA with the same 8 tiles V100 0.849 / D90 5116 cGy (+19.6 pp, +2767 cGy)**; greedy 0.805, continuous 0.820, uniform 0.712; **minimum N by P2 = 10** (D90 ≥ rx and V100 ≥ 0.90); manufacturer rule recommends 12 vs 8 implanted; 0 overlaps under both rules |
+| Independent review (A7, written from the problem statement only) | 16/16 adversarial probes pass; influence rows within 0.05 cGy of the exact engine; one real defect found and fixed (optimize() raised for every solver before c74d8e4) |
+| Failure modes (V8, 12 cases) | every degenerate / empty / over-packed case raises with a reason; the > 95 % mask case passes the planner's overlap rule with 6 proxy overlaps → the rule union is required |
+
+Not claimed: TG-43 in water; static cavity; tiles modelled as non-overlapping although collagen may stack; surgeon reachability beyond the eligibility mask; clinical case 2 (not on this machine). Open for Jacob: the planner's footprint fit on strongly curved walls (`docs/optimize-notes.md`, "Open decisions").
+
+
 ## Layout
 
 ```
