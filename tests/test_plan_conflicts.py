@@ -40,7 +40,7 @@ def flat_graph(flat):
     # quadratic bulge by tens of mm -- see the A1 notes)
     cs = C.build_candidates(mesh, h_mm=7.0, n_spins=3, kinds=("full", "half"),
                             eligible_faces=top, min_fraction_on_wall=1.0)
-    return cs, K.build_conflicts(cs)
+    return cs, K.build_conflicts(cs, robust=False)
 
 
 FOOTPRINT_SANE_MM = 20.0
@@ -62,7 +62,7 @@ def cavity_graph():
     vol, truth = make_head_phantom(spacing=1.0, n_tiles=3, rng_seed=1)
     mesh = mask_to_mesh(truth.masks["cavity"], vol.affine)
     cs = C.build_candidates(mesh, h_mm=7.0, n_spins=2)
-    return mesh, cs, K.build_conflicts(cs)
+    return mesh, cs, K.build_conflicts(cs, robust=False)
 
 
 def _public(cs, i, j, gap=0.0):
@@ -120,7 +120,7 @@ def test_far_apart_on_flat_wall_never_conflict(flat, flat_graph):
             tiles.append(conform_tile(mesh, surf, n_in, hint, kind="full"))
             spins.append(th)
     two = CandidateSet.from_tiles(tiles, spins_deg=spins, anchor_ids=[0, 0, 0, 1, 1, 1])
-    g2 = K.build_conflicts(two)
+    g2 = K.build_conflicts(two, robust=False)
     assert g2.pairs[:3][:, 3:].count_nonzero() == 0
     assert g2.pairs[:3][:, :3].count_nonzero() == 6         # the three spins
     assert find_overlapping_tiles(tiles, threshold_mm=1.0) == [(0, 1), (0, 2), (1, 2),
@@ -164,7 +164,7 @@ def test_batched_point_triangle_distance_is_bit_identical():
 
 
 def test_toy_instance_matrix_reproduced(toy):
-    g = K.build_conflicts(toy["candidates"])
+    g = K.build_conflicts(toy["candidates"], robust=False)
     ref = toy["conflicts"]
     assert g.n == ref.n
     assert (g.pairs != ref.pairs).nnz == 0
@@ -175,16 +175,18 @@ def test_toy_instance_matrix_reproduced(toy):
         assert K._is_clique(q, g.pairs)
     for q in g.cliques:
         assert K._is_clique(q, ref.pairs)
-    via_init = plan.build_conflicts(toy["candidates"])
+    via_init = plan.build_conflicts(toy["candidates"], robust=False)
     assert (via_init.pairs != ref.pairs).nnz == 0
+    # the toy's abutting 10 mm grid is also what the proxy flags: robust == planner here
+    assert (plan.build_conflicts(toy["candidates"]).pairs != ref.pairs).nnz == 0
 
 
 # ----------------------------------------------------------------- gaps
 def test_gap_adds_conflicts_monotonically(flat_graph, cavity_graph):
     rng = np.random.default_rng(5)
     for cs, g0 in (flat_graph, cavity_graph[1:]):
-        g1 = K.build_conflicts(cs, gap_mm=1.0)
-        g3 = K.build_conflicts(cs, gap_mm=3.0)
+        g1 = K.build_conflicts(cs, gap_mm=1.0, robust=False)
+        g3 = K.build_conflicts(cs, gap_mm=3.0, robust=False)
         a0, a1, a3 = (g.pairs.astype(np.int8) for g in (g0, g1, g3))
         assert (a1 - a0).min() >= 0 and (a3 - a1).min() >= 0
         assert g1.count_pairs() > g0.count_pairs()
@@ -269,5 +271,144 @@ def test_empty_and_single_candidate_sets(toy):
     one = toy["candidates"].subset([0])
     g = K.build_conflicts(one)
     assert g.n == 1 and g.count_pairs() == 0 and g.cliques == []
+    assert g.robust and g.n_pairs_planner == 0 and g.n_pairs_proxy_added == 0
+    assert plan.tiles_conflict(one.tiles) == [] and plan.tiles_conflict([]) == []
     with pytest.raises(TypeError):
         K.build_conflicts(toy["candidates"].tiles)
+
+
+# ------------------------------------------------------------- robust / proxy
+@pytest.fixture(scope="module")
+def cavity_h4():
+    """Phantom cavity at h = 4 mm / 3 spins (the validation campaign's grid)."""
+    from gtcore.phantom import make_head_phantom
+    from gtcore.segment import mask_to_mesh
+    vol, truth = make_head_phantom(spacing=1.0, n_tiles=3, rng_seed=1)
+    mesh = mask_to_mesh(truth.masks["cavity"], vol.affine)
+    cs = C.build_candidates(mesh, h_mm=4.0, n_spins=3)
+    return mesh, cs, K.build_conflicts(cs, robust=False), K.build_conflicts(cs)
+
+
+def test_proxy_rule_constants_and_pair_function(flat):
+    assert K.PROXY_ANCHOR_MM == 18.0 and K.PROXY_SEED_MM == 9.0 and K.PROXY_NORMAL_DOT == 0.5
+    assert K.proxy_anchor_mm("full", "full") == 18.0
+    assert K.proxy_anchor_mm("full", "half") == 13.0 == K.proxy_anchor_mm("half", "full")
+    assert K.proxy_anchor_mm("half", "half") == 8.0
+    mesh, _top = flat
+    hint = np.array([1.0, 0.0, 0.0])
+
+    def tile(x, y, kind="full"):
+        surf, n_in = snap_to_wall(mesh, np.array([x, y, 0.0]))
+        return conform_tile(mesh, surf, n_in, hint, kind=kind)
+
+    # anchors 17.9 mm apart -> conflict by the anchor rule; 20 mm apart, seeds
+    # 10 mm apart -> legal abutment; 19 mm apart -> seeds 9 mm -> not < 9 ->
+    # legal, 18.5 mm -> seeds 8.5 mm -> conflict by the seed rule
+    assert K.tile_pair_proxy_conflict(tile(0, 0), tile(17.9, 0))
+    assert not K.tile_pair_proxy_conflict(tile(0, 0), tile(20.0, 0))
+    assert not K.tile_pair_proxy_conflict(tile(0, 0), tile(19.0, 0))
+    assert K.tile_pair_proxy_conflict(tile(0, 0), tile(18.5, 0))
+    # half tiles: two abutting 10 mm strips (anchors 10 mm apart) are legal,
+    # 7.9 mm is not; full-half at 12.9 mm conflicts, 13 mm with seeds >= 9 mm does not
+    assert not K.tile_pair_proxy_conflict(tile(0, 0, "half"), tile(10.0, 0, "half"))
+    assert K.tile_pair_proxy_conflict(tile(0, 0, "half"), tile(7.9, 0, "half"))
+    assert K.tile_pair_proxy_conflict(tile(0, 0), tile(12.9, 0, "half"))
+    assert not K.tile_pair_proxy_conflict(tile(0, 0), tile(15.0, 0, "half"))
+    # same anchor, other spin: always a proxy conflict
+    surf, n_in = snap_to_wall(mesh, np.zeros(3))
+    assert K.tile_pair_proxy_conflict(conform_tile(mesh, surf, n_in, hint),
+                                      conform_tile(mesh, surf, n_in, np.array([0.5, 0.8, 0.0])))
+
+
+def test_proxy_never_flags_opposite_walls_or_far_tiles(cavity_h4):
+    # thin slab: top wall (inward -z) and bottom wall (inward +z) 8 mm apart
+    slab = pf.flat_wall_mesh(size_mm=60.0, step_mm=2.0, depth_mm=8.0)
+    hint = np.array([1.0, 0.0, 0.0])
+    s_top, n_top = snap_to_wall(slab, np.array([0.0, 0.0, 0.0]))
+    s_bot, n_bot = snap_to_wall(slab, np.array([0.0, 0.0, -8.0]))
+    assert float(n_top @ n_bot) < -0.9
+    top = conform_tile(slab, s_top, n_top, hint)
+    bot = conform_tile(slab, s_bot, n_bot, hint)
+    assert np.linalg.norm(top.anchor_ras - bot.anchor_ras) < K.PROXY_ANCHOR_MM
+    assert not K.tile_pair_proxy_conflict(top, bot)
+    assert K.proxy_conflicts(CandidateSet.from_tiles([top, bot], spins_deg=[0, 0])).shape == (0, 2)
+    # anchors >= 30 mm apart are never proxy conflicts
+    _mesh, cs, _gp, _g = cavity_h4
+    prox = K.proxy_conflicts(cs)
+    d = np.linalg.norm(cs.anchors[prox[:, 0]] - cs.anchors[prox[:, 1]], axis=1)
+    assert prox.shape[0] > 0 and d.max() < 30.0
+    dots = np.array([cs.tiles[i].normal_ras @ cs.tiles[j].normal_ras for i, j in prox])
+    assert dots.min() > K.PROXY_NORMAL_DOT
+
+
+def test_vectorized_proxy_equals_pair_rule(cavity_h4):
+    _mesh, cs, _gp, _g = cavity_h4
+    prox = K.proxy_conflicts(cs)
+    flagged = {(int(i), int(j)) for i, j in prox}
+    rng = np.random.default_rng(4)
+    n = len(cs)
+    d = np.linalg.norm(cs.anchors[:, None] - cs.anchors[None], axis=2)
+    near = np.argwhere(np.triu((d > 0) & (d < 25.0), 1))
+    pick = [tuple(p) for p in near[rng.choice(len(near), 300, replace=False)]]
+    pick += [tuple(sorted(rng.choice(n, 2, replace=False))) for _ in range(100)]
+    pick += [tuple(p) for p in prox[rng.choice(prox.shape[0], 100, replace=False)]]
+    for i, j in pick:
+        assert K.tile_pair_proxy_conflict(cs.tiles[i], cs.tiles[j]) == ((i, j) in flagged)
+
+
+def test_robust_graph_is_superset_and_catches_planner_misses(cavity_h4):
+    _mesh, cs, gp, g = cavity_h4
+    assert not gp.robust and g.robust
+    assert (gp.pairs.astype(np.int8) - g.pairs.astype(np.int8)).max() <= 0
+    assert g.n_pairs_planner == gp.count_pairs()
+    assert g.count_pairs() == gp.count_pairs() + g.n_pairs_proxy_added
+    assert g.n_pairs_proxy_added > 0
+    # the validation agent's unflagged examples: same wall, anchors < 18 mm or
+    # seeds < 9 mm, missing from the planner-rule graph -> present in the robust graph
+    missed = [(i, j) for i, j in K.proxy_conflicts(cs) if not gp.conflicts(i, j)]
+    assert len(missed) == g.n_pairs_proxy_added
+    for i, j in missed:
+        assert g.conflicts(i, j) and g.conflicts(j, i)
+        assert plan.tiles_conflict([cs.tiles[i], cs.tiles[j]]) == [(0, 1)]
+        assert plan.tiles_conflict([cs.tiles[i], cs.tiles[j]], robust=False) == []
+    # a concrete pair like the campaign's (anchors 13.1 mm / seeds 1.9 mm): pick
+    # the closest missed pair and check it is a certain overlap
+    i, j = min(missed, key=lambda ij: np.linalg.norm(cs.anchors[ij[0]] - cs.anchors[ij[1]]))
+    ti, tj = cs.tiles[i], cs.tiles[j]
+    seeds_mm = np.linalg.norm(ti.seed_centers[:, None] - tj.seed_centers[None], axis=2).min()
+    assert float(ti.normal_ras @ tj.normal_ras) > 0.5
+    assert np.linalg.norm(ti.anchor_ras - tj.anchor_ras) < 18.0 or seeds_mm < 9.0
+    # symmetric, no diagonal, cliques are true cliques of the union graph
+    assert (g.pairs != g.pairs.T).nnz == 0 and not g.pairs.diagonal().any()
+    for q in g.cliques:
+        assert K._is_clique(q, g.pairs)
+    # every planner-rule clique is still a clique of the union (it only adds edges)
+    for q in gp.cliques:
+        assert K._is_clique(q, g.pairs)
+
+
+def test_tiles_conflict_is_union_of_planner_and_proxy(cavity_h4):
+    _mesh, cs, _gp, _g = cavity_h4
+    rng = np.random.default_rng(6)
+    sub = np.sort(rng.choice(len(cs), 40, replace=False))
+    tiles = cs.tiles_of(sub)
+    planner = {(int(i), int(j)) for i, j in find_overlapping_tiles(tiles, threshold_mm=1.0)}
+    proxy = {(a, b) for a in range(len(tiles)) for b in range(a + 1, len(tiles))
+             if K.tile_pair_proxy_conflict(tiles[a], tiles[b])}
+    assert plan.tiles_conflict(tiles, robust=False) == sorted(planner)
+    assert plan.tiles_conflict(tiles) == sorted(planner | proxy)
+    assert "tiles_conflict" in plan.__all__
+
+
+def test_greedy_plan_has_no_proxy_conflicts(cavity_h4):
+    mesh, cs, _gp, g = cavity_h4
+    target = plan.TargetSet.from_shell(mesh, 5.0)
+    inf = plan.build_influence(cs, target, m_opt=500)
+    obj = plan.make_objective(inf, g)
+    res = plan.solve_greedy(obj, 6)
+    assert res.status == "ok" and res.feasible and res.selection.size == 6
+    tiles = cs.tiles_of(res.selection)
+    assert plan.tiles_conflict(tiles) == []
+    assert not any(K.tile_pair_proxy_conflict(tiles[a], tiles[b])
+                   for a in range(6) for b in range(a + 1, 6))
+    assert g.is_feasible(res.selection)

@@ -235,8 +235,10 @@ def compatible_with_placed(candidates: CandidateSet, placed: Sequence[PlacedTile
                            threshold_mm: float = PLANNER_OVERLAP_THRESHOLD_MM
                            ) -> np.ndarray:
     """``(C,)`` bool: candidates overlapping NO placed tile under the
-    planner's rule (``find_overlapping_tiles``), after a bounding-sphere
-    prefilter so the exact footprint test only runs for close pairs."""
+    planner's rule plus the geometric proxy (``plan.tiles_conflict``), after
+    a bounding-sphere prefilter so the exact footprint test only runs for
+    close pairs."""
+    from .conflicts import tiles_conflict
     c = len(candidates)
     mask = np.ones(c, dtype=bool)
     placed = list(placed)
@@ -249,8 +251,8 @@ def compatible_with_placed(candidates: CandidateSet, placed: Sequence[PlacedTile
         close = np.flatnonzero(mask & (d <= radii + p_r + float(threshold_mm)
                                        + BOUNDING_MARGIN_MM))
         for k in close:
-            if find_overlapping_tiles([tile, candidates.tiles[int(k)]],
-                                      threshold_mm=float(threshold_mm)):
+            if tiles_conflict([tile, candidates.tiles[int(k)]],
+                              threshold_mm=float(threshold_mm)):
                 mask[k] = False
     return mask
 
@@ -438,7 +440,8 @@ def _check_tiles(res: SolverResult, tiles: List[PlacedTile], n_total: int,
         if got != int(want):
             raise RuntimeError("%s solver returned %d %s tiles, %d requested"
                                % (solver, got, kind, want))
-    pairs = find_overlapping_tiles(tiles, threshold_mm=PLANNER_OVERLAP_THRESHOLD_MM)
+    from .conflicts import tiles_conflict        # planner rule + geometric proxy
+    pairs = tiles_conflict(tiles, threshold_mm=PLANNER_OVERLAP_THRESHOLD_MM)
     if pairs:
         raise RuntimeError("%s solver returned overlapping tiles %r" % (solver, pairs))
 
