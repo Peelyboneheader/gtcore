@@ -693,6 +693,18 @@ class Objective:
         from .objective import gain
         return gain(self, selection, candidate)
 
+    def gains_all(self, selection, dose_vec=None) -> np.ndarray:
+        """Hard gain of adding EACH candidate to ``selection``, ``(C,)``;
+        vectorized fast path for greedy (module function on plan/influence,
+        bound here so solvers find it via ``getattr``)."""
+        from .objective import gains_all
+        return gains_all(self, selection, dose_vec)
+
+    def soft_gains_all(self, selection, dose_vec=None) -> np.ndarray:
+        """Soft-objective counterpart of :meth:`gains_all`, ``(C,)``."""
+        from .objective import soft_gains_all
+        return soft_gains_all(self, selection, dose_vec)
+
 
 # ----------------------------------------------------------------- results
 @dataclass

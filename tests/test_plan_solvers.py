@@ -134,9 +134,10 @@ def test_evaluator_uses_objective_methods_when_real(toy30):
     assert RealObjective.calls["gains_all"] >= 4 and RealObjective.calls["metrics"] >= 1
     assert np.array_equal(r_real.selection, r_stub.selection)
     assert r_real.objective == pytest.approx(r_stub.objective)
-    # the stub objective is detected as such
+    # on main the plain Objective is real too (plan/influence merged) and
+    # exposes gains_all, so the fast path is taken and agrees with the helper
     ev2 = _Evaluator(_obj(inst))
-    assert not ev2._real_hard and not ev2._use_obj_internal
+    assert ev2._real_hard and ev2._use_obj_internal
 
 
 # ------------------------------------------------------------------ greedy
