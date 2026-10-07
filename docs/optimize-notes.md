@@ -54,6 +54,78 @@ implementation tunables, not optimizer parameters):
 
 ## Go/no-go (§8)
 
+**Run (coordinator):** `python scripts/go_no_go_optimize.py --seeds 1 2 3 4 5 6`
+at commit 5f0105a (all builders merged), 1133 s wall while sharing the CPU
+with the full suite. Six synthetic cavities (`make_head_phantom`, 1 mm,
+rng seeds 1-6; 24.5-28.6 mL; wall 4178-4636 mm², i.e. 11-12 tiles by the
+4 cm² rule), candidates h = 3 mm / 6 spins (1514-1742 candidates, 22-93
+rejected as hanging, conflict pairs ~0.5 M, build 22-25 s candidates +
+2.5-2.9 s influence + 119-144 s conflicts), target = full +5 mm shell
+(6152-6850 area-weighted vertices, no subsample), rx 6000 cGy, greedy =
+feasibility-aware forward selection, uniform = farthest-point anchors with
+spin 0 skipping conflicting picks, random = 100 random feasible selections.
+Metrics from the influence matrix (tabulated kernel); the N = 8 greedy
+configuration of each cavity was cross-checked on the exact 1 mm dose grid
+(`final_report`): |ΔV100| ≤ 0.6 pp, |ΔD90| ≤ 90 cGy.
+
+| N | greedy V100 mean±SD | uniform V100 mean±SD | random median (mean over cavities) | gain vs uniform, pp, per cavity | cavities with gain ≥ 3 / ≥ 1 pp |
+|---|---|---|---|---|---|
+| 4 | 0.225 ± 0.011 | 0.011 ± 0.015 | 0.006 | 20.3, 22.1, 22.0, 21.4, 22.3, 20.7 | 6/6 / 6/6 |
+| 6 | 0.466 ± 0.025 | 0.305 ± 0.061 | 0.371 | n/a, 19.4, 18.0, 20.7, 10.0, 7.8 | 5/6 / 5/6 |
+| 8 | 0.856 ± 0.066 | n/a (could not pack 8) | 0.845 | n/a ×6 | — |
+
+Per cavity (seeds 1-6 in order; "n/a" = the uniform heuristic ran out of
+non-conflicting spin-0 anchors before placing N tiles):
+
+```
+N=4 greedy V100 0.245 D90 1451 | uniform V100 0.043 D90 2096 | random median 0.005 p95 0.097 | gain 20.3 pp (vs uniform) 24.0 pp (vs random)
+N=6 greedy V100 0.514 D90 2675 | uniform V100 nan D90 nan | random median 0.438 p95 0.512 | gain nan pp (vs uniform) 7.6 pp (vs random)
+N=8 greedy V100 0.967 D90 6408 | uniform V100 nan D90 nan | random median 0.908 p95 0.976 | gain nan pp (vs uniform) 5.9 pp (vs random)
+grid check (N=8 greedy): shell+5 V100 0.967 D90 6399 vs influence V100 0.967 D90 6408
+N=4 greedy V100 0.221 D90 1083 | uniform V100 0.000 D90 2058 | random median 0.003 p95 0.097 | gain 22.1 pp (vs uniform) 21.8 pp (vs random)
+N=6 greedy V100 0.456 D90 2106 | uniform V100 0.262 D90 4427 | random median 0.342 p95 0.404 | gain 19.4 pp (vs uniform) 11.4 pp (vs random)
+N=8 greedy V100 0.792 D90 5059 | uniform V100 nan D90 nan | random median 0.809 p95 0.885 | gain nan pp (vs uniform) -1.7 pp (vs random)
+grid check (N=8 greedy): shell+5 V100 0.796 D90 4971 vs influence V100 0.792 D90 5059
+N=4 greedy V100 0.221 D90 1307 | uniform V100 0.001 D90 2148 | random median 0.002 p95 0.089 | gain 22.0 pp (vs uniform) 21.8 pp (vs random)
+N=6 greedy V100 0.464 D90 2254 | uniform V100 0.284 D90 4409 | random median 0.371 p95 0.434 | gain 18.0 pp (vs uniform) 9.3 pp (vs random)
+N=8 greedy V100 0.879 D90 5888 | uniform V100 nan D90 nan | random median 0.852 p95 0.924 | gain nan pp (vs uniform) 2.7 pp (vs random)
+grid check (N=8 greedy): shell+5 V100 0.873 D90 5875 vs influence V100 0.879 D90 5888
+N=4 greedy V100 0.214 D90 980 | uniform V100 0.000 D90 2184 | random median 0.012 p95 0.094 | gain 21.4 pp (vs uniform) 20.3 pp (vs random)
+N=6 greedy V100 0.433 D90 2061 | uniform V100 0.226 D90 4015 | random median 0.313 p95 0.372 | gain 20.7 pp (vs uniform) 12.0 pp (vs random)
+N=8 greedy V100 0.774 D90 4461 | uniform V100 nan D90 nan | random median 0.796 p95 0.869 | gain nan pp (vs uniform) -2.2 pp (vs random)
+grid check (N=8 greedy): shell+5 V100 0.778 D90 4414 vs influence V100 0.774 D90 4461
+N=4 greedy V100 0.234 D90 1273 | uniform V100 0.010 D90 1949 | random median 0.010 p95 0.107 | gain 22.3 pp (vs uniform) 22.4 pp (vs random)
+N=6 greedy V100 0.474 D90 2587 | uniform V100 0.374 D90 4157 | random median 0.378 p95 0.445 | gain 10.0 pp (vs uniform) 9.7 pp (vs random)
+N=8 greedy V100 0.895 D90 5967 | uniform V100 nan D90 nan | random median 0.853 p95 0.926 | gain nan pp (vs uniform) 4.1 pp (vs random)
+grid check (N=8 greedy): shell+5 V100 0.898 D90 5991 vs influence V100 0.895 D90 5967
+N=4 greedy V100 0.217 D90 1178 | uniform V100 0.010 D90 1857 | random median 0.001 p95 0.099 | gain 20.7 pp (vs uniform) 21.5 pp (vs random)
+N=6 greedy V100 0.455 D90 2331 | uniform V100 0.377 D90 4396 | random median 0.384 p95 0.439 | gain 7.8 pp (vs uniform) 7.1 pp (vs random)
+N=8 greedy V100 0.831 D90 5463 | uniform V100 nan D90 nan | random median 0.852 p95 0.941 | gain nan pp (vs uniform) -2.1 pp (vs random)
+grid check (N=8 greedy): shell+5 V100 0.830 D90 5508 vs influence V100 0.831 D90 5463
+```
+
+**Verdict against the pre-declared rule:** gain ≥ 3 pp of V100 over
+uniform on most cavities at N = 4 (6/6) and N = 6 (5/6) → proceed with §3
+as written. Two observations that shape the rest of the campaign:
+
+1. **N = 8 is packing-limited on these cavities** (8 of the 11-12 tiles the
+   4 cm² rule calls for): the uniform heuristic cannot place 8 tiles at all,
+   and greedy beats the random-feasible median by only +5.9/-1.7/+2.7/-2.2/
+   +4.1/-2.1 pp (below the random median on 3/6). Consistent with the §7.1
+   and §7.4 scouts: forward selection is myopic once the wall is nearly
+   full, so V2 must compare greedy+local, SA and the continuous solver at
+   N ≥ 8, and the planner default follows V2, not this experiment.
+2. **Greedy maximizes V100 at the expense of D90**: at N = 4 and 6 the
+   uniform heuristic's D90 is 1.5-2x greedy's (e.g. seed 2, N = 6: uniform
+   D90 4427 cGy vs greedy 2106 cGy) because spreading tiles lifts the cold
+   10 % of the shell while clustering lifts the covered fraction. P2
+   (minimum N with D90 ≥ rx) therefore needs the N-sweep to be judged on
+   D90, and the "D90 ≥ rx" criterion will be met later in N than the
+   "V100 ≥ 0.90" criterion for V100-driven solvers (§7.1's D90-direct
+   objective was tested by the scout and rejected for V100, but remains the
+   right readout for P2).
+
+
 _Not yet run._ Protocol: synthetic cavities, candidates at h = 3 mm, 6 spins,
 influence on the +5 mm shell, greedy only; V100/D90 vs the uniform heuristic
 and random feasible placements for N = 4, 6, 8.
