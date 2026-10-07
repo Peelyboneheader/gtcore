@@ -73,9 +73,14 @@ def test_submodules_exist_but_are_not_imported_by_init():
         assert m.__doc__ and ("Owner" in m.__doc__)
 
 
+IMPLEMENTED = {"solve_milp"}   # wired to gtcore.plan.milp (branch plan/milp)
+
+
 @pytest.mark.parametrize("name", STUBS)
 def test_every_stub_raises_not_implemented(name):
     import inspect
+    if name in IMPLEMENTED:
+        pytest.skip(name + " is implemented; see its own test module")
     fn = getattr(plan, name)
     n_required = sum(
         1 for prm in inspect.signature(fn).parameters.values()

@@ -1073,7 +1073,9 @@ def solve_milp(objective: Objective, n_tiles: int,
     the reference, not ``selection``).  Exponential worst case; intended for
     reduced instances.
     """
-    raise _stub("solve_milp", "milp")
+    from .milp import solve_milp as _impl   # lazy: keeps gtcore.plan import light
+    return _impl(objective, n_tiles, time_limit_s=time_limit_s, exact_n=exact_n,
+                 mip_rel_gap=mip_rel_gap)
 
 
 def refine_continuous(mesh, candidates: CandidateSet, selection, target: TargetSet,
