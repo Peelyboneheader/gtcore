@@ -654,7 +654,8 @@ class Objective:
 
         O(N * M).  Implemented on branch plan/influence.
         """
-        raise NotImplementedError("Objective.dose_of: implemented on branch plan/influence")
+        from .objective import dose_of
+        return dose_of(self, selection)
 
     def metrics(self, selection) -> Dict[str, float]:
         """Weighted target metrics for ``selection``.
@@ -665,28 +666,32 @@ class Objective:
         every OAR set.  O(N * M + M log M).  Implemented on branch
         plan/influence.
         """
-        raise NotImplementedError("Objective.metrics: implemented on branch plan/influence")
+        from .objective import metrics
+        return metrics(self, selection)
 
     def hard(self, selection) -> float:
         """P1 objective: ``V100 - lambda_hot * max(0, V200 - v200_tol)
         - sum_j lambda_oar * max(0, Dmax(O_j) - L_j)`` (dimensionless; the
         OAR term is per cGy).  Implemented on branch plan/influence.
         """
-        raise NotImplementedError("Objective.hard: implemented on branch plan/influence")
+        from .objective import hard
+        return hard(self, selection)
 
     def soft(self, selection) -> float:
         """Smooth surrogate for annealing: ``sum_m w_m sigma((D_m - rx) / tau)
         / sum_m w_m`` minus the same hot-spot / OAR penalties as :meth:`hard`.
         Implemented on branch plan/influence.
         """
-        raise NotImplementedError("Objective.soft: implemented on branch plan/influence")
+        from .objective import soft
+        return soft(self, selection)
 
     def gain(self, selection, candidate: int) -> float:
         """``hard(selection + [candidate]) - hard(selection)`` without
         recomputing the base dose (incremental, O(M)).  Implemented on branch
         plan/influence.
         """
-        raise NotImplementedError("Objective.gain: implemented on branch plan/influence")
+        from .objective import gain
+        return gain(self, selection, candidate)
 
 
 # ----------------------------------------------------------------- results
@@ -998,7 +1003,10 @@ def build_influence(candidates: CandidateSet, target: TargetSet,
     ``exact=True``.  OAR sets are evaluated in full (no subsampling).
     Complexity O(C * 4 * M) kernel evaluations, chunked; memory C*M*4 bytes.
     """
-    raise _stub("build_influence", "influence")
+    from .influence import build_influence as _impl
+    return _impl(candidates, target, rx_cgy=rx_cgy, sk_per_seed_u=sk_per_seed_u,
+                 m_opt=m_opt, oars=oars, oar_limits=oar_limits, engine=engine,
+                 kernel=kernel, rng_seed=rng_seed)
 
 
 def build_conflicts(candidates: CandidateSet, gap_mm: float = CONFLICT_GAP_MM
@@ -1015,12 +1023,14 @@ def make_objective(influence: InfluenceMatrix, conflicts: ConflictGraph,
                    **weights) -> Objective:
     """Construct an :class:`Objective`; ``weights`` override ``lambda_hot``,
     ``v200_tol``, ``lambda_oar``, ``tau_cgy``, ``rx_cgy``."""
-    raise _stub("make_objective", "influence")
+    from .objective import make_objective as _impl
+    return _impl(influence, conflicts, **weights)
 
 
 def evaluate(objective: Objective, selection) -> Dict[str, Any]:
     """``{"hard", "soft", "metrics", "feasible"}`` for ``selection``. O(N * M)."""
-    raise _stub("evaluate", "influence")
+    from .objective import evaluate as _impl
+    return _impl(objective, selection)
 
 
 def solve_greedy(objective: Objective, n_tiles: int, fixed: Sequence[int] = (),
