@@ -124,6 +124,13 @@ HELP_TEXT_COMPACT = ("? legend   right-click drop   Ctrl+drag move   "
 OPTIMIZER_SOLVERS = ("greedy", "sa", "continuous")   # Shift+O / --optimizer cycle these
 # "greedy" stays the default until the validation campaign (V2) picks one.
 OPTIMIZE_MODES = ("replace", "add")
+# Candidate grid for the O / N keys.  The library default (gtcore.plan
+# DEFAULT_H_MM = 2.5 mm, 6 spins) takes ~5 min to build on a 1 mm cavity mesh,
+# which is not interactive; the scout (plan section 7.4) and the validation
+# campaign use 4 mm / 3 spins, so the planner does too (gt optimize --h/--spins
+# still expose the library default).
+PLANNER_H_MM = 4.0
+PLANNER_N_SPINS = 3
 # "replace": this session's hand-placed (green) proposals are removed (one
 # undo step) and the N optimizer tiles take their place; tiles fitted FROM
 # THE SCAN (gold) stay and are passed to the optimizer as fixed obstacles.
@@ -1349,7 +1356,8 @@ class _PlannerApp:
             return None
         try:
             from .plan.api import evaluate_tiles
-            return evaluate_tiles(self.cavity, list(tiles), rx_cgy=self.rx_cgy)
+            return evaluate_tiles(self.cavity, list(tiles), rx_cgy=self.rx_cgy,
+                                  eligible_faces=self._eligible_faces())
         except Exception:
             return None
 
@@ -1514,7 +1522,8 @@ class _PlannerApp:
             import gtcore.plan as plan_mod
             tiles, rep = plan_mod.optimize(
                 self.cavity, n_full, n_half, rx_cgy=self.rx_cgy, solver=solver_used,
-                seed=0, eligible_faces=self._eligible_faces(), report=False,
+                seed=0, h_mm=PLANNER_H_MM, n_spins=PLANNER_N_SPINS,
+                eligible_faces=self._eligible_faces(), report=False,
                 verbose=True, fixed_tiles=fixed)
         except NotImplementedError as exc:
             self._update_status("optimizer not available yet: %s" % exc)
@@ -1546,8 +1555,13 @@ class _PlannerApp:
         self.selected = len(self.tiles) - 1
         self._last_optimize = rep
         after = self._board_metrics(self.tiles)
-        msg = "optimized: %d tile%s placed by %s in %.1f s%s%s (violet until touched; Z undoes)" % (
-            len(tiles), "" if len(tiles) == 1 else "s", solver_used, dt, note,
+        rt = getattr(rep, "runtime", None) or {}
+        cs = getattr(rep, "candidate_stats", None) or {}
+        grid = " (%d candidates at h %g mm / %d spins built in %.1f s, solver %.1f s)" % (
+            int(cs.get("n_candidates", 0)), PLANNER_H_MM, PLANNER_N_SPINS,
+            float(rt.get("candidates", 0.0)), float(rt.get("solver", 0.0)))
+        msg = "optimized: %d tile%s placed by %s in %.1f s%s%s%s (violet until touched; Z undoes)" % (
+            len(tiles), "" if len(tiles) == 1 else "s", solver_used, dt, grid, note,
             "; %d hand-placed tile%s replaced" % (n_removed, "" if n_removed == 1 else "s")
             if n_removed else "")
         msg += "\n  " + self._before_after_text(before, after, rep)
@@ -1568,6 +1582,7 @@ class _PlannerApp:
             import gtcore.plan as plan_mod
             tile, info = plan_mod.suggest_next(
                 self.cavity, list(self.tiles), rx_cgy=self.rx_cgy, kind=self.next_kind,
+                h_mm=PLANNER_H_MM, n_spins=PLANNER_N_SPINS,
                 eligible_faces=self._eligible_faces())
         except NotImplementedError as exc:
             self._update_status("suggest next: optimizer not available yet: %s" % exc)
@@ -1586,12 +1601,13 @@ class _PlannerApp:
         self.selected = len(self.tiles) - 1
         self._after_change(
             "next tile suggested: gain %+.3f  (+%g mm shell V100 %.2f -> %.2f, D90 %.0f -> "
-            "%.0f cGy; %d of %d candidates compatible, %.1f s; violet until touched)"
+            "%.0f cGy; %d of %d candidates compatible, %.1f s, candidates built in %.1f s; "
+            "violet until touched)"
             % (info.get("gain", float("nan")), WALL_DEPTH_MM,
                info.get("V100_before", float("nan")), info.get("V100_after", float("nan")),
                info.get("D90_before", float("nan")), info.get("D90_after", float("nan")),
                info.get("n_compatible", 0), info.get("n_candidates", 0),
-               info.get("seconds", 0.0)))
+               info.get("seconds", 0.0), info.get("candidates_s", 0.0)))
         return tile
 
     def _toggle_kind(self):

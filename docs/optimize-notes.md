@@ -1033,6 +1033,71 @@ A1 (`plan/candidates`, 2026-10-07).
 
 ---
 
+## A6 end-to-end (real optimizer, no monkeypatches)
+
+Branch `plan/ui` after `git merge main` (d42d6c4: A1–A7 merged); the A6
+follow-up commit is the one that carries this section. All runs
+`--h 4 --spins 3 --seed 0`, rx 6000 cGy, Windows 11, i7-class laptop, while
+other agents' suites shared the CPU (wall times are upper bounds). Output
+folders held `report.json`, `report.csv`, `plan_seeds.csv` (+ `sweep.json`
+with `--min-n`) in every successful run.
+
+Two fixes came out of this pass and are in the same commit:
+
+- **Default target restricted to the eligible wall** (`api.default_target`).
+  `TargetSet.from_shell(mesh)` covers the whole mesh; on the printed-phantom
+  fallback the body shell is 143 267 mm² of which only the inner wall
+  (7498 of 72 396 faces, visible from the seed centroid) is eligible, so
+  V100 of the first run was 0.144 with 8 tiles — a fraction of a target that
+  is mostly the outer surface no tile can reach. Shell vertices belonging to
+  no eligible face now get weight 0 (points unchanged); the target is
+  22 623 mm² on the printed phantom and `optimize`, `suggest_next`,
+  `evaluate_tiles` (planner before/after) and `gt optimize --min-n` all use
+  it. `final_report`'s own `shell 0/5/10` rows are still over the whole mesh
+  (A5's choice); the row `shell target` is the one to read on the fallback.
+- **`--min-n` forwarded `time_budget_s` into `sweep_n(**kw)` → `solve_greedy`**
+  (TypeError). The budget is now stripped for the sweep (test added).
+
+| run | command | wall (s) | pipeline + load (s) | optimize (s) | candidates / build (s) | solver (s) | report (s) | result |
+|---|---|---|---|---|---|---|---|---|
+| synthetic phantom, greedy | `python -m gtcore.cli optimize --tiles 6 --solver greedy --h 4 --spins 3 --seed 0` | 54 | ~26 | 28.1 | 223 / 8.8 | 0.1 | 16.1 | recommendation 16 tiles (6281 mm²; ellipsoid 13); 6 tiles; grid +5 mm shell V100 0.473, D90 2293 cGy (V150 0.053, V200 0.004); wall V100 0.691; no overlaps |
+| printed phantom, greedy | `python -m gtcore.cli optimize "<printed phantom>" --tiles 8 --solver greedy --h 4 --spins 3 --seed 0` | 563 | ~485 | 77.7 | 109 / 16.8 | 0.1 | 59.6 | objective 0.6959; target shell (eligible wall) V100 0.785, D90 4205 cGy, V150 0.509, V200 0.280; whole-mesh `shell 5.0` row 0.139; no overlaps. Continuous (next row) adds +1.5 pp V100 / +136 cGy D90 for 90 s |
+| printed phantom, continuous | same `--solver continuous --budget 90` | 700 | ~534 | 165.6 | 109 / 16.2 | 90.1 (budget hit, status `time_limit`, best refined start returned) | 58.0 | objective 0.7201; target shell (eligible wall) V100 0.800, D90 4341 cGy, V150 0.513, V200 0.271; whole-mesh `shell 5.0` row 0.143 (dilution, see above); no overlaps |
+| printed phantom, `--min-n` | same `--min-n` (greedy, N = 1..8) | — | — | — | — | — | — | first attempt failed on the `time_budget_s` forwarding bug (fixed in this commit, covered by `test_cli_min_n_sweeps_without_forwarding_the_budget` with a fake `sweep_n`); the rerun with the fix was stopped by the Claude Code harness for system memory pressure during the pipeline stage. **Not yet measured with the real `sweep_n` — rerun pending** (same command, ~10 min alone) |
+
+Printed phantom, both runs: `wall: phantom shell (no cavity segmented)
+(72396 faces)`, `eligible faces (visible from the implant): 7498 of 72396`
+(seed centroid of the 32 detected seeds), `Recommended tiles: 12 (mesh area
+4732 mm², treatable 4732 mm²; ellipsoid estimate 30 tiles from 66.6 × 62.8 ×
+54.3 mm)` — the ellipsoid rule sees the whole printed shell, the measured
+rule only the eligible wall, which is why the two differ by 2.5×. The first
+greedy attempt in this pass died in `visible_faces` with
+`ArrayMemoryError: 4.71 GiB (210 778 340, 3)` while two other pipelines were
+running — trimesh's pure-Python ray cast is O(rays × faces) in memory on
+the 72k-face shell; it succeeds alone (22 GB free). Flagged for A1.
+
+**Planner, real `O` flow** (`GT_E2E=1 python -m pytest -s
+tests/test_planner_optimize.py -k e2e`, synthetic phantom at 1 mm, off-screen
+VTK, h 4 mm / 3 spins): recommendation **15** tiles; Enter with 15 →
+`optimize failed: greedy solver failed: status infeasible (no compatible
+candidate of the required kinds left after placing 10 of 15 tiles)` in
+20.9 s (386 candidates built in 9.4 s, conflicts 10.1 s, greedy 0.6 s) — the
+manufacturer rule divides area by 4 cm² with no packing loss, so on this
+cavity it exceeds what fits at this discretization, and the planner says so
+rather than placing fewer (§4 V8). Enter with 6 → `optimized: 6 tiles placed
+by greedy in 14.6 s (386 candidates at h 4 mm / 3 spins built in 0.0 s
+[cache], solver 0.7 s)`, status `+5 mm shell: V100 0.00 -> 0.42   D90 0 ->
+1903 cGy (influence estimate)`, `_refresh_overlaps` → none, `Z` removes all
+six, `N` on the warm cache 0.0 s. The remaining ~14 s of the warm run was
+`build_conflicts`, so the conflict graph is now cached per candidate set
+too (`api.cached_conflicts`): a warm `O` is solver time only.
+
+Open for the coordinator: (a) should the planner pre-fill the prompt with
+`min(recommendation, packing capacity)`? Capacity is only known after a
+greedy run; cheap to add as "try N, on infeasible offer the count that fit".
+(b) `final_report` shell rows on the shell fallback should take the eligible
+mask too (A5).
+
 ## Reviewer report (A7)
 
 _To be pasted unedited._

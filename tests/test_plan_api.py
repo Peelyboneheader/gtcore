@@ -89,7 +89,7 @@ def _install_fakes(monkeypatch, toy, calls):
     def make_objective(infl, conf, **w):
         return Objective(infl, conf, rx_cgy=w.get("rx_cgy", infl.rx_cgy))
 
-    def solve_greedy(objective, n_tiles, fixed=(), kinds_required=None):
+    def solve_greedy(objective, n_tiles, fixed=(), kinds_required=None, **kw):
         calls["greedy_fixed"] = list(int(i) for i in fixed)
         calls["greedy_kinds"] = dict(kinds_required or {})
         calls["greedy_n"] = int(n_tiles)
@@ -189,6 +189,36 @@ def test_evaluate_tiles_on_the_flat_wall(toy):
     assert default["target"].startswith("shell")
 
 
+def test_default_target_masks_ineligible_wall(toy):
+    """On the printed-phantom fallback only the eligible (inner) wall may
+    carry target weight; the point set itself is unchanged."""
+    mesh = toy["mesh"]
+    full = api.default_target(mesh)
+    assert full.total_weight == pytest.approx(TargetSet.from_shell(mesh).total_weight)
+    top = pf.flat_wall_top_faces(mesh)
+    masked = api.default_target(mesh, top)
+    assert len(masked) == len(full) and np.array_equal(masked.points, full.points)
+    assert 0 < masked.total_weight < full.total_weight
+    faces = np.asarray(mesh.faces)
+    off_wall = np.setdiff1d(np.arange(len(full)), np.unique(faces[top]))
+    assert np.all(masked.weights[off_wall] == 0.0)
+    assert "eligible" in masked.name
+    with pytest.raises(ValueError, match="one entry per mesh face"):
+        api.default_target(mesh, top[:-1])
+    # and the before/after readout honours it
+    m = api.evaluate_tiles(mesh, [toy["candidates"].tiles[0]], rx_cgy=RX, eligible_faces=top)
+    assert "eligible" in m["target"]
+
+
+def test_optimize_and_suggest_use_the_eligible_target(fakes, toy):
+    mesh = toy["mesh"]
+    top = pf.flat_wall_top_faces(mesh)
+    tiles, rep = plan.optimize(mesh, 2, report=False, eligible_faces=top)
+    assert "eligible" in rep.parameters["target"] and len(tiles) == 2
+    _tile, info = plan.suggest_next(mesh, [], eligible_faces=top)
+    assert "eligible" in info["target"]
+
+
 def test_compatible_with_placed_agrees_with_the_toy_conflicts(toy):
     cand, conf = toy["candidates"], toy["conflicts"]
     mask = api.compatible_with_placed(cand, [cand.tiles[0]])
@@ -256,6 +286,7 @@ def test_optimize_reuses_cached_candidates_and_influence(fakes, toy):
     plan.optimize(mesh, 2, report=False)
     plan.optimize(mesh, 3, report=False)
     assert fakes["build_candidates"] == 1 and fakes["build_influence"] == 1
+    assert fakes["build_conflicts"] == 1, "the conflict graph is cached per candidate set"
     # an explicit candidate set is used as given (no cache lookup)
     plan.optimize(mesh, 2, report=False, candidates=toy["candidates"])
     assert fakes["build_candidates"] == 1
@@ -291,8 +322,8 @@ def test_optimize_fails_loudly_on_short_or_infeasible_results(fakes, toy, monkey
     mesh = toy["mesh"]
     real = plan.solve_greedy
 
-    def short(objective, n_tiles, fixed=(), kinds_required=None):
-        res = real(objective, n_tiles, fixed, kinds_required)
+    def short(objective, n_tiles, fixed=(), kinds_required=None, **kw):
+        res = real(objective, n_tiles, fixed, kinds_required, **kw)
         res.selection = res.selection[:-1]
         return res
 
@@ -300,7 +331,7 @@ def test_optimize_fails_loudly_on_short_or_infeasible_results(fakes, toy, monkey
     with pytest.raises(RuntimeError, match="returned 2 tiles, 3 requested"):
         plan.optimize(mesh, 3, report=False)
 
-    def infeasible(objective, n_tiles, fixed=(), kinds_required=None):
+    def infeasible(objective, n_tiles, fixed=(), kinds_required=None, **kw):
         return SolverResult(selection=[], status="infeasible", reason="wall is full",
                             feasible=False, solver="greedy")
 
@@ -308,7 +339,7 @@ def test_optimize_fails_loudly_on_short_or_infeasible_results(fakes, toy, monkey
     with pytest.raises(RuntimeError, match="wall is full"):
         plan.optimize(mesh, 3, report=False)
 
-    def conflicting(objective, n_tiles, fixed=(), kinds_required=None):
+    def conflicting(objective, n_tiles, fixed=(), kinds_required=None, **kw):
         return SolverResult(selection=[0, 1], status="ok", feasible=True, solver="greedy")
 
     monkeypatch.setattr(plan, "solve_greedy", conflicting)
@@ -357,7 +388,9 @@ def test_optimize_continuous_uses_greedy_start_and_coarse_grid(fakes, toy, monke
     seen = {}
 
     def solve_continuous(mesh_, candidates, target, rx_cgy, n_tiles, seed=0, n_starts=4,
-                         n_passes=2, time_budget_s=60.0, start=None, kinds_required=None):
+                         n_passes=2, time_budget_s=60.0, start=None, kinds_required=None,
+                         **kw):
+        assert kw.get("objective") is not None and kw.get("conflicts") is not None
         seen.update(n_tiles=n_tiles, seed=seed, budget=time_budget_s,
                     start=list(np.asarray(start)), kinds=dict(kinds_required or {}))
         tiles = candidates.tiles_of(start)
@@ -388,7 +421,9 @@ def test_optimize_continuous_uses_greedy_start_and_coarse_grid(fakes, toy, monke
 
 
 def test_optimize_continuous_is_a_stub_until_a3_lands(fakes, toy, monkeypatch):
+    import gtcore.plan.solvers as solvers_mod
     monkeypatch.delattr(plan, "solve_continuous", raising=False)
+    monkeypatch.delattr(solvers_mod, "solve_continuous", raising=False)
     with pytest.raises(NotImplementedError, match="solve_continuous"):
         plan.optimize(toy["mesh"], 2, solver="continuous", report=False)
 
