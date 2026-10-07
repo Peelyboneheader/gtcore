@@ -1828,3 +1828,27 @@ forbid builders from editing `interact.py`, and the brief says the existing
 code has precedence, so (b) is in force; the optimizer's candidate filter
 (`min_fraction_on_wall`, hanging-tile rejection) keeps ballooned footprints
 out of the candidate set on the meshes tested. Decision (a) is Jacob's.
+
+### A6 end-to-end, deferred measurement (coordinator): printed phantom `--min-n`
+
+Command (run alone, commit 94ce83c):
+`python -m gtcore.cli optimize "C:\Users\jacob\OneDrive\Documents\3D-Printed Phantom-8tiles (223)" --tiles 8 --solver greedy --h 4 --spins 3 --seed 0 --min-n --out output/optimize_phantom8_minn`
+
+Wall: pipeline ~20 s (cached DICOM read), eligible faces 7498/72396 (angular
+visible_faces), recommendation 12 (4732 mm² eligible; ellipsoid estimate 30),
+candidates 109 at h 4 / 3 spins in 13.3 s, conflicts 1689 pairs, greedy
+sweep N = 1..8 (the CLI then capped the sweep at `--tiles`; fixed on the next
+commit to sweep up to the packing capacity), report 52 s, total 67 s.
+
+| N | V100 | D90 cGy | V150 | V200 |
+|---|---|---|---|---|
+| 4 | 0.386 | 1034 | 0.227 | 0.126 |
+| 6 | 0.584 | 1995 | 0.353 | 0.205 |
+| 7 | 0.652 | 3570 | 0.395 | 0.246 |
+| 8 | 0.700 | 3905 | 0.445 | 0.304 |
+
+Greedy reaches neither D90 ≥ rx nor V100 ≥ 0.90 by N = 8 on the eligible-wall
++5 mm target (36 126 points, 22 623 mm²); A5's quick run with SA found the P2
+minimum at N = 10 (both criteria). The whole-mesh shell rows (0/5/10 mm) are
+not meaningful on the body-shell fallback (they score the outer surface);
+only the "shell target" row is.

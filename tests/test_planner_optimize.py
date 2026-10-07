@@ -624,7 +624,8 @@ def test_cli_min_n_sweeps_without_forwarding_the_budget(result, monkeypatch, tmp
     rc = main(["optimize", "--spacing", "1.0", "--out", str(out), "--tiles", "4",
                "--min-n", "--no-report", "--budget", "7"])
     assert rc == 0
-    assert seen["n_max"] == 4 and "time_budget_s" not in seen["kw"]
+    # the sweep runs up to the packing capacity (fake: 10), not just --tiles 4
+    assert seen["n_max"] == 10 and "time_budget_s" not in seen["kw"]
     assert seen["kw"]["h_mm"] == 2.5 and seen["target"].startswith("shell")
     call = [c for c in calls if c[0] == "optimize"][-1]
     assert call[1] == 3, "the smallest N with D90 >= rx is placed"

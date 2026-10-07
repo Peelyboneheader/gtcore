@@ -115,8 +115,10 @@ def cmd_optimize(args):
         rec = plan.recommend_tile_count(mesh, eligible_faces=eligible)
         print(rec.describe())
         n_tiles = args.tiles
-        if n_tiles is None:
+        cap = None
+        if n_tiles is None or args.min_n:
             # the rule has no packing loss: also measure what fits at this grid
+            # (with --min-n the sweep runs up to this capacity, not --tiles)
             from .plan.api import packing_capacity
             cap, cap_info = packing_capacity(
                 mesh, rx_cgy=args.rx, kind="full", h_mm=args.h, n_spins=args.spins,
@@ -127,6 +129,7 @@ def cmd_optimize(args):
                      args.spins if args.spins is not None else "default",
                      "at least " if cap_info.get("at_least") else "", cap,
                      cap_info.get("seconds", 0.0), cap_info.get("n_candidates", 0)))
+        if n_tiles is None:
             n_tiles = min(int(rec.n_tiles), int(cap)) if cap > 0 else int(rec.n_tiles)
             which = ("the packing capacity" if cap < rec.n_tiles
                      else "the recommended count")
@@ -149,7 +152,11 @@ def cmd_optimize(args):
             target = default_target(mesh, eligible)   # +5 mm shell of the eligible wall
             # sweep_n forwards **kw to the discrete solvers, which take no budget
             kw_sweep = {k: v for k, v in kw.items() if k != "time_budget_s"}
-            sweep = plan.sweep_n(mesh, target, n_tiles, **kw_sweep)
+            # P2 asks for the smallest N that meets the criterion, so sweep up
+            # to what fits at this grid (the sweep stops by itself at the
+            # first N that cannot be packed), not just up to --tiles
+            n_sweep = max(int(n_tiles), int(cap)) if cap else int(n_tiles)
+            sweep = plan.sweep_n(mesh, target, n_sweep, **kw_sweep)
             print("coverage vs N (%s):" % args.solver)
             for row in sweep.rows:
                 print("  N %2d  V100 %.3f  D90 %.0f cGy  V150 %.3f  V200 %.3f  %.1f s"
@@ -162,7 +169,9 @@ def cmd_optimize(args):
                           fh, indent=2)
             chosen = sweep.min_n.get("D90>=rx")
             if chosen is None:
-                print("no N <= %d reaches D90 >= rx; placing %d tiles" % (n_tiles, n_tiles))
+                n_placed = max([int(r.get("N", 0)) for r in sweep.rows] or [n_tiles])
+                print("no N <= %d reaches D90 >= rx (largest N that packed: %d); "
+                      "placing %d tiles" % (n_sweep, n_placed, n_tiles))
                 chosen = n_tiles
             n_full = int(chosen)
         tiles, rep = plan.optimize(mesh, n_full, args.half, refine=bool(args.refine),
