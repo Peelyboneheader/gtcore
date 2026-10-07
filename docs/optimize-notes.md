@@ -94,6 +94,22 @@ n ∈ {1 … 1001} and 81 q values each, except where `n·q` overshoots an integ
 by floating-point rounding (e.g. 25 × 0.28 = 7.000000000000001): numpy then
 steps to element k + 1, ours returns element k (the definition); tested
 explicitly (`test_weighted_quantile_unit_weights_matches_numpy_inverted_cdf`).
+A3 (`tests/test_plan_solvers.py`, 26 tests): greedy never violates a
+conflict (both toys, every N up to the packing limit) and is deterministic;
+`fixed` ids are kept; an infeasible N fails with `status="infeasible"` and a
+reason naming "4 of 5"; feasibility-aware greedy packs N = 9 on the 60-toy
+where plain greedy stalls at 7; local search never decreases the hard
+objective, ends feasible and is a fixed point of itself; SA is reproducible
+from its seed (selection and history identical), feasible, and ≥ greedy on
+both toys; `sweep_n` greedy rows are monotone in V100; E5 and
+`solve_continuous` never lower V100 and never introduce an overlap on the
+flat wall with the real engine; the evaluator routes through
+`Objective.hard` / `metrics` / `gains_all` when they are real.
+
+_Pending (other branches)._ Influence gate (§3 B); weighted quantiles; conflict symmetry and
+clique/pairwise agreement; greedy never violates a conflict; SA reproducible
+from seed; MILP equals brute force on the toy instance; the planner never
+flags an optimizer output as overlapping.
 
 ## V2 Synthetic benchmark
 
@@ -147,6 +163,60 @@ vector, chunked by 256 rows (`GAINS_CHUNK_ROWS`); the float32 rows are
 compared against float32 thresholds rounded *up* from `rx − base`, which is
 bit-identical to the float64 comparison and avoids an 8 MB upcast per chunk
 (52 → 40 ms).
+_Pending for the real modules._ Candidate build, influence, each solver,
+final reporting; per cavity size; hardware stated.
+
+### A3 solvers (toy instance)
+
+Branch `plan/solvers`, code base cd73082 (Phase 0) + the A3 commit that adds
+this section. Hardware: AMD64 family 25 model 97 (Ryzen 7000 class), Python
+3.12.10, single thread. Command (from the worktree root):
+`python scratch/timing.py` = the sequence below, equivalently
+`python -m pytest -q tests/test_plan_solvers.py` for the assertions. Seeds:
+`toy_instance(rng_seed=0)`, SA `seed=0`. Objective: A3's `_HardEval` fallback
+(A2's `Objective` methods are stubs on this branch); the toy dose is the
+analytic inverse-square kernel, not the engine.
+
+| instance | solver | wall | hard P1 | V100 | evaluations |
+|---|---|---|---|---|---|
+| toy C=30, N=4, M=200, 213 conflict pairs | greedy (feasibility-aware) | 0.002 s | 0.6625 | 0.805 | 121 |
+| | greedy (plain) | 0.001 s | 0.6625 | 0.805 | 121 |
+| | local search from greedy (r = 10 mm) | 0.005 s | 0.8175 | 0.890 | 85 |
+| | SA, 40 sweeps × 3 restarts, 50·N moves/sweep | 1.59 s | 0.8300 | 0.920 | 19 469 |
+| | SA without `candidates` (all moves global) | 1.38 s | 0.8300 | 0.920 | 24 306 |
+| | `sweep_n` greedy N = 1..4 | 0.017 s | — | 0.805 at N = 4 | — |
+| toy C=60, N=9, M=250, 504 conflict pairs | greedy (feasibility-aware) | 0.007 s | 0.6100 | 0.992 | 385 |
+| | greedy (plain) | 0.003 s | **infeasible, 7 of 9 placed** | 0.884 | 307 |
+| | local search from greedy | 0.004 s | 0.6640 | 1.000 | 29 |
+| | SA, 40 × 3 | 3.60 s | 0.6760 | 1.000 | 28 105 |
+| | SA without `candidates` | 2.43 s | 0.6760 | 1.000 | 31 371 |
+| | `sweep_n` greedy N = 1..9 | 0.022 s | — | min N: D90 ≥ rx at 8, V100 ≥ 0.90 at 8 | — |
+
+SA diagnostics: T0 = 0.0398 (C=30) / 0.0146 (C=60) in soft-objective units
+(a fraction of the target), acceptance rates 0.26–0.28 per restart, all
+three restarts reached the same best on both toys (the toy is small and
+saturates). On C=60 the hard P1 value is dominated by the V200 penalty
+(V100 = 1.0 but V200 ≈ 0.8 at nine tiles on a 250-point shell), so "better
+hard" there means fewer hot points, not more coverage.
+
+Real engine (tabulated kernel, `dose_at_points(exact=False)`), flat 60 mm
+wall, 300 target points on the +5 mm plane, rx 3000 cGy (one tile reaches
+≈ 4200 cGy at 5 mm, so rx 6000 would give V100 = 0 for any pair):
+
+| run | wall | per tile-NM | evals / tile-NM | result |
+|---|---|---|---|---|
+| E5 `refine_continuous`, 2 tiles, 2 passes, max_iter 60, step 1 mm / 5° | 1.9 s | ≈ 0.45 s | ≈ 65 | V100 0.387 → 0.413, soft 0.385 → 0.402, 3 of 4 steps accepted, no overlap |
+| `solve_continuous`, 3 × 3 candidate grid (15 mm pitch), N = 2, 3 starts × 2 passes, max_iter 60, step 2 mm / 10° | 7.7 s | 0.63 s | 60 | greedy start hard 0.423 → best 0.450 (starts: 0.450, 0.450, 0.293) |
+| same, 2 starts × 1 pass, max_iter 30 | 1.1 s | 0.27 s | 54 | 0.423 → 0.450 |
+
+One NM evaluation costs ≈ 10 ms at 300 target points: `conform_tile` ≈ 3 ms
+on the 2160-face wall + `dose_at_points` ≈ 4 ms for 4 seeds + overhead. The
+per-tile NM cost therefore scales with mesh density (ray casts) and with
+`m_opt`; at the recommended h = 4 mm / 3 spins start grid and M = 1000 the
+scout's ~25 s for N = 6 × 2 passes is consistent with ≈ 1 s per tile-NM.
+
+Test module: `python -m pytest -q tests/test_plan_solvers.py` → 26 passed in
+≈ 16 s (E5 and continuous tests use the real engine, the rest the toy).
 
 ## V8 Failure modes
 
@@ -235,6 +305,110 @@ A2 (`plan/influence`, 2026-10-07):
     only the kernel table). Chosen: the grid — it is the reporting path and
     its interpolation error (5e-3 at ≥ 0.5 rx) is the number the gate exists
     to bound.
+A3 (`plan/solvers`, 2026-10-07). Taken while A2's `Objective` methods were
+still stubs; each is flagged for the merge.
+
+10. **Evaluation routing.** `solvers._HardEval` computes V100/V150/V200/D90,
+    the P1 hard value, the sigmoid soft value and the vectorized "add each
+    candidate" values straight from `influence.dose`, `target.weights`, the
+    OAR matrices and the objective's lambda fields. `solvers._Evaluator`
+    uses `objective.hard` / `metrics` when they are real (probe: a call on
+    the empty selection that raises `NotImplementedError` marks a stub) and
+    `objective.gains_all(selection, dose_vec=None)` / `soft_gains_all` when
+    present (`getattr`), else the helper. Rule: within one solver run every
+    comparison comes from one source (the objective's methods only when
+    `hard` AND `gains_all` are both real), so a local search cannot cycle on
+    float32/float64 differences between two implementations; only the
+    reported `objective` / `metrics` prefer the objective's methods.
+    Alternative: always use the helper. Chosen: route when real.
+    D90 convention in the helper: weighted lower quantile (smallest dose
+    whose cumulative weight reaches 10 %), equal to
+    `numpy.percentile(method="inverted_cdf")` for unit weights.
+11. **Plain vs feasibility-aware greedy (coordinator scout, 4 cavities at
+    h = 4 mm / 2 spins).** Plain max-gain greedy clusters tiles where the
+    immediate gain is largest and runs out of compatible candidates (7 of
+    8 on one cavity; at or below random feasible selections on the others).
+    `solve_greedy(feasibility_aware=True)` (default) walks the ranked
+    candidates and skips any whose addition leaves a greedy maximal
+    independent set (min static degree first, truncated at the remaining
+    need; `_packing_bound`) smaller than the tiles still to place; at most
+    `GREEDY_MAX_BOUND_CHECKS = 200` candidates are checked before falling
+    back to the top-ranked one (`extra["bound_fallbacks"]`). The bound is a
+    lower bound on the true packing number, so a skip is conservative (it
+    can skip a candidate that would in truth still fit). On the 60-candidate
+    toy at N = 9 plain greedy places 7, the aware variant 9 (test
+    `test_feasibility_aware_greedy_packs_where_plain_greedy_stalls`).
+    Alternative: exact packing (MILP / clique cover) per step — too slow at
+    C ≈ 6000. Chosen: greedy MIS bound; `feasibility_aware=False` keeps
+    plain greedy for comparisons.
+12. **Greedy tie-break is lexicographic** `(hard gain, soft gain, room,
+    lowest id)`, `room` = number of candidates still compatible after the
+    addition. Step 1 ties on hard gain for every candidate on real cavities
+    (no single tile reaches rx on the +5 mm shell), so the soft gain decides;
+    `room` only matters for exact (hard, soft) ties (zero-dose rows in the
+    test). Alternative (§3 E1 as written): lowest id. Chosen: lexicographic,
+    still deterministic.
+13. **`solve_greedy_local`** (greedy then E2 local search) is the default
+    heuristic follow-up; `sweep_n(solver="local")` runs it per N.
+14. **SA T0 estimator.** 200 trial proposals from the start state (not
+    applied); T0 = median of the uphill `|Δsoft|` / ln 2, so the median
+    uphill move is accepted with probability 1/2. Fallbacks: no uphill move
+    among the trials → median of the non-zero `|Δsoft|` / ln 2; all trials
+    flat → T0 = 1e-3 (soft is a fraction of the target weight). The trial
+    moves consume the seeded RNG, so they are part of the reproducible
+    stream. Alternative: fixed T0 as a fraction of the soft value. Chosen:
+    trial-move estimate; measured T0 0.015–0.040 on the toys.
+15. **SA move mix without `candidates`.** The 60/20/20 local/spin/global mix
+    needs anchors and `anchor_ids`; when `candidates` is None (or when
+    `solve_sa` is called through the frozen `gtcore.plan.solve_sa` signature
+    without it) local and spin moves degrade to global re-sites
+    (`extra["degraded_to_global"] = True`). On the toys the answer did not
+    change (same best on both), but ~20 % more evaluations were needed on
+    C=60 (31 371 vs 28 105). Kinds are preserved by every move when kinds
+    are known (candidates given); without them any candidate may replace
+    any tile.
+16. **Random feasible starts (SA restarts 1..k, `solve_continuous`).** A
+    random permutation walk (take each candidate compatible with those
+    taken so far whose kind is still needed) spreads tiles out; when N is
+    near the packing limit (the 8 × 8 toy at N = 9 needs the exact 3 × 3
+    lattice) 50 such walks can all fall short, so one bound-aware
+    construction follows (random order, each pick checked with
+    `_packing_bound`). If both fail, SA restarts from the start selection
+    (`per_restart[i]["origin"]` says so) and `solve_continuous` reports
+    `status="infeasible"`.
+17. **`kinds_required` needs candidate kinds.** `Objective` carries no
+    `CandidateSet`; the module-level `solvers.solve_greedy` takes
+    `candidates=` (and `objective.candidates`, if a caller attaches one, is
+    also read). Through the frozen `gtcore.plan.solve_greedy` signature,
+    `kinds_required` without an attached `CandidateSet` raises `ValueError`.
+    `kinds_required` counts the whole selection (fixed tiles included) and
+    must sum to `n_tiles`.
+18. **Sweep warm start that boxes itself in.** `sweep_n` warm-starts N from
+    N−1 (greedy: `fixed`; local/sa/continuous: previous + one greedy
+    addition); when that fails (no compatible candidate) the N is retried
+    from scratch and the row is marked `warm_start=False` (the V100 curve
+    is then monotone only over the warm-started rows); the sweep stops at
+    the first N neither start can place. `status="time_limit"` /
+    `"max_evals"` results are kept (they are feasible).
+19. **`solve_continuous` (scout 7.4 promotion).** Multi-start coordinate
+    descent NM over `(u, v, θ)` per tile, same acceptance rule as E5 (hard
+    V100 must not drop, soft must improve, `find_overlapping_tiles` empty);
+    starts = `start` / greedy(objective) / first random feasible, plus
+    `n_starts − 1` random feasible; best final hard (then soft) wins. The
+    reported objective and metrics are computed on the subsampled target
+    (`m_opt`, default 1000) with the real engine, not the influence matrix,
+    so they are not directly comparable with the discrete solvers' values
+    (compare through `final_report`). `time_budget_s` is a strict deadline
+    raised inside the NM callback; when it is hit the status is
+    `"time_limit"` and reproducibility from the seed is no longer
+    guaranteed. Returned tiles are continuous poses; `selection` is the
+    winning start's candidate ids. Recommended start grid h = 4 mm, 3 spins
+    (coordinator). Conflicts for random starts come from `conflicts`, else
+    `objective.conflicts`, else `find_overlapping_tiles` on the candidate
+    tiles (O(C²), fine for a few hundred candidates).
+20. **`tests/test_plan_interface.py`** exempts the five A3 functions from
+    `test_every_stub_raises_not_implemented` (set `IMPLEMENTED`); other
+    branches add their names to the same set.
 
 ---
 
@@ -260,3 +434,5 @@ _To be pasted unedited._
 | 2026-10-07 | `python -m pytest -q tests/test_plan_interface.py` | — | (Phase 0 commit) | 34 passed (full suite 470 passed, 205 s) | interface freeze |
 | 2026-10-07 | `python -m pytest -q -s tests/test_plan_influence.py tests/test_plan_objective.py` | phantom 1, draws 0, toy 0–5 | 5ea6f95 | 31 passed; gate max ΔV100 0.103 pp, ΔD90 0.042 % rx; 0.9–1.6 ms / candidate; hard 0.04–0.14 ms; gains_all 40–49 ms | A2 influence + objective |
 | 2026-10-07 | `python -m pytest -q -p no:cacheprovider` | — | 5ea6f95 | 498 passed, 3 skipped (489 s, concurrent with the gate run) | A2 full suite |
+| 2026-10-07 | `python -m pytest -q tests/test_plan_solvers.py` | toy rng 0; SA seeds 0, 1, 7 | cd73082 + A3 commit (plan/solvers) | 26 passed, ≈ 16 s | greedy / local / SA / sweep / E5 / continuous; timings in V7 "A3 solvers" |
+| 2026-10-07 | `python -m pytest -q -p no:cacheprovider` | — | cd73082 + A3 commit (plan/solvers) | 491 passed, 383 s (run alone; 616 s when two suites shared the CPU) | 491 collected (470 + 26 − 5 stub cases now implemented) |

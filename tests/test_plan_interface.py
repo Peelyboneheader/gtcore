@@ -74,7 +74,8 @@ def test_submodules_exist_but_are_not_imported_by_init():
 
 
 # Functions already wired to their branch module (each branch adds its own).
-IMPLEMENTED = {"build_influence", "make_objective", "evaluate"}
+IMPLEMENTED = {"build_influence", "make_objective", "evaluate",
+               "solve_greedy", "solve_local", "solve_sa", "refine_continuous", "sweep_n"}
 
 
 @pytest.mark.parametrize("name", STUBS)
