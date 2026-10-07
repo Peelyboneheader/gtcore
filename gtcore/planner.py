@@ -98,6 +98,10 @@ PLACE    hover the blue wall : ghost preview of the next tile (amber = overlaps)
          right-click or P    : drop tile there      H : next tile full/half
          T                   : suggest tiles from the detected seeds (OR count
                                if given, else auto; orange = tentative)
+         O                   : OPTIMIZE placement: recommends a tile count, asks
+                               for N (digits, Enter, Esc), drops the optimizer's
+                               tiles (violet until touched)   Shift+O : solver
+         N                   : suggest the NEXT tile for the current board
 ADJUST   left-drag ON a tile : grab it (quad or seeds) and slide it along the wall
          Ctrl + left-drag    : slide the SELECTED tile from anywhere on the wall
          Tab                 : select next tile     arrows : nudge 2 mm
@@ -114,7 +118,21 @@ EXPORT   S                   : save plan (seed coordinates) to output/*.csv
 VIEW     left-drag (off tiles) rotate   right-drag zoom   middle-drag pan   R reset
          G                   : ghost preview on/off      B : background colour"""
 HELP_TEXT_COMPACT = ("? legend   right-click drop   Ctrl+drag move   "
-                     "U dose   S save")
+                     "O optimize   N next tile   U dose   S save")
+
+# --- opt-in placement optimizer (gtcore.plan; docs/plan-tile-optimize.md) ---
+OPTIMIZER_SOLVERS = ("greedy", "sa", "continuous")   # Shift+O / --optimizer cycle these
+# "greedy" stays the default until the validation campaign (V2) picks one.
+OPTIMIZE_MODES = ("replace", "add")
+# "replace": this session's hand-placed (green) proposals are removed (one
+# undo step) and the N optimizer tiles take their place; tiles fitted FROM
+# THE SCAN (gold) stay and are passed to the optimizer as fixed obstacles.
+# "add": everything on the board stays fixed and N tiles are added to it.
+# Keys the tile-count prompt consumes while it is open (digits, numpad
+# digits, editing and confirmation); outside a prompt they do nothing.
+_PROMPT_KEYS = tuple(str(d) for d in range(10)) + tuple("KP_%d" % d for d in range(10)) \
+    + ("Return", "KP_Enter", "Escape", "m", "M")
+_PROMPT_MAX_DIGITS = 3
 
 _ISO_STYLE = (  # (fraction of rx, actor name, color)
     (1.00, "iso_100", "red"),
@@ -140,6 +158,12 @@ _TILE_STYLE: Dict[str, Dict] = {
 _OVERLAP_COLOR = {"normal": "darkgoldenrod", "hover": "goldenrod",
                   "selected": "goldenrod", "dragging": "goldenrod"}
 _ADOPTED_OUTLINE = "gold"  # provenance cue: tile recovered from the scan
+# a tile proposed by the OPTIMIZER (O / N keys): violet quad + outline until
+# the user first drags, nudges or rotates it ("tinted until touched"); the
+# amber overlap caution still overrides this colour
+_OPTIMIZED_COLOR = {"normal": "mediumorchid", "hover": "orchid",
+                    "selected": "violet", "dragging": "cyan"}
+_OPTIMIZED_OUTLINE = "violet"
 # a TENTATIVE suggestion (cover pass / triplet completion): the algorithm's
 # lower-confidence reading, drawn thinner and in orange so the surgeon
 # verifies it rather than trusts it; its inferred (undetected) seed is a
@@ -188,12 +212,59 @@ def _seed_polydata(pv, tile):
     return polys
 
 
+def wall_mesh_for(result: PipelineResult):
+    """The surface tiles are conformed to, as ``(mesh, label)``.
+
+    The cavity wall when the pipeline segmented one; otherwise -- for
+    phantoms and other scans without a segmented cavity -- the object/body
+    shell, so tiles can still be placed, selected and dragged on something
+    real.  ``mesh`` may be None or empty (degraded exports); the label is
+    then still ``"cavity wall"`` and callers fall back to free-space moves.
+    Shared by the planner and ``gt optimize`` so both pick the same wall.
+    """
+    cavity = result.meshes.get("cavity")
+    if cavity is None or not len(getattr(cavity, "vertices", ())):
+        body = result.meshes.get("body")
+        if body is not None and len(body.vertices):
+            return body, "phantom shell (no cavity segmented)"
+    return cavity, "cavity wall"
+
+
+class _CountPrompt:
+    """In-scene numeric entry for the optimizer's tile count (the 'O' key).
+
+    PyVista/VTK has no text-input dialog, so the status line becomes the
+    prompt: digits edit the highlighted field, BackSpace deletes, H switches
+    between the full and half counts, M flips the replace/add mode, S cycles
+    the solver, Enter runs, Esc cancels.  While a prompt is open every other
+    planner binding is a no-op (typing "8" must not trigger anything).
+    """
+
+    def __init__(self, recommended: Optional[int], note: str = ""):
+        self.recommended = recommended      # manufacturer-rule count, or None
+        self.note = note                    # one-line recommendation / reason
+        self.text = {"full": "", "half": ""}
+        self.field = "full"
+
+    def value(self, field: str) -> int:
+        txt = self.text[field]
+        if txt:
+            return int(txt)
+        if field == "full" and self.recommended is not None:
+            return int(self.recommended)
+        return 0
+
+    def shown(self, field: str) -> str:
+        txt = self.text[field] or ("%d" % self.value(field) if self.value(field) else "0")
+        return "[%s_]" % txt if field == self.field else txt
+
+
 class _PlannerApp:
     """State + rendering for the planner; drives one pyvista Plotter."""
 
     def __init__(self, result: PipelineResult, rx_cgy: float = 6000.0,
                  off_screen: bool = False, title: str = "GammaTile planner",
-                 prior=None):
+                 prior=None, solver: str = "greedy"):
         import pyvista as pv
 
         self.pv = pv
@@ -202,16 +273,17 @@ class _PlannerApp:
         # what the OR team told us (counts); None -> the safe defaults
         from .tiles.auto import ImplantPrior
         self.prior = prior if prior is not None else ImplantPrior()
-        # interaction surface: the cavity wall, or -- for phantoms and other
-        # scans without a segmented cavity -- the object/body shell, so tiles
-        # can still be placed, selected and dragged on something real
-        self.cavity = result.meshes.get("cavity")
-        self._surface_label = "cavity wall"
-        if self.cavity is None or not len(getattr(self.cavity, "vertices", ())):
-            body = result.meshes.get("body")
-            if body is not None and len(body.vertices):
-                self.cavity = body
-                self._surface_label = "phantom shell (no cavity segmented)"
+        # interaction surface: the cavity wall, or the phantom/body shell
+        # fallback (see wall_mesh_for)
+        self.cavity, self._surface_label = wall_mesh_for(result)
+
+        # opt-in placement optimizer (O / N keys; gtcore.plan, loaded lazily)
+        self._opt_solver = solver if solver in OPTIMIZER_SOLVERS else "greedy"
+        self._opt_mode = OPTIMIZE_MODES[0]
+        self._optimized_ids = set()      # tile ids tinted violet until touched
+        self._prompt: Optional[_CountPrompt] = None
+        self._last_optimize = None       # OptimizeReport of the last O run
+        self._eligible_cache = None      # (face mask or None, note) for the wall
 
         self.tiles: List[PlacedTile] = []
         self._tile_ids: List[int] = []
@@ -426,10 +498,28 @@ class _PlannerApp:
         if bool(state) != self.dose_panel_visible:
             self._toggle_dose_panel()
 
+    def _guarded(self, key, fn):
+        """Wrap a key handler so an open tile-count prompt consumes the key
+        instead (digits, Enter, Esc, BackSpace, H/M/S) and nothing else
+        fires while the user is typing a number."""
+        def handler():
+            if self._prompt is not None:
+                self._prompt_key(key)
+            else:
+                fn()
+        return handler
+
+    @staticmethod
+    def _noop():
+        pass
+
     def _bind_interaction(self):
         pl = self.pl
         self._bind_pick_observers()
         for keys, fn in (
+            (("o", "O"), self._optimize_key),
+            (("n", "N"), self.suggest_next_tile),
+            (_PROMPT_KEYS, self._noop),   # live only while a prompt is open
             (("p", "P"), self._place_at_mouse),
             (("h", "H"), self._toggle_kind),
             (("g", "G"), self._toggle_ghost),
@@ -457,7 +547,7 @@ class _PlannerApp:
         ):
             for key in keys:
                 try:
-                    pl.add_key_event(key, fn)
+                    pl.add_key_event(key, self._guarded(key, fn))
                 except Exception:
                     pass
 
@@ -740,6 +830,7 @@ class _PlannerApp:
         """
         self._drag_last_t = time.perf_counter() if now is None else now
         self._drag_applied_xy = xy
+        self._touch(idx)
         tile = self.tiles[idx]
         if not self._has_surface():
             # no wall: slide rigidly in the camera-facing plane through the
@@ -919,7 +1010,10 @@ class _PlannerApp:
                     "    surface: " + self._surface_label
                     if self._surface_label != "cavity wall" else ""))
         n_tent = sum(1 for tid in self._tile_ids if tid in self._tentative_ids)
-        text += "\nimplant: %s" % self.prior.describe()
+        n_opt = sum(1 for tid in self._tile_ids if tid in self._optimized_ids)
+        text += "\nimplant: %s    optimizer: %s, %s mode%s" % (
+            self.prior.describe(), self._opt_solver, self._opt_mode,
+            " (%d optimizer tiles untouched)" % n_opt if n_opt else "")
         if n_tent or self._unassigned:
             bits = []
             if n_tent:
@@ -1207,6 +1301,299 @@ class _PlannerApp:
         self._after_change(msg)
         return placed
 
+    # ------------------------------------------------- placement optimizer
+    # Opt-in (docs/plan-tile-optimize.md section 3 H / section 10).  Every
+    # gtcore.plan call is made lazily and defensively: while the solver
+    # branches are still landing a NotImplementedError is shown in the
+    # status line instead of taking the planner down.
+    def _touch(self, idx):
+        """A tile the user moved by hand is theirs now: drop the optimizer
+        tint ("tinted until touched")."""
+        if 0 <= idx < len(self._tile_ids):
+            self._optimized_ids.discard(self._tile_ids[idx])
+
+    def _eligible_faces(self):
+        """Face mask of the wall the optimizer may use, or None for all.
+
+        On the phantom-shell fallback (a closed printed shell has an inner
+        and an outer surface) only the faces visible from the implant
+        centroid -- the detected-seed mean, else the mesh centroid -- are
+        eligible (``visible_faces``).  On a segmented cavity every face is.
+        """
+        if self._surface_label == "cavity wall" or not self._has_surface():
+            return None
+        if self._eligible_cache is not None:
+            return self._eligible_cache[0]
+        seeds = self.result.seeds
+        if len(seeds):
+            center = np.asarray(seeds.centers_ras, dtype=float).mean(axis=0)
+        else:
+            center = np.asarray(self.cavity.vertices, dtype=float).mean(axis=0)
+        try:
+            import gtcore.plan as plan_mod
+            mask = np.asarray(plan_mod.visible_faces(self.cavity, center), dtype=bool)
+            note = "%d of %d shell faces eligible (visible from the implant)" % (
+                int(mask.sum()), mask.size)
+        except Exception as exc:
+            mask, note = None, "eligibility unavailable (%s): whole shell used" % exc
+        self._eligible_cache = (mask, note)
+        return mask
+
+    def _eligible_note(self):
+        return self._eligible_cache[1] if self._eligible_cache else ""
+
+    def _board_metrics(self, tiles):
+        """V100 / D90 of ``tiles`` on the +5 mm shell (influence-style
+        estimate from gtcore.plan.api), or None when it cannot be scored."""
+        if not self._has_surface():
+            return None
+        try:
+            from .plan.api import evaluate_tiles
+            return evaluate_tiles(self.cavity, list(tiles), rx_cgy=self.rx_cgy)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _before_after_text(before, after, rep=None):
+        """One status line of objective before / after on the +5 mm shell:
+        the report's dose-grid shell metrics when the optimizer produced
+        them, else the influence estimates."""
+        grid = None
+        if rep is not None:
+            for key, stats in (getattr(rep, "metrics_grid", None) or {}).items():
+                try:
+                    if abs(float(key) - WALL_DEPTH_MM) < 1e-6:
+                        grid = stats.get("stats", stats)
+                except (TypeError, ValueError):
+                    continue
+        if grid is not None and "V100" in grid and "D90" in grid:
+            after_v, after_d, src = grid["V100"], grid["D90"], "dose grid"
+        elif after is not None:
+            after_v, after_d, src = after["V100"], after["D90"], "influence estimate"
+        else:
+            return "objective: not scored"
+        if before is None:
+            return "+%g mm shell: V100 %.2f, D90 %.0f cGy (%s)" % (
+                WALL_DEPTH_MM, after_v, after_d, src)
+        return ("+%g mm shell: V100 %.2f -> %.2f   D90 %.0f -> %.0f cGy (%s)"
+                % (WALL_DEPTH_MM, before["V100"], after_v, before["D90"], after_d, src))
+
+    def _recommendation(self):
+        """``(TileCountRecommendation or None, status line)`` for the wall."""
+        try:
+            from .plan.api import recommended_count
+            rec, line = recommended_count(self.cavity,
+                                          eligible_faces=self._eligible_faces())
+            return rec, line
+        except NotImplementedError as exc:
+            return None, "recommendation unavailable yet (%s)" % exc
+        except Exception as exc:
+            return None, "recommendation failed: %s" % exc
+
+    def cycle_solver(self):
+        """Shift+O: next optimizer solver (greedy -> sa -> greedy)."""
+        i = OPTIMIZER_SOLVERS.index(self._opt_solver) if self._opt_solver in OPTIMIZER_SOLVERS else 0
+        self._opt_solver = OPTIMIZER_SOLVERS[(i + 1) % len(OPTIMIZER_SOLVERS)]
+        self._update_status("optimizer solver: %s (greedy is used whenever fixed "
+                            "tiles are on the board)" % self._opt_solver)
+
+    def cycle_mode(self):
+        """Prompt key M: replace this session's proposals, or add to the board."""
+        i = OPTIMIZE_MODES.index(self._opt_mode)
+        self._opt_mode = OPTIMIZE_MODES[(i + 1) % len(OPTIMIZE_MODES)]
+
+    def _optimize_key(self):
+        """'O': open the tile-count prompt; Shift+O: cycle the solver."""
+        shift = False
+        try:
+            iren = self.pl.iren.interactor
+            shift = bool(iren.GetShiftKey())
+        except Exception:
+            pass
+        if shift:
+            self.cycle_solver()
+        else:
+            self.optimize_placement()
+
+    def optimize_placement(self):
+        """'O': recommend a tile count for the wall, then prompt for N."""
+        if not self._has_surface():
+            self._update_status("no cavity surface in this scan -- nothing to optimize on")
+            return None
+        rec, line = self._recommendation()
+        self._hide_ghost()
+        self._prompt = _CountPrompt(rec.n_tiles if rec is not None else None, line)
+        self._update_status(self._prompt_text())
+        return self._prompt
+
+    def _prompt_text(self):
+        p = self._prompt
+        if p is None:
+            return ""
+        rec = "recommended %d" % p.recommended if p.recommended is not None else "no recommendation"
+        return ("OPTIMIZE: %s full + %s half tiles?  [%s]  type digits, Enter = run, "
+                "Esc = cancel\n  BackSpace = delete, H = edit %s count, M = mode (%s), "
+                "S = solver (%s)\n  %s"
+                % (p.shown("full"), p.shown("half"), rec,
+                   "full" if p.field == "half" else "half", self._opt_mode,
+                   self._opt_solver, p.note))
+
+    def _prompt_key(self, key):
+        """Route one key press into the open tile-count prompt."""
+        p = self._prompt
+        if p is None:
+            return
+        k = str(key)
+        if k.startswith("KP_") and k[3:].isdigit():
+            k = k[3:]
+        if k.isdigit() and len(k) == 1:
+            if len(p.text[p.field]) < _PROMPT_MAX_DIGITS:
+                p.text[p.field] += k
+        elif k == "BackSpace":
+            p.text[p.field] = p.text[p.field][:-1]
+        elif k in ("Return", "KP_Enter"):
+            self._run_prompt()
+            return
+        elif k == "Escape":
+            self._prompt = None
+            self._update_status("optimize cancelled")
+            return
+        elif k in ("h", "H"):
+            p.field = "half" if p.field == "full" else "full"
+        elif k in ("m", "M"):
+            self.cycle_mode()
+        elif k in ("s", "S"):
+            i = OPTIMIZER_SOLVERS.index(self._opt_solver) if self._opt_solver in OPTIMIZER_SOLVERS else 0
+            self._opt_solver = OPTIMIZER_SOLVERS[(i + 1) % len(OPTIMIZER_SOLVERS)]
+        # any other key is swallowed while the prompt is open
+        self._update_status(self._prompt_text())
+
+    def _run_prompt(self):
+        p = self._prompt
+        n_full, n_half = p.value("full"), p.value("half")
+        if n_full + n_half <= 0:
+            self._update_status(self._prompt_text() + "\n  enter at least one tile (Esc cancels)")
+            return
+        self._prompt = None
+        self.run_optimize(n_full, n_half)
+
+    def run_optimize(self, n_full: int, n_half: int = 0, solver: Optional[str] = None,
+                     mode: Optional[str] = None):
+        """Run ``gtcore.plan.optimize`` for the wall and put the result on
+        the board as ordinary placed tiles (one undo step, violet tint).
+
+        ``mode`` ``"replace"`` (default) removes this session's hand-placed
+        proposals and keeps the tiles fitted from the scan as fixed
+        obstacles; ``"add"`` keeps everything on the board as fixed and adds
+        the new tiles.  Fixed tiles force the greedy solver (the only one
+        with a fixed set); the status line says so.  Runs synchronously;
+        stage progress goes to the console.  Returns the new tiles.
+        """
+        if not self._has_surface():
+            self._update_status("no cavity surface in this scan -- nothing to optimize on")
+            return []
+        solver = solver or self._opt_solver
+        mode = mode or self._opt_mode
+        n_full, n_half = int(n_full), int(n_half)
+        keep = [(t, tid) for t, tid in zip(self.tiles, self._tile_ids)
+                if mode == "add" or tid in self._adopted_ids]
+        fixed = [t for t, _tid in keep]
+        n_removed = len(self.tiles) - len(keep)
+        solver_used, note = solver, ""
+        if fixed and solver != "greedy":
+            solver_used = "greedy"
+            note = " (greedy used: %d fixed tiles on the board)" % len(fixed)
+        before = self._board_metrics(self.tiles)
+        self._hide_ghost()
+        self._update_status("optimizing %d full + %d half tiles with %s%s -- "
+                            "please wait (progress on the console)"
+                            % (n_full, n_half, solver_used,
+                               ", %d fixed" % len(fixed) if fixed else ""))
+        t0 = time.perf_counter()
+        try:
+            import gtcore.plan as plan_mod
+            tiles, rep = plan_mod.optimize(
+                self.cavity, n_full, n_half, rx_cgy=self.rx_cgy, solver=solver_used,
+                seed=0, eligible_faces=self._eligible_faces(), report=False,
+                verbose=True, fixed_tiles=fixed)
+        except NotImplementedError as exc:
+            self._update_status("optimizer not available yet: %s" % exc)
+            return []
+        except (ValueError, RuntimeError) as exc:
+            self._update_status("optimize failed: %s" % exc)
+            return []
+        except Exception as exc:  # anything else: stay alive, say what happened
+            self._update_status("optimize failed: %r" % (exc,))
+            return []
+        tiles = list(tiles)
+        if not tiles:
+            self._update_status("optimizer returned no tiles")
+            return []
+        dt = time.perf_counter() - t0
+        self._push_history()           # one undo step restores the board
+        self._drag_idx = -1
+        self._hover_idx = -1
+        for tid in list(self._tile_ids):
+            if tid not in [k for _t, k in keep]:
+                self._remove_tile_actors(tid)
+        self.tiles = [t for t, _tid in keep]
+        self._tile_ids = [tid for _t, tid in keep]
+        for tile in tiles:
+            self.tiles.append(tile)
+            self._tile_ids.append(self._next_id)
+            self._optimized_ids.add(self._next_id)
+            self._next_id += 1
+        self.selected = len(self.tiles) - 1
+        self._last_optimize = rep
+        after = self._board_metrics(self.tiles)
+        msg = "optimized: %d tile%s placed by %s in %.1f s%s%s (violet until touched; Z undoes)" % (
+            len(tiles), "" if len(tiles) == 1 else "s", solver_used, dt, note,
+            "; %d hand-placed tile%s replaced" % (n_removed, "" if n_removed == 1 else "s")
+            if n_removed else "")
+        msg += "\n  " + self._before_after_text(before, after, rep)
+        if self._eligible_note():
+            msg += "\n  " + self._eligible_note()
+        self._after_change(msg)
+        return tiles
+
+    def suggest_next_tile(self):
+        """'N': one greedy step -- the next tile (of the current kind) that
+        most improves coverage given everything on the board."""
+        if not self._has_surface():
+            self._update_status("no cavity surface in this scan -- nothing to place on")
+            return None
+        self._hide_ghost()
+        self._update_status("suggesting the next %s tile -- please wait" % self.next_kind)
+        try:
+            import gtcore.plan as plan_mod
+            tile, info = plan_mod.suggest_next(
+                self.cavity, list(self.tiles), rx_cgy=self.rx_cgy, kind=self.next_kind,
+                eligible_faces=self._eligible_faces())
+        except NotImplementedError as exc:
+            self._update_status("suggest next: optimizer not available yet: %s" % exc)
+            return None
+        except (ValueError, RuntimeError) as exc:
+            self._update_status("suggest next: %s" % exc)
+            return None
+        except Exception as exc:
+            self._update_status("suggest next failed: %r" % (exc,))
+            return None
+        self._push_history()
+        self.tiles.append(tile)
+        self._tile_ids.append(self._next_id)
+        self._optimized_ids.add(self._next_id)
+        self._next_id += 1
+        self.selected = len(self.tiles) - 1
+        self._after_change(
+            "next tile suggested: gain %+.3f  (+%g mm shell V100 %.2f -> %.2f, D90 %.0f -> "
+            "%.0f cGy; %d of %d candidates compatible, %.1f s; violet until touched)"
+            % (info.get("gain", float("nan")), WALL_DEPTH_MM,
+               info.get("V100_before", float("nan")), info.get("V100_after", float("nan")),
+               info.get("D90_before", float("nan")), info.get("D90_after", float("nan")),
+               info.get("n_compatible", 0), info.get("n_candidates", 0),
+               info.get("seconds", 0.0)))
+        return tile
+
     def _toggle_kind(self):
         self.next_kind = "half" if self.next_kind == "full" else "full"
         self._hide_ghost()  # next hover rebuilds it at the new size
@@ -1318,6 +1705,7 @@ class _PlannerApp:
             return
         delta = TRANSLATE_STEP_MM * move / norm
         self._push_history()
+        self._touch(self.selected)
         if self._has_surface():
             self.tiles[self.selected] = translate_on_wall(self.cavity, tile, delta)
         else:
@@ -1328,6 +1716,7 @@ class _PlannerApp:
         if not (0 <= self.selected < len(self.tiles)):
             return
         self._push_history()
+        self._touch(self.selected)
         if self._has_surface():
             self.tiles[self.selected] = rotate_on_wall(
                 self.cavity, self.tiles[self.selected], angle_rad)
@@ -1353,6 +1742,13 @@ class _PlannerApp:
             style["color"] = _OVERLAP_COLOR[state]
             if style["outline"] is not None:
                 style["outline"] = "white"
+        elif self._tile_ids[i] in self._optimized_ids:
+            # optimizer proposal nobody has touched yet: violet, so the
+            # surgeon can tell the algorithm's placement from their own
+            style["color"] = _OPTIMIZED_COLOR[state]
+            if style["outline"] is None:
+                style["outline"] = _OPTIMIZED_OUTLINE
+                style["line_width"] = 2
         # provenance: an adopted tile at rest keeps a gold outline; the
         # interaction outline (hover/selected/dragging) takes over while active
         if style["outline"] is None and self._tile_ids[i] in self._adopted_ids:
@@ -1713,11 +2109,14 @@ class _PlannerApp:
 
 
 def run_planner(result: PipelineResult, rx_cgy: float = 6000.0,
-                suggest: bool = False, prior=None):
+                suggest: bool = False, prior=None, solver: str = "greedy"):
     """Open the interactive planner window (blocking).  ``suggest`` starts
     with the inferred tile configuration on the board; ``prior`` is an
-    :class:`gtcore.tiles.auto.ImplantPrior` (OR counts, all optional)."""
-    app = _PlannerApp(result, rx_cgy=rx_cgy, off_screen=False, prior=prior)
+    :class:`gtcore.tiles.auto.ImplantPrior` (OR counts, all optional);
+    ``solver`` is the placement optimizer's initial solver for the 'O' key
+    (``"greedy"`` or ``"sa"``; Shift+O cycles it)."""
+    app = _PlannerApp(result, rx_cgy=rx_cgy, off_screen=False, prior=prior,
+                      solver=solver)
     if suggest:
         app.suggest_tiles()
     app.show()

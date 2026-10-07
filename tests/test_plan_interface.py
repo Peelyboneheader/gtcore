@@ -34,9 +34,12 @@ CONSTANTS = {
 STUBS = [
     "build_candidates", "visible_faces", "build_influence", "build_conflicts",
     "make_objective", "evaluate", "solve_greedy", "solve_local", "solve_sa",
-    "solve_milp", "refine_continuous", "sweep_n", "final_report",
-    "recommend_tile_count", "optimize", "suggest_next",
+    "solve_milp", "refine_continuous", "sweep_n",
+    "recommend_tile_count",
 ]
+# implemented on branch plan/ui (gtcore.plan.api); no longer stubs
+ENTRY_POINTS = ["optimize", "suggest_next"]
+# "final_report" is implemented on plan/validation (tests/test_plan_report.py).
 
 
 # ------------------------------------------------------------------ package
@@ -45,8 +48,17 @@ def test_package_imports_and_all():
         assert hasattr(plan, name), name
     for name in CONSTANTS:
         assert name in plan.__all__
-    for name in STUBS:
+    for name in STUBS + ENTRY_POINTS:
         assert name in plan.__all__
+
+
+def test_entry_points_delegate_to_api():
+    """``optimize`` / ``suggest_next`` validate their inputs in
+    ``gtcore.plan.api`` before touching any still-stubbed function."""
+    with pytest.raises(ValueError, match="at least one tile"):
+        plan.optimize(None, 0)
+    with pytest.raises(ValueError, match="kind"):
+        plan.suggest_next(None, [], kind="third")
     assert "Given" in plan.__doc__ and "P1 (fixed N)" in plan.__doc__
 
 
@@ -73,27 +85,40 @@ def test_submodules_exist_but_are_not_imported_by_init():
         assert m.__doc__ and ("Owner" in m.__doc__)
 
 
+# Functions already wired to their branch module (every branch has landed).
+IMPLEMENTED = {"build_influence", "make_objective", "evaluate",
+               "solve_greedy", "solve_local", "solve_sa", "refine_continuous", "sweep_n",
+               "solve_milp",
+               "build_candidates", "visible_faces", "build_conflicts", "recommend_tile_count"}
+
+
 @pytest.mark.parametrize("name", STUBS)
 def test_every_stub_raises_not_implemented(name):
     import inspect
+    if name in IMPLEMENTED:
+        pytest.skip("%s is implemented (see its own test module)" % name)
     fn = getattr(plan, name)
     n_required = sum(
         1 for prm in inspect.signature(fn).parameters.values()
         if prm.default is inspect.Parameter.empty
         and prm.kind in (prm.POSITIONAL_ONLY, prm.POSITIONAL_OR_KEYWORD))
+    if name in IMPLEMENTED:
+        with pytest.raises((ValueError, TypeError)):
+            fn(*([None] * n_required))
+        return
     with pytest.raises(NotImplementedError, match=name + ": implemented on branch plan/"):
         fn(*([None] * n_required))
 
 
-def test_objective_methods_are_stubs():
+def test_objective_methods_are_wired():
+    # implemented on plan/influence; behaviour is tested in test_plan_objective.py
     inst = pf.toy_instance(n_candidates=4, n_targets=10)
     obj = Objective(inst["influence"], inst["conflicts"], rx_cgy=inst["rx_cgy"])
     assert obj.tau_cgy == pytest.approx(plan.TAU_FRACTION * inst["rx_cgy"])
-    for meth in ("dose_of", "metrics", "hard", "soft"):
-        with pytest.raises(NotImplementedError, match=meth):
-            getattr(obj, meth)([0])
-    with pytest.raises(NotImplementedError, match="gain"):
-        obj.gain([0], 1)
+    assert obj.dose_of([0]).shape == (10,)
+    assert set(obj.metrics([0])) >= {"V100", "V150", "V200", "D90", "Dmean"}
+    assert np.isfinite(obj.hard([0])) and np.isfinite(obj.soft([0]))
+    assert np.isfinite(obj.gain([0], 1))
 
 
 # ---------------------------------------------------------------- TargetSet

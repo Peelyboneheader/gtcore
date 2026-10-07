@@ -654,7 +654,8 @@ class Objective:
 
         O(N * M).  Implemented on branch plan/influence.
         """
-        raise NotImplementedError("Objective.dose_of: implemented on branch plan/influence")
+        from .objective import dose_of
+        return dose_of(self, selection)
 
     def metrics(self, selection) -> Dict[str, float]:
         """Weighted target metrics for ``selection``.
@@ -665,28 +666,44 @@ class Objective:
         every OAR set.  O(N * M + M log M).  Implemented on branch
         plan/influence.
         """
-        raise NotImplementedError("Objective.metrics: implemented on branch plan/influence")
+        from .objective import metrics
+        return metrics(self, selection)
 
     def hard(self, selection) -> float:
         """P1 objective: ``V100 - lambda_hot * max(0, V200 - v200_tol)
         - sum_j lambda_oar * max(0, Dmax(O_j) - L_j)`` (dimensionless; the
         OAR term is per cGy).  Implemented on branch plan/influence.
         """
-        raise NotImplementedError("Objective.hard: implemented on branch plan/influence")
+        from .objective import hard
+        return hard(self, selection)
 
     def soft(self, selection) -> float:
         """Smooth surrogate for annealing: ``sum_m w_m sigma((D_m - rx) / tau)
         / sum_m w_m`` minus the same hot-spot / OAR penalties as :meth:`hard`.
         Implemented on branch plan/influence.
         """
-        raise NotImplementedError("Objective.soft: implemented on branch plan/influence")
+        from .objective import soft
+        return soft(self, selection)
 
     def gain(self, selection, candidate: int) -> float:
         """``hard(selection + [candidate]) - hard(selection)`` without
         recomputing the base dose (incremental, O(M)).  Implemented on branch
         plan/influence.
         """
-        raise NotImplementedError("Objective.gain: implemented on branch plan/influence")
+        from .objective import gain
+        return gain(self, selection, candidate)
+
+    def gains_all(self, selection, dose_vec=None) -> np.ndarray:
+        """Hard gain of adding EACH candidate to ``selection``, ``(C,)``;
+        vectorized fast path for greedy (module function on plan/influence,
+        bound here so solvers find it via ``getattr``)."""
+        from .objective import gains_all
+        return gains_all(self, selection, dose_vec)
+
+    def soft_gains_all(self, selection, dose_vec=None) -> np.ndarray:
+        """Soft-objective counterpart of :meth:`gains_all`, ``(C,)``."""
+        from .objective import soft_gains_all
+        return soft_gains_all(self, selection, dose_vec)
 
 
 # ----------------------------------------------------------------- results
@@ -970,7 +987,10 @@ def build_candidates(mesh, h_mm: float = DEFAULT_H_MM, n_spins: Optional[int] = 
     counted in ``n_rejected``.  Complexity O(C) conformer calls, each a
     handful of ray casts and nearest-point queries.
     """
-    raise _stub("build_candidates", "candidates")
+    from .candidates import build_candidates as _impl
+    return _impl(mesh, h_mm=h_mm, n_spins=n_spins, kinds=kinds,
+                 eligible_faces=eligible_faces, rng_seed=rng_seed,
+                 detached_mm=detached_mm, min_fraction_on_wall=min_fraction_on_wall)
 
 
 def visible_faces(mesh, center_ras) -> np.ndarray:
@@ -981,7 +1001,8 @@ def visible_faces(mesh, center_ras) -> np.ndarray:
     (e.g. the printed phantom's ``meshes["body"]``) from its outer surface.
     O(F) ray casts.
     """
-    raise _stub("visible_faces", "candidates")
+    from .candidates import visible_faces as _impl
+    return _impl(mesh, center_ras)
 
 
 def build_influence(candidates: CandidateSet, target: TargetSet,
@@ -998,7 +1019,10 @@ def build_influence(candidates: CandidateSet, target: TargetSet,
     ``exact=True``.  OAR sets are evaluated in full (no subsampling).
     Complexity O(C * 4 * M) kernel evaluations, chunked; memory C*M*4 bytes.
     """
-    raise _stub("build_influence", "influence")
+    from .influence import build_influence as _impl
+    return _impl(candidates, target, rx_cgy=rx_cgy, sk_per_seed_u=sk_per_seed_u,
+                 m_opt=m_opt, oars=oars, oar_limits=oar_limits, engine=engine,
+                 kernel=kernel, rng_seed=rng_seed)
 
 
 def build_conflicts(candidates: CandidateSet, gap_mm: float = CONFLICT_GAP_MM
@@ -1008,19 +1032,22 @@ def build_conflicts(candidates: CandidateSet, gap_mm: float = CONFLICT_GAP_MM
 
     O(C^2) bounding-sphere tests, exact footprint tests only for close pairs.
     """
-    raise _stub("build_conflicts", "candidates")
+    from .conflicts import build_conflicts as _impl
+    return _impl(candidates, gap_mm=gap_mm)
 
 
 def make_objective(influence: InfluenceMatrix, conflicts: ConflictGraph,
                    **weights) -> Objective:
     """Construct an :class:`Objective`; ``weights`` override ``lambda_hot``,
     ``v200_tol``, ``lambda_oar``, ``tau_cgy``, ``rx_cgy``."""
-    raise _stub("make_objective", "influence")
+    from .objective import make_objective as _impl
+    return _impl(influence, conflicts, **weights)
 
 
 def evaluate(objective: Objective, selection) -> Dict[str, Any]:
     """``{"hard", "soft", "metrics", "feasible"}`` for ``selection``. O(N * M)."""
-    raise _stub("evaluate", "influence")
+    from .objective import evaluate as _impl
+    return _impl(objective, selection)
 
 
 def solve_greedy(objective: Objective, n_tiles: int, fixed: Sequence[int] = (),
@@ -1034,7 +1061,8 @@ def solve_greedy(objective: Objective, n_tiles: int, fixed: Sequence[int] = (),
     Complexity O(N * C * M).  Fails with ``status="infeasible"`` when no
     compatible candidate remains.
     """
-    raise _stub("solve_greedy", "solvers")
+    from .solvers import solve_greedy as _impl
+    return _impl(objective, n_tiles, fixed=fixed, kinds_required=kinds_required)
 
 
 def solve_local(objective: Objective, n_tiles: int, start, radius_mm: float = LOCAL_RADIUS_MM,
@@ -1045,7 +1073,8 @@ def solve_local(objective: Objective, n_tiles: int, start, radius_mm: float = LO
     of the hard objective.  ``candidates`` supplies anchors / anchor_ids for
     the move neighbourhoods.  O(iterations * N * C * M) worst case.
     """
-    raise _stub("solve_local", "solvers")
+    from .solvers import solve_local as _impl
+    return _impl(objective, n_tiles, start, radius_mm=radius_mm, candidates=candidates)
 
 
 def solve_sa(objective: Objective, n_tiles: int, seed: int = 0,
@@ -1059,7 +1088,9 @@ def solve_sa(objective: Objective, n_tiles: int, seed: int = 0,
     Reproducible from ``seed``; ``history`` = best-so-far per sweep.
     O(n_restarts * n_sweeps * 50 * N * M).
     """
-    raise _stub("solve_sa", "solvers")
+    from .solvers import solve_sa as _impl
+    return _impl(objective, n_tiles, seed=seed, n_sweeps=n_sweeps, n_restarts=n_restarts,
+                 start=start, candidates=candidates)
 
 
 def solve_milp(objective: Objective, n_tiles: int,
@@ -1073,7 +1104,9 @@ def solve_milp(objective: Objective, n_tiles: int,
     the reference, not ``selection``).  Exponential worst case; intended for
     reduced instances.
     """
-    raise _stub("solve_milp", "milp")
+    from .milp import solve_milp as _impl   # lazy: keeps gtcore.plan import light
+    return _impl(objective, n_tiles, time_limit_s=time_limit_s, exact_n=exact_n,
+                 mip_rel_gap=mip_rel_gap)
 
 
 def refine_continuous(mesh, candidates: CandidateSet, selection, target: TargetSet,
@@ -1087,7 +1120,8 @@ def refine_continuous(mesh, candidates: CandidateSet, selection, target: TargetS
     and after (the discretization-error estimate, section 4 V4) and the
     number of accepted steps.  O(tiles * NM evaluations * conformer calls).
     """
-    raise _stub("refine_continuous", "solvers")
+    from .solvers import refine_continuous as _impl
+    return _impl(mesh, candidates, selection, target, rx_cgy=rx_cgy, **kw)
 
 
 def sweep_n(mesh, target: TargetSet, n_max: int, rx_cgy: float = DEFAULT_RX_CGY,
@@ -1100,7 +1134,9 @@ def sweep_n(mesh, target: TargetSet, n_max: int, rx_cgy: float = DEFAULT_RX_CGY,
     (``"D90>=rx"``, ``"V100>=0.90"``).  Builds candidates / influence /
     conflicts when not supplied.  O(n_max * solver cost).
     """
-    raise _stub("sweep_n", "solvers")
+    from .sweep import sweep_n as _impl
+    return _impl(mesh, target, n_max, rx_cgy=rx_cgy, solver=solver, seed=seed,
+                 candidates=candidates, influence=influence, conflicts=conflicts, **kw)
 
 
 def final_report(mesh, tiles: Sequence[PlacedTile], rx_cgy: float = DEFAULT_RX_CGY,
@@ -1116,7 +1152,11 @@ def final_report(mesh, tiles: Sequence[PlacedTile], rx_cgy: float = DEFAULT_RX_C
     re-verified with ``find_overlapping_tiles``, shadowing via
     ``find_shadowing_tiles``.  O(grid voxels * seeds).
     """
-    raise _stub("final_report", "validation")
+    from .report import final_report as _impl
+    return _impl(mesh, tiles, rx_cgy=rx_cgy, target=target, cavity_mask=cavity_mask,
+                 cavity_affine=cavity_affine, interference=interference,
+                 grid_mm=grid_mm, margin_mm=margin_mm, solver_result=solver_result,
+                 parameters=parameters)
 
 
 def recommend_tile_count(mesh, contraction_pct: float = 0.0, untreated_pct: float = 0.0,
@@ -1126,7 +1166,9 @@ def recommend_tile_count(mesh, contraction_pct: float = 0.0, untreated_pct: floa
     estimate from the cavity's principal extents is reported alongside.
     O(F).
     """
-    raise _stub("recommend_tile_count", "candidates")
+    from .candidates import recommend_tile_count as _impl
+    return _impl(mesh, contraction_pct=contraction_pct, untreated_pct=untreated_pct,
+                 eligible_faces=eligible_faces)
 
 
 def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
@@ -1134,7 +1176,7 @@ def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
              h_mm: float = DEFAULT_H_MM, n_spins: Optional[int] = None,
              eligible_faces=None, oars: Optional[Dict[str, TargetSet]] = None,
              oar_limits: Optional[Dict[str, float]] = None, refine: bool = False,
-             report: bool = True, verbose: bool = False
+             report: bool = True, verbose: bool = False, **kw
              ) -> Tuple[List[PlacedTile], OptimizeReport]:
     """Entry point (section 3 H): candidates -> influence -> conflicts ->
     ``solver`` (``"greedy"`` / ``"local"`` / ``"sa"`` / ``"milp"``) for
@@ -1143,20 +1185,32 @@ def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
     shell.  Returns ordinary :class:`PlacedTile` objects for the planner.
     Fails loudly (``ValueError`` with a reason) rather than returning a worse
     plan silently (section 4 V8).
+
+    Implemented in :mod:`gtcore.plan.api` (branch plan/ui); extra keywords
+    (``fixed_tiles``, ``candidates``, ``log``) are forwarded there.
     """
-    raise _stub("optimize", "ui")
+    from .api import optimize as _impl
+    return _impl(mesh, n_full, n_half=n_half, rx_cgy=rx_cgy, target=target,
+                 solver=solver, seed=seed, h_mm=h_mm, n_spins=n_spins,
+                 eligible_faces=eligible_faces, oars=oars, oar_limits=oar_limits,
+                 refine=refine, report=report, verbose=verbose, **kw)
 
 
 def suggest_next(mesh, placed_tiles: Sequence[PlacedTile], rx_cgy: float = DEFAULT_RX_CGY,
                  target: Optional[TargetSet] = None, kind: str = "full",
                  h_mm: float = DEFAULT_H_MM, n_spins: Optional[int] = None,
-                 eligible_faces=None, candidates: Optional[CandidateSet] = None
-                 ) -> Tuple[PlacedTile, Dict[str, Any]]:
+                 eligible_faces=None, candidates: Optional[CandidateSet] = None,
+                 **kw) -> Tuple[PlacedTile, Dict[str, Any]]:
     """One greedy step: the ``kind`` candidate compatible with ``placed_tiles``
     that most increases the hard objective.  Returns the tile and a dict with
     the objective before / after and the candidate id.  O(C * M).
+
+    Implemented in :mod:`gtcore.plan.api` (branch plan/ui).
     """
-    raise _stub("suggest_next", "ui")
+    from .api import suggest_next as _impl
+    return _impl(mesh, placed_tiles, rx_cgy=rx_cgy, target=target, kind=kind,
+                 h_mm=h_mm, n_spins=n_spins, eligible_faces=eligible_faces,
+                 candidates=candidates, **kw)
 
 
 __all__ = [
