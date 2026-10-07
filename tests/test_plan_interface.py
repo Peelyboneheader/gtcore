@@ -34,9 +34,10 @@ CONSTANTS = {
 STUBS = [
     "build_candidates", "visible_faces", "build_influence", "build_conflicts",
     "make_objective", "evaluate", "solve_greedy", "solve_local", "solve_sa",
-    "solve_milp", "refine_continuous", "sweep_n", "final_report",
+    "solve_milp", "refine_continuous", "sweep_n",
     "recommend_tile_count", "optimize", "suggest_next",
 ]
+# "final_report" is implemented on plan/validation (tests/test_plan_report.py).
 
 
 # ------------------------------------------------------------------ package

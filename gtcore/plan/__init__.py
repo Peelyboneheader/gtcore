@@ -1116,7 +1116,11 @@ def final_report(mesh, tiles: Sequence[PlacedTile], rx_cgy: float = DEFAULT_RX_C
     re-verified with ``find_overlapping_tiles``, shadowing via
     ``find_shadowing_tiles``.  O(grid voxels * seeds).
     """
-    raise _stub("final_report", "validation")
+    from .report import final_report as _impl
+    return _impl(mesh, tiles, rx_cgy=rx_cgy, target=target, cavity_mask=cavity_mask,
+                 cavity_affine=cavity_affine, interference=interference,
+                 grid_mm=grid_mm, margin_mm=margin_mm, solver_result=solver_result,
+                 parameters=parameters)
 
 
 def recommend_tile_count(mesh, contraction_pct: float = 0.0, untreated_pct: float = 0.0,
