@@ -508,6 +508,64 @@ margin + rind DVH + shadowing 21.5 s (grid 1 mm, ≈ 3.4 M voxels, exact
 kernel). Printed phantom (body mesh, 32 seeds): ≈ 60 s per 15 mm report; the
 visible-face ray test over 72 k faces ≈ 6 min once (cached under
 `cache/printed_visible_*.npy`); `reconstruct` 30 s (cached).
+_Candidate build and conflict graph measured (A1); influence, solvers and
+final reporting pending._
+
+### A1 candidates/conflicts
+
+Command: `python scripts/plan_candidates_runtime.py` (from the repo root;
+`rng_seed=0` for the anchors, phantom `rng_seed=1`), commit `8a98e7e`,
+2026-10-07. Hardware: AMD64 Family 25 Model 97 (Ryzen 7000-class desktop),
+single process; Python 3.12.10, numpy 2.5.2, trimesh 5.1.0 (pure-python
+`ray_triangle` intersector, no embree). Cavity =
+`make_head_phantom(spacing=1.0, n_tiles=3, rng_seed=1)`,
+`mask_to_mesh(truth.masks["cavity"], vol.affine)`: 12 300 faces, 4178 mm²,
+watertight, 24.6 cm³, extents 40 × 36 × 33 mm. Hollow sphere = icosphere
+r = 25 mm (inverted) + r = 35 mm as one watertight mesh (2560 faces);
+`visible_faces(hollow, origin)` took 0.20 s and marked 1280/1280 inner and
+0/1280 outer faces.
+
+| run | faces / area mm² | enumerated | C | rejected | build s | s per 100 | conflict pairs | mean degree (density) | cliques | conflicts s |
+|---|---|---|---|---|---|---|---|---|---|---|
+| cavity seed 1, h = 3, 6 spins | 12300 / 4178 | 1560 | 1514 | hanging 46 | 20.1 | 1.29 | 503 631 | 665.3 (0.440) | 517 (max 176) | 99.6 |
+| cavity seed 1, h = 2.5, 6 spins | 12300 / 4178 | 2328 | 2252 | hanging 76 | 26.3 | 1.13 | 1 097 002 | 974.2 (0.433) | 771 (max 237) | 202.0 |
+| hollow sphere inner wall (E = `visible_faces`), h = 3, 6 spins | 2560 / 23137 (E = 7845) | 3084 | 3084 | none | 11.2 | 0.36 | 1 187 182 | 769.9 (0.250) | 1028 (max 50) | 464.6 |
+
+Columns: *enumerated* = anchors × spins × kinds before rejection; *C* =
+accepted candidates; *s per 100* = build seconds per 100 enumerated
+candidates; *density* = mean degree / (C − 1); *cliques* = verified
+cliques (max size).
+
+Reading:
+- The build meets the brief's target (≤ 2 s per 100 candidates) on all
+  three: 1.1–1.3 s/100 on the 12 300-face marching-cubes cavity and 0.36
+  s/100 on the 2560-face shell. `conform_tile` dominates (≈ 12 ms per
+  accepted tile on the 1 mm cavity mesh, of which its own ray casts are the
+  larger part); the batched fallback cast is ≈ 1–2 ms per enumerated
+  candidate and spares `conform_tile` for the hanging ones. The same cavity
+  measured 3.4 s/100 with the first implementation (per-tile trimesh ray
+  replica, conforming before the hanging test).
+- Rejections on the closed cavity are all "hanging" (3–4 %; tiles whose
+  tangent-plane grid points miss the wall or sag > 12 mm at the lumpy
+  bumps); none are detached at `DETACHED_MM` = 1.5.
+- Conflict graphs are dense: a 20 mm tile on a 40 mm cavity conflicts with
+  everything whose anchor lies within ≈ 25 mm, i.e. 44 % of all candidates.
+  The pairwise stage runs at ≈ 0.1 ms per candidate pair that passes the
+  bounding-sphere stage (≈ 1 M pairs at h = 2.5 → 200 s). The hollow sphere
+  is the slow case (465 s for C = 3084) because its smooth icosphere wall
+  triggers the `_footprint_surface` conditioning defect (Open decision
+  14): ballooned footprints defeat the bounding-sphere prefilter, so
+  nearly every pair reaches the vectorized stages. On the marching-cubes
+  cavity the footprints are sane (bounding radius p90 14 mm).
+- Cliques: 517 / 771 verified cliques on the cavity (one per anchor plus
+  the reduced anchor neighbourhoods, deduplicated), the largest covering
+  237 candidates (all spins of the ≈ 40 anchors nearest one anchor).
+
+Unit-test-scale timings (same hardware, `pytest --durations`): sphere r =
+25 mm (5120 faces), h = 6, 2 spins: 260 candidates in 3.9 s (1.5 s/100);
+flat 60 mm wall, h = 5, 3 spins: 261 enumerated / 154 accepted in 0.9 s;
+`build_conflicts` on 444 cavity candidates (h = 4, 3 spins; 98 007 close
+pairs, 42 813 conflicts) 10.5 s.
 
 ## V8 Failure modes
 
@@ -1007,3 +1065,6 @@ _To be pasted unedited._
 | 2026-10-07 | `python -m pytest -q tests/test_plan_milp.py` | toy rng_seed 0 | (A4 commit, plan/milp) | 20 passed, 17 s (full suite 490 passed, 1 skipped, 385 s under load) | MILP = brute force on the toy; 80-candidate toy at N = 6 not closed in 60 s (gap 0.14) |
 | 2026-10-07 | `python -m pytest -q tests/test_plan_milp.py` + direct `solve_milp(..., cover_cuts=…)` calls on `toy_instance(80, 300)` N = 6 | toy rng_seed 0 | (A4 cover-cut commit, plan/milp) | 22 passed, 32 s (full suite 491 passed, 1 skipped, 328 s) | pigeonhole cover cuts: optimum unchanged; LP bound exact at N = 1; no bound gain on toy80 N = 6, worse 60 s incumbent (0.787 vs 0.867) → off for the MILP, on for `lp_bound` |
 | 2026-10-07 | `python -m pytest -q tests/test_plan_milp.py` + direct `solve_enumeration` calls on `toy_instance(12,150)` (pitch 10/15) and `toy_instance(80,300)` N = 4/6/8 | toy rng_seed 0 | (A4 enumeration commit, plan/milp) | 32 passed, 29 s (full suite 501 passed, 1 skipped, 267 s) | enumeration B&B = brute force on every toy case; proves toy80 N = 6 (0.9033) in 34 s where HiGHS stalled at 0.867 / 0.997; `solve_milp` auto-routes to it for C ≤ 600, N ≤ 8 |
+| 2026-10-07 | `python -m pytest -q -p no:cacheprovider tests/test_plan_candidates.py tests/test_plan_conflicts.py tests/test_plan_interface.py` | fixtures seeded 0 | 8a98e7e | 66 passed (32 new) | A1 candidates / conflicts |
+| 2026-10-07 | `python -m pytest -q -p no:cacheprovider` | — | 8a98e7e (working tree) | 502 passed, 278 s | full suite before the A1 commit |
+| 2026-10-07 | `python scripts/plan_candidates_runtime.py` | anchors 0, phantom 1 | 8a98e7e | V7 table above (A1 candidates/conflicts) | cavity h = 3 / 2.5, hollow sphere |
