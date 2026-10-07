@@ -36,7 +36,9 @@ __all__ = [
     "reference_metrics",
     "reference_conflict",
     "shell_target",
+    "is_feasible",
     "tiles_dose",
+    "greedy_forward_reference",
     "metrics_for_tiles",
     "brute_force_best",
 ]
@@ -166,22 +168,51 @@ def is_feasible(tiles: Sequence[PlacedTile], threshold_mm: float = 1.0) -> bool:
 
 
 # ------------------------------------------------------------------- target
-def shell_target(mesh, offset_mm: float = 5.0) -> Tuple[np.ndarray, np.ndarray]:
+def _vertex_areas(vertices, faces) -> np.ndarray:
+    """One third of the summed area of the faces incident to each vertex."""
+    v = np.asarray(vertices, dtype=float)
+    f = np.asarray(faces, dtype=int)
+    cross = np.cross(v[f[:, 1]] - v[f[:, 0]], v[f[:, 2]] - v[f[:, 0]])
+    areas = 0.5 * np.linalg.norm(cross, axis=1)
+    weights = np.zeros(v.shape[0])
+    for k in range(3):
+        np.add.at(weights, f[:, k], areas / 3.0)
+    return weights
+
+
+def shell_target(mesh, offset_mm: float = 5.0,
+                 weights_from: str = "shell") -> Tuple[np.ndarray, np.ndarray]:
     """Default §2 target: +offset shell vertices with vertex-area weights.
 
     Points are the mesh vertices pushed ``offset_mm`` outward (away from the
     centroid, i.e. into tissue, same orientation rule as
     ``gtcore.dose.dvh.outward_normals``).  Each vertex's weight is one third
-    of the summed area of the faces incident to it (so the weights sum to
-    the mesh area).  Vertices with no incident face get zero weight.
+    of the summed area of the faces incident to it.
+
+    §2 says "vertices of the +5 mm shell weighted by vertex area (one third
+    of adjacent face areas)" and admits two readings, selected here by
+    ``weights_from``:
+
+    * ``"shell"`` (default, the literal reading): face areas of the OFFSET
+      surface (same connectivity, pushed vertices), so the weights sum to
+      the shell's area.  A convex cavity's shell is larger than its wall,
+      and the ratio varies with local curvature, so this is *not* a uniform
+      rescaling of the wall reading.
+    * ``"wall"``: face areas of the wall mesh itself (weights sum to
+      ``mesh.area``).
+
+    Only weight ratios matter for V100/D90.  Vertices with no incident face
+    get zero weight.
     """
     verts = np.asarray(mesh.vertices, dtype=float)
     faces = np.asarray(mesh.faces, dtype=int)
-    areas = np.asarray(mesh.area_faces, dtype=float)
-    weights = np.zeros(verts.shape[0])
-    for k in range(3):
-        np.add.at(weights, faces[:, k], areas / 3.0)
     points = verts + float(offset_mm) * outward_normals(mesh)
+    if weights_from == "shell":
+        weights = _vertex_areas(points, faces)
+    elif weights_from == "wall":
+        weights = _vertex_areas(verts, faces)
+    else:
+        raise ValueError("weights_from must be 'shell' or 'wall'")
     return points, weights
 
 
