@@ -73,9 +73,15 @@ def test_submodules_exist_but_are_not_imported_by_init():
         assert m.__doc__ and ("Owner" in m.__doc__)
 
 
+# Functions already wired to their branch module (each branch adds its own).
+IMPLEMENTED = {"build_influence", "make_objective", "evaluate"}
+
+
 @pytest.mark.parametrize("name", STUBS)
 def test_every_stub_raises_not_implemented(name):
     import inspect
+    if name in IMPLEMENTED:
+        pytest.skip("%s is implemented (see its own test module)" % name)
     fn = getattr(plan, name)
     n_required = sum(
         1 for prm in inspect.signature(fn).parameters.values()
@@ -85,15 +91,15 @@ def test_every_stub_raises_not_implemented(name):
         fn(*([None] * n_required))
 
 
-def test_objective_methods_are_stubs():
+def test_objective_methods_are_wired():
+    # implemented on plan/influence; behaviour is tested in test_plan_objective.py
     inst = pf.toy_instance(n_candidates=4, n_targets=10)
     obj = Objective(inst["influence"], inst["conflicts"], rx_cgy=inst["rx_cgy"])
     assert obj.tau_cgy == pytest.approx(plan.TAU_FRACTION * inst["rx_cgy"])
-    for meth in ("dose_of", "metrics", "hard", "soft"):
-        with pytest.raises(NotImplementedError, match=meth):
-            getattr(obj, meth)([0])
-    with pytest.raises(NotImplementedError, match="gain"):
-        obj.gain([0], 1)
+    assert obj.dose_of([0]).shape == (10,)
+    assert set(obj.metrics([0])) >= {"V100", "V150", "V200", "D90", "Dmean"}
+    assert np.isfinite(obj.hard([0])) and np.isfinite(obj.soft([0]))
+    assert np.isfinite(obj.gain([0], 1))
 
 
 # ---------------------------------------------------------------- TargetSet
