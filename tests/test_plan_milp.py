@@ -214,6 +214,41 @@ def test_pruning_threshold_does_not_change_optimum(toy15):
     assert _v100(obj, coarse.selection) >= coarse.extra["milp_objective"] - 1e-9
 
 
+# ------------------------------------------------------------- cover cuts
+def test_cover_cuts_do_not_change_optimum(toy15, toy10):
+    """Pigeonhole rows y_m <= sum_{c: D[c,m] >= rx/N} x_c are valid for both
+    count forms: the optimum equals the plain formulation and brute force."""
+    from gtcore.plan.milp import COVER_CUTS, LP_COVER_CUTS
+    assert COVER_CUTS is False and LP_COVER_CUTS is True   # measured, V3 notes
+    obj = _objective(toy15)
+    for n in (1, 2, 3, 4):
+        for exact in (True, False):
+            plain = solve_milp(obj, n, exact_n=exact, cover_cuts=False)
+            cut = solve_milp(obj, n, exact_n=exact, cover_cuts=True)
+            bf = brute_force(obj, n, exact_n=exact)
+            assert plain.status == cut.status == "optimal"
+            assert cut.extra["cover_cuts"] is True and plain.extra["cover_cuts"] is False
+            assert cut.extra["formulation"]["n_rows_cover_cut"] > 0
+            assert plain.extra["formulation"]["n_rows_cover_cut"] == 0
+            assert cut.extra["milp_objective"] == pytest.approx(plain.extra["milp_objective"], abs=1e-6)
+            assert cut.extra["milp_objective"] == pytest.approx(bf.extra["milp_objective"], abs=1e-6)
+            assert _v100(obj, cut.selection) == pytest.approx(bf.extra["milp_objective"], abs=1e-9)
+            # the LP bound with cuts is at least as tight and still a bound
+            lp_plain = lp_bound(obj, n, exact_n=exact, cover_cuts=False)
+            lp_cut = lp_bound(obj, n, exact_n=exact, cover_cuts=True)
+            assert lp_cut <= lp_plain + 1e-9
+            assert lp_cut >= cut.extra["milp_objective"] - 1e-9
+    # the fixed-to-zero points really are uncoverable: at N = 1 a point needs
+    # a single candidate at >= rx, so the fixed count is the number of points
+    # with max_c D[c, m] < rx
+    r1 = solve_milp(obj, 1, cover_cuts=True)
+    D = np.asarray(obj.influence.dose, dtype=float)
+    assert r1.extra["formulation"]["n_fixed_zero"] == int((D.max(axis=0) < obj.rx_cgy).sum())
+    assert r1.extra["formulation"]["n_rows_coverage"] == D.shape[1] - r1.extra["formulation"]["n_fixed_zero"]
+    # infeasible N stays infeasible with cuts on
+    assert solve_milp(_objective(toy10), 3, cover_cuts=True).status == "infeasible"
+
+
 # ------------------------------------------------------------- time limit
 def test_time_limit_on_larger_toy():
     inst = pf.toy_instance(n_candidates=80, n_targets=300)
@@ -232,7 +267,15 @@ def test_time_limit_on_larger_toy():
         assert obj.conflicts.is_feasible(r.selection)
         assert r.bound >= r.extra["milp_objective"] - 1e-9
         assert r.bound >= r.objective - 1e-9
-        assert r.extra["milp_objective"] == pytest.approx(_v100(obj, r.selection), abs=1e-6)
+        # an incumbent's y need not be maximal for its x at a time limit, so
+        # the solver's value may sit below the true V100 of the selection,
+        # never above it
+        v100 = _v100(obj, r.selection)
+        assert r.extra["milp_objective"] <= v100 + 1e-6
+        if r.status == "optimal":
+            assert r.extra["milp_objective"] == pytest.approx(v100, abs=1e-6)
+        assert r.extra["n_rows"] == r.extra["formulation"]["n_rows"]
+        assert r.extra["nnz"] > 0 and r.extra["build_s"] >= 0.0
     else:
         assert not r.feasible and r.reason
     assert r.bound <= 1.0 + 1e-6

@@ -106,6 +106,38 @@ for branch-and-bound; real reduced instances (coarser h, few spins) may
 behave differently and V3 must report the gap per instance. See Open
 decisions 12 for the candidate tightenings.
 
+#### Pigeonhole cover cuts (coordinator follow-up, same commit series)
+
+Rows `y_m ≤ Σ_{c : D[c,m] ≥ rx/N} x_c` (valid for both count forms: a covered
+point gets ≥ rx from ≤ N candidates, so one gives ≥ rx/N) plus fixing
+`y_m = 0` for points with no candidate at ≥ rx/N. Keyword `cover_cuts` on
+`solve_milp` / `lp_bound` / `build_formulation`. Same command/seeds as above;
+the toy80 rows are from an uncontended rerun (an earlier run overlapped a
+pytest run and gave 6047 / 2817 nodes instead; node counts vary between HiGHS
+runs at a time limit).
+
+| instance, N | cuts | status | incumbent V100 | bound | gap | nodes | rows / nnz | fixed y=0 | LP bound |
+|---|---|---|---|---|---|---|---|---|---|
+| pitch-15 toy, N=1 | off / on | optimal / optimal | 0.1800 / 0.1800 | — | 0 / 0 | — | 162 / 244 | 0 / 34 | 0.5335 / **0.1800** |
+| pitch-15 toy, N=2 | off / on | optimal / optimal | 0.4867 / 0.4867 | — | 0 / 0 | — | 162 / 288 | 0 / 12 | 0.8432 / **0.6046** |
+| pitch-15 toy, N=3 | off / on | optimal / optimal | 0.6800 / 0.6800 | — | 0 / 0 | — | 162 / 312 | 0 / 0 | 0.9531 / 0.8973 |
+| pitch-15 toy, N=4 | off / on | optimal / optimal | 0.8267 / 0.8267 | — | 0 / 0 | — | 162 / 312 | 0 / 0 | 0.9664 / 0.9659 |
+| toy80, N=6, 0.5 s | off | time_limit | 0.5467 | 0.9967 | 0.82 | 0 | 381 / 24 998 | 0 | 1.0000 |
+| toy80, N=6, 0.5 s | on | time_limit | 0.0067 | 1.0000 | 149 | 0 | 681 / 33 945 | 0 | 1.0000 |
+| toy80, N=6, 60 s | off | time_limit | 0.8667 | 0.9967 | 0.150 | 8305 | 381 / 24 998 | 0 | 1.0000 |
+| toy80, N=6, 60 s | on | time_limit | 0.7867 | 0.9933 | 0.263 | 3557 | 681 / 33 945 | 0 | 1.0000 |
+
+Verdict. The optimum is unchanged everywhere (= brute force; test
+`test_cover_cuts_do_not_change_optimum` covers N = 1–4, both count forms).
+The cuts bite only when rx/N is large: on the pitch-15 toy they make the LP
+bound exact at N = 1 and ~30 % tighter at N = 2, and fix 34 / 12 uncoverable
+points. On toy80 at N = 6 (rx/6 is reached by many candidates per point) they
+tighten nothing — the dual bound is the same, the LP bound stays 1.0 — and
+the extra 300 rows cost node throughput, so the 60 s incumbent is worse
+(0.787 vs 0.867). Defaults therefore: `COVER_CUTS = False` for `solve_milp`,
+`LP_COVER_CUTS = True` for `lp_bound` (a valid row never loosens an LP). The
+§7.3 negative result stands: no bound within 5 % of the incumbent on this toy.
+
 ## V4 Discretization
 
 _Pending._ Sweep h and n_spins; gain from E5.
@@ -199,14 +231,18 @@ A4 (`plan/milp`, 2026-10-07).
     3-subset of the pitch-15 toy (cut ⇔ pairwise infeasible).
 12. **MILP scaling (negative result, V3).** The 80-candidate toy at N = 6
     does not close in 60 s (gap 14 %) and the LP bound is vacuous (1.00).
-    Candidate tightenings, none implemented: (a) pigeonhole cover cuts
+    Candidate tightenings: (a) pigeonhole cover cuts
     `y_m ≤ Σ_{c: D[c,m] ≥ rx/N} x_c` (any N-subset covering m contains a
-    candidate giving ≥ rx/N); (b) presolve fixing `y_m = 0` when the N
-    largest `D[·,m]` sum below rx; (c) symmetry breaking across spins of one
-    anchor; (d) Lagrangian relaxation of the coverage rows (§7.3). Chosen:
-    the plain formulation of §3 E4, bound reported as the reference at the
-    time limit; A5 states the gap per instance and the coordinator decides
-    on (a)–(d) from real reduced instances.
+    candidate giving ≥ rx/N) — **implemented** (`cover_cuts`, with the
+    weaker fixing `y_m = 0` when no candidate reaches rx/N); measured in V3:
+    no gain on toy80 at N = 6, large LP-bound gain at N ≤ 2, so off for
+    `solve_milp` and on for `lp_bound`; (b) presolve fixing `y_m = 0` when
+    the N largest `D[·,m]` sum below rx (stronger than the implemented fix;
+    not done); (c) symmetry breaking across spins of one anchor; (d)
+    Lagrangian relaxation of the coverage rows (§7.3). Chosen: the plain
+    formulation of §3 E4 for the MILP, bound reported as the reference at
+    the time limit; A5 states the gap per instance and the coordinator
+    decides on (b)–(d) from real reduced instances.
 13. **`SolverResult.objective` from the MILP is the full P1 hard value**
     recomputed from the selection (V100 − λ_hot·max(0, V200 − v200_tol) −
     Σ λ_oar·max(0, Dmax − L)), via `Objective.hard` / `.metrics` when they are
@@ -241,3 +277,4 @@ _To be pasted unedited._
 |---|---|---|---|---|---|
 | 2026-10-07 | `python -m pytest -q tests/test_plan_interface.py` | — | (Phase 0 commit) | 34 passed (full suite 470 passed, 205 s) | interface freeze |
 | 2026-10-07 | `python -m pytest -q tests/test_plan_milp.py` | toy rng_seed 0 | (A4 commit, plan/milp) | 20 passed, 17 s (full suite 490 passed, 1 skipped, 385 s under load) | MILP = brute force on the toy; 80-candidate toy at N = 6 not closed in 60 s (gap 0.14) |
+| 2026-10-07 | `python -m pytest -q tests/test_plan_milp.py` + direct `solve_milp(..., cover_cuts=…)` calls on `toy_instance(80, 300)` N = 6 | toy rng_seed 0 | (A4 cover-cut commit, plan/milp) | 22 passed, 32 s (full suite 491 passed, 1 skipped, 328 s) | pigeonhole cover cuts: optimum unchanged; LP bound exact at N = 1; no bound gain on toy80 N = 6, worse 60 s incumbent (0.787 vs 0.867) → off for the MILP, on for `lp_bound` |

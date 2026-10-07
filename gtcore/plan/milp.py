@@ -38,6 +38,17 @@ before use (:func:`validate_cliques`); a "clique" with a non-conflicting
 pair would forbid a feasible selection, so such entries are dropped with a
 ``UserWarning`` and their pairs fall back to pairwise rows.
 
+**Cover cuts (pigeonhole, ``cover_cuts``; default off for :func:`solve_milp`,
+on for :func:`lp_bound`).**  If ``y_m = 1`` then
+``sum_c D[c,m] x_c >= rx`` with at most ``N`` selected candidates, so some
+selected ``c`` has ``D[c,m] >= rx / N``.  The rows ``y_m <= sum_{c : D[c,m]
+>= rx/N} x_c`` are therefore valid for the exact-N and the <= N forms and
+tighten the LP relaxation (a fractional ``x`` can no longer cover a point
+with many small contributions).  Points with NO candidate at ``>= rx/N``
+cannot be covered at all: their ``y_m`` is fixed to 0 up front and their
+rows dropped (``extra["formulation"]["n_fixed_zero"]``).  The optimum is
+unchanged (tested against the plain formulation and brute force).
+
 **Pruning.**  Coverage rows are sparse: an influence entry ``D[c,m]`` is
 dropped when ``D[c,m] <= PRUNE_FRACTION * rx``.  Dropping entries can only
 lower the left-hand side of a coverage row, so the MILP never counts a
@@ -82,6 +93,15 @@ PRUNE_FRACTION = 1e-3
 # Coverage-row entries below 1e-3 * rx are dropped: with N <= ~20 tiles the
 # left-hand side of a row is underestimated by at most 2 % of rx, and the
 # MILP can only become conservative (never counts an uncovered point).
+
+COVER_CUTS = False
+# Pigeonhole cover cuts y_m <= sum_{c: D[c,m] >= rx/N} x_c are OFF for the
+# MILP: on the 80-candidate toy at N = 6 they left the dual bound unchanged
+# and gave a worse 60 s incumbent (V3 notes); HiGHS derives them itself.
+
+LP_COVER_CUTS = True
+# ... but ON for lp_bound: an extra valid row can only tighten an LP, and on
+# the pitch-15 toy they cut the LP bound from 0.53 to 0.18 (exact) at N = 1.
 
 BRUTE_FORCE_MAX_SUBSETS = 200_000
 # Enumeration guard for brute_force (C <= 15, N <= 4 gives at most 1365).
@@ -235,16 +255,19 @@ def _uncovered_pairs(conflicts: ConflictGraph, cliques: Sequence[np.ndarray]
 # ------------------------------------------------------------ formulation
 def build_formulation(objective: Objective, n_tiles: int, exact_n: bool = True,
                       prune_frac: float = PRUNE_FRACTION, use_cliques: bool = True,
-                      warn: bool = True) -> Dict[str, Any]:
+                      cover_cuts: bool = COVER_CUTS, warn: bool = True) -> Dict[str, Any]:
     """Constraint matrices of the MILP (module docstring).
 
     Returns a dict: ``c`` (objective coefficients to MINIMIZE, i.e.
     ``-w/sum w`` on the ``y`` block and 0 on ``x``), ``A`` (CSR, rows
     stacked coverage / clique / pair / count / OAR), ``lb``, ``ub``,
-    ``n_x``, ``n_y``, ``row_kind`` (one label per row) and ``stats``
-    (row counts, nnz, ``n_pruned``, cliques used / dropped).  Variable
-    order is ``[x_0 .. x_{C-1}, y_0 .. y_{M-1}]``, all bounded to ``[0, 1]``.
+    ``n_x``, ``n_y``, ``row_kind`` (one label per row), ``var_ub`` (per
+    variable upper bound: 1, or 0 for a ``y_m`` fixed by the cover cuts) and
+    ``stats`` (row counts, nnz, ``n_pruned``, ``n_fixed_zero``, cliques used /
+    dropped, ``build_s``).  Variable order is ``[x_0 .. x_{C-1}, y_0 ..
+    y_{M-1}]``, all in ``[0, 1]``.
     """
+    t_build = time.perf_counter()
     inf = objective.influence
     conflicts = objective.conflicts
     C, M = inf.n_candidates, inf.n_targets
@@ -268,19 +291,49 @@ def build_formulation(objective: Objective, n_tiles: int, exact_n: bool = True,
     ubs = []
     kinds: List[str] = []
 
-    # coverage rows: sum_c (D[c,m]/rx) x_c - y_m >= 0
+    # cover cuts: y_m <= sum_{c: D[c,m] >= rx/N} x_c  (pigeonhole over <= N
+    # selected candidates); points with no such candidate get y_m fixed to 0
     D = np.asarray(inf.dose, dtype=np.float64)
-    keep = D > float(prune_frac) * rx
-    n_pruned = int(D.size - keep.sum())
+    var_ub = np.ones(C + M, dtype=float)
+    active = np.ones(M, dtype=bool)
+    n_fixed = 0
+    if cover_cuts and N > 0:
+        big = D * float(N) >= rx                       # D[c,m] >= rx / N
+        active = big.any(axis=0)
+        n_fixed = int(M - active.sum())
+        var_ub[C + np.flatnonzero(~active)] = 0.0
+    stats["n_fixed_zero"] = n_fixed
+
+    # coverage rows: sum_c (D[c,m]/rx) x_c - y_m >= 0 (only for active m)
+    above = D > float(prune_frac) * rx
+    keep = above & active[None, :]
+    n_pruned = int(((~above) & active[None, :]).sum())
     cc, mm = np.nonzero(keep)
-    cov = sp.coo_matrix((D[cc, mm] / rx, (mm, cc)), shape=(M, C)).tocsr()
-    a_cov = sp.hstack([cov, -sp.identity(M, format="csr")], format="csr")
-    blocks.append(a_cov)
-    lbs.append(np.zeros(M))
-    ubs.append(np.full(M, np.inf))
-    kinds += ["coverage"] * M
+    m_act = np.flatnonzero(active)
+    n_act = int(m_act.size)
+    row_of = np.full(M, -1, dtype=int)
+    row_of[m_act] = np.arange(n_act)
+    cov = sp.coo_matrix((D[cc, mm] / rx, (row_of[mm], cc)), shape=(n_act, C)).tocsr()
+    y_sel = sp.coo_matrix((np.ones(n_act), (np.arange(n_act), m_act)),
+                          shape=(n_act, M)).tocsr()
+    blocks.append(sp.hstack([cov, -y_sel], format="csr"))
+    lbs.append(np.zeros(n_act))
+    ubs.append(np.full(n_act, np.inf))
+    kinds += ["coverage"] * n_act
     stats["n_pruned"] = n_pruned
-    stats["n_rows_coverage"] = M
+    stats["n_rows_coverage"] = n_act
+
+    if cover_cuts and N > 0 and n_act:
+        bc, bm = np.nonzero(big & active[None, :])
+        a_big = sp.coo_matrix((np.ones(bc.size), (row_of[bm], bc)), shape=(n_act, C)).tocsr()
+        blocks.append(sp.hstack([a_big, -y_sel], format="csr"))
+        lbs.append(np.zeros(n_act))
+        ubs.append(np.full(n_act, np.inf))
+        kinds += ["cover_cut"] * n_act
+        stats["n_rows_cover_cut"] = n_act
+    else:
+        stats["n_rows_cover_cut"] = 0
+    stats["cover_cuts"] = bool(cover_cuts)
 
     # clique rows
     if use_cliques:
@@ -348,8 +401,10 @@ def build_formulation(objective: Objective, n_tiles: int, exact_n: bool = True,
     stats["n_rows"] = int(A.shape[0])
     stats["nnz"] = int(A.nnz)
     stats["prune_frac"] = float(prune_frac)
+    stats["build_s"] = time.perf_counter() - t_build
     return {"c": c, "A": A, "lb": lb, "ub": ub, "n_x": C, "n_y": M,
-            "row_kind": kinds, "stats": stats, "total_weight": total_w}
+            "row_kind": kinds, "var_ub": var_ub, "stats": stats,
+            "total_weight": total_w}
 
 
 def _run_highs(form: Dict[str, Any], integral: bool, time_limit_s: float,
@@ -362,7 +417,7 @@ def _run_highs(form: Dict[str, Any], integral: bool, time_limit_s: float,
         c=form["c"],
         constraints=LinearConstraint(form["A"], form["lb"], form["ub"]),
         integrality=np.full(n, 1 if integral else 0, dtype=int),
-        bounds=Bounds(np.zeros(n), np.ones(n)),
+        bounds=Bounds(np.zeros(n), form["var_ub"]),
         options=options,
     )
 
@@ -376,7 +431,7 @@ def _feasible(objective: Objective, ids: np.ndarray, n_tiles: int, exact_n: bool
 def solve_milp(objective: Objective, n_tiles: int,
                time_limit_s: float = MILP_TIME_LIMIT_S, exact_n: bool = True,
                mip_rel_gap: float = 1e-4, *, prune_frac: float = PRUNE_FRACTION,
-               use_cliques: bool = True) -> SolverResult:
+               use_cliques: bool = True, cover_cuts: bool = COVER_CUTS) -> SolverResult:
     """E4 exact reference: maximize weighted coverage (V100) with HiGHS.
 
     See the module docstring for the formulation.  Hot-spot terms are NOT in
@@ -389,8 +444,10 @@ def solve_milp(objective: Objective, n_tiles: int,
     with an empty selection and a reason; nothing is raised for them.
 
     Keyword-only extras (not in the frozen signature): ``prune_frac``
-    (coverage-row pruning threshold as a fraction of rx; 0 disables) and
-    ``use_cliques`` (False -> pairwise rows only; same optimum, weaker LP).
+    (coverage-row pruning threshold as a fraction of rx; 0 disables),
+    ``use_cliques`` (False -> pairwise rows only; same optimum, weaker LP)
+    and ``cover_cuts`` (pigeonhole rows, module docstring; same optimum).
+    ``extra`` also carries ``n_rows``, ``nnz`` and ``build_s`` of the model.
     """
     t0 = time.perf_counter()
     N = int(n_tiles)
@@ -400,7 +457,8 @@ def solve_milp(objective: Objective, n_tiles: int,
     base_extra: Dict[str, Any] = {
         "exact_n": bool(exact_n), "time_limit_s": float(time_limit_s),
         "mip_rel_gap": float(mip_rel_gap), "prune_frac": float(prune_frac),
-        "use_cliques": bool(use_cliques), "n_tiles": N,
+        "use_cliques": bool(use_cliques), "cover_cuts": bool(cover_cuts),
+        "n_tiles": N,
     }
 
     def finish(ids, status, reason, bound, gap, extra, feasible=None):
@@ -429,8 +487,8 @@ def solve_milp(objective: Objective, n_tiles: int,
                       feasible=True)
 
     try:
-        form = build_formulation(objective, N, exact_n=exact_n,
-                                 prune_frac=prune_frac, use_cliques=use_cliques)
+        form = build_formulation(objective, N, exact_n=exact_n, prune_frac=prune_frac,
+                                 use_cliques=use_cliques, cover_cuts=cover_cuts)
         res = _run_highs(form, True, time_limit_s, mip_rel_gap)
     except Exception as exc:  # solver / formulation failure: report, do not raise
         return finish([], "error", "MILP failed: %s: %s" % (type(exc).__name__, exc),
@@ -441,7 +499,9 @@ def solve_milp(objective: Objective, n_tiles: int,
     status = _HIGHS_STATUS.get(hstat, "error")
     message = str(getattr(res, "message", ""))
     extra: Dict[str, Any] = {
-        "formulation": form["stats"], "highs_status": hstat, "highs_message": message,
+        "formulation": form["stats"], "n_rows": form["stats"]["n_rows"],
+        "nnz": form["stats"]["nnz"], "build_s": form["stats"]["build_s"],
+        "highs_status": hstat, "highs_message": message,
         "node_count": getattr(res, "mip_node_count", None),
     }
     x = getattr(res, "x", None)
@@ -485,13 +545,15 @@ def solve_milp(objective: Objective, n_tiles: int,
 # --------------------------------------------------------------- LP bound
 def lp_bound(objective: Objective, n_tiles: int, exact_n: bool = True,
              time_limit_s: float = MILP_TIME_LIMIT_S, *,
-             prune_frac: float = PRUNE_FRACTION, use_cliques: bool = True) -> float:
+             prune_frac: float = PRUNE_FRACTION, use_cliques: bool = True,
+             cover_cuts: bool = LP_COVER_CUTS) -> float:
     """Value of the LP relaxation (all integrality dropped): an upper bound
     on the MILP's V100, for the validation agent when the MILP times out.
     Weak in general (fractional ``x`` spread dose over many points and
     ``y_m`` takes fractional credit); the MILP's own dual bound at the time
-    limit is tighter.  Returns NaN when the LP is infeasible (then the MILP
-    is too) or fails.
+    limit is tighter.  The pigeonhole cover cuts are on by default here
+    (``LP_COVER_CUTS``): they can only tighten an LP and are exact at N = 1.
+    Returns NaN when the LP is infeasible (then the MILP is too) or fails.
     """
     N = int(n_tiles)
     C = objective.influence.n_candidates
@@ -501,7 +563,7 @@ def lp_bound(objective: Objective, n_tiles: int, exact_n: bool = True,
         return 0.0
     try:
         form = build_formulation(objective, N, exact_n=exact_n, prune_frac=prune_frac,
-                                 use_cliques=use_cliques, warn=False)
+                                 use_cliques=use_cliques, cover_cuts=cover_cuts, warn=False)
         res = _run_highs(form, False, time_limit_s, 0.0)
     except Exception:
         return float("nan")
@@ -584,5 +646,5 @@ def brute_force(objective: Objective, n_tiles: int, exact_n: bool = True,
         extra=dict(extra, milp_objective=best_val, v100=best_val))
 
 
-__all__ = ["PRUNE_FRACTION", "BRUTE_FORCE_MAX_SUBSETS", "solve_milp", "lp_bound",
+__all__ = ["PRUNE_FRACTION", "COVER_CUTS", "LP_COVER_CUTS", "BRUTE_FORCE_MAX_SUBSETS", "solve_milp", "lp_bound",
            "brute_force", "build_formulation", "validate_cliques", "evaluate_selection"]
