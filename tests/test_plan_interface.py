@@ -73,7 +73,11 @@ def test_submodules_exist_but_are_not_imported_by_init():
         assert m.__doc__ and ("Owner" in m.__doc__)
 
 
-@pytest.mark.parametrize("name", STUBS)
+# implemented on branch plan/solvers (A3); they no longer raise the stub error
+IMPLEMENTED = {"solve_greedy", "solve_local", "solve_sa", "refine_continuous", "sweep_n"}
+
+
+@pytest.mark.parametrize("name", [n for n in STUBS if n not in IMPLEMENTED])
 def test_every_stub_raises_not_implemented(name):
     import inspect
     fn = getattr(plan, name)

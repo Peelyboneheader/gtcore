@@ -1034,7 +1034,8 @@ def solve_greedy(objective: Objective, n_tiles: int, fixed: Sequence[int] = (),
     Complexity O(N * C * M).  Fails with ``status="infeasible"`` when no
     compatible candidate remains.
     """
-    raise _stub("solve_greedy", "solvers")
+    from .solvers import solve_greedy as _impl
+    return _impl(objective, n_tiles, fixed=fixed, kinds_required=kinds_required)
 
 
 def solve_local(objective: Objective, n_tiles: int, start, radius_mm: float = LOCAL_RADIUS_MM,
@@ -1045,7 +1046,8 @@ def solve_local(objective: Objective, n_tiles: int, start, radius_mm: float = LO
     of the hard objective.  ``candidates`` supplies anchors / anchor_ids for
     the move neighbourhoods.  O(iterations * N * C * M) worst case.
     """
-    raise _stub("solve_local", "solvers")
+    from .solvers import solve_local as _impl
+    return _impl(objective, n_tiles, start, radius_mm=radius_mm, candidates=candidates)
 
 
 def solve_sa(objective: Objective, n_tiles: int, seed: int = 0,
@@ -1059,7 +1061,9 @@ def solve_sa(objective: Objective, n_tiles: int, seed: int = 0,
     Reproducible from ``seed``; ``history`` = best-so-far per sweep.
     O(n_restarts * n_sweeps * 50 * N * M).
     """
-    raise _stub("solve_sa", "solvers")
+    from .solvers import solve_sa as _impl
+    return _impl(objective, n_tiles, seed=seed, n_sweeps=n_sweeps, n_restarts=n_restarts,
+                 start=start, candidates=candidates)
 
 
 def solve_milp(objective: Objective, n_tiles: int,
@@ -1087,7 +1091,8 @@ def refine_continuous(mesh, candidates: CandidateSet, selection, target: TargetS
     and after (the discretization-error estimate, section 4 V4) and the
     number of accepted steps.  O(tiles * NM evaluations * conformer calls).
     """
-    raise _stub("refine_continuous", "solvers")
+    from .solvers import refine_continuous as _impl
+    return _impl(mesh, candidates, selection, target, rx_cgy=rx_cgy, **kw)
 
 
 def sweep_n(mesh, target: TargetSet, n_max: int, rx_cgy: float = DEFAULT_RX_CGY,
@@ -1100,7 +1105,9 @@ def sweep_n(mesh, target: TargetSet, n_max: int, rx_cgy: float = DEFAULT_RX_CGY,
     (``"D90>=rx"``, ``"V100>=0.90"``).  Builds candidates / influence /
     conflicts when not supplied.  O(n_max * solver cost).
     """
-    raise _stub("sweep_n", "solvers")
+    from .sweep import sweep_n as _impl
+    return _impl(mesh, target, n_max, rx_cgy=rx_cgy, solver=solver, seed=seed,
+                 candidates=candidates, influence=influence, conflicts=conflicts, **kw)
 
 
 def final_report(mesh, tiles: Sequence[PlacedTile], rx_cgy: float = DEFAULT_RX_CGY,
