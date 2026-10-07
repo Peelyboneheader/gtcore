@@ -1095,7 +1095,7 @@ def solve_sa(objective: Objective, n_tiles: int, seed: int = 0,
 
 def solve_milp(objective: Objective, n_tiles: int,
                time_limit_s: float = MILP_TIME_LIMIT_S, exact_n: bool = True,
-               mip_rel_gap: float = 1e-4) -> SolverResult:
+               mip_rel_gap: float = 1e-4, **kw) -> SolverResult:
     """E4 exact reference via ``scipy.optimize.milp`` (HiGHS): maximize
     weighted coverage ``sum_m w_m y_m`` s.t. ``D x >= rx y``, clique
     constraints, ``sum x = N`` (``exact_n``) or ``<= N``, OAR rows.
@@ -1106,7 +1106,29 @@ def solve_milp(objective: Objective, n_tiles: int,
     """
     from .milp import solve_milp as _impl   # lazy: keeps gtcore.plan import light
     return _impl(objective, n_tiles, time_limit_s=time_limit_s, exact_n=exact_n,
-                 mip_rel_gap=mip_rel_gap)
+                 mip_rel_gap=mip_rel_gap, **kw)
+
+
+def solve_enumeration(objective: Objective, n_tiles: int,
+                      time_limit_s: float = MILP_TIME_LIMIT_S, exact_n: bool = True,
+                      **kw) -> SolverResult:
+    """Exact reference by depth-first enumeration branch-and-bound over
+    conflict-free N-subsets (the default ``solve_milp(method="auto")`` path
+    for C <= 600, N <= 8; see ``gtcore.plan.milp``).  ``bound`` is a valid
+    upper bound on V100 when the time limit is hit."""
+    from .milp import solve_enumeration as _impl
+    return _impl(objective, n_tiles, time_limit_s=time_limit_s, exact_n=exact_n, **kw)
+
+
+def solve_continuous(mesh, candidates: CandidateSet, target: TargetSet, rx_cgy: float,
+                     n_tiles: int, **kw):
+    """Direct continuous multi-start solver over each tile's (u, v, theta)
+    through ``conform_tile`` (promoted from the §7.4 scout).  Returns
+    ``(List[PlacedTile], SolverResult)``; the tiles are continuous poses, not
+    candidates.  See ``gtcore.plan.solvers.solve_continuous`` for the
+    keywords (seed, n_starts, n_passes, time_budget_s, start, ...)."""
+    from .solvers import solve_continuous as _impl
+    return _impl(mesh, candidates, target, rx_cgy, n_tiles, **kw)
 
 
 def refine_continuous(mesh, candidates: CandidateSet, selection, target: TargetSet,
@@ -1226,6 +1248,6 @@ __all__ = [
     # functions
     "build_candidates", "visible_faces", "build_influence", "build_conflicts",
     "make_objective", "evaluate", "solve_greedy", "solve_local", "solve_sa",
-    "solve_milp", "refine_continuous", "sweep_n", "final_report",
-    "recommend_tile_count", "optimize", "suggest_next",
+    "solve_milp", "solve_enumeration", "solve_continuous", "refine_continuous",
+    "sweep_n", "final_report", "recommend_tile_count", "optimize", "suggest_next",
 ]

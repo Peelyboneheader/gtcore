@@ -396,7 +396,7 @@ def _check_result(res: SolverResult, n_total: int, candidates: CandidateSet,
                   solver: str) -> np.ndarray:
     """Raise ``RuntimeError`` unless ``res`` is a feasible, complete selection."""
     reason = (" (" + res.reason + ")") if res.reason else ""
-    if res.status not in ("ok", "time_limit"):
+    if res.status not in ("ok", "optimal", "time_limit"):
         raise RuntimeError("%s solver failed: status %s%s" % (solver, res.status, reason))
     sel = np.asarray(res.selection, dtype=int).reshape(-1)
     if not res.feasible:
@@ -425,7 +425,7 @@ def _check_tiles(res: SolverResult, tiles: List[PlacedTile], n_total: int,
     """Raise ``RuntimeError`` unless a pose-returning solver (``continuous``)
     delivered ``n_total`` non-overlapping tiles of the requested kinds."""
     reason = (" (" + res.reason + ")") if res.reason else ""
-    if res.status not in ("ok", "time_limit"):
+    if res.status not in ("ok", "optimal", "time_limit"):
         raise RuntimeError("%s solver failed: status %s%s" % (solver, res.status, reason))
     if not res.feasible:
         raise RuntimeError("%s solver reported an infeasible configuration%s"
