@@ -9,6 +9,12 @@ Implements ``build_conflicts(candidates, gap_mm) -> ConflictGraph``:
   test with the pair's own slack).  ``gap_mm`` composes ADDITIVELY with the
   planner's 1 mm threshold (Open decision 4 in ``docs/optimize-notes.md``);
 - a sparse symmetric boolean matrix, diagonal False;
+- ``robust=True`` (default) unions the planner rule with the geometric
+  PROXY rule (:func:`tile_pair_proxy_conflict`): the planner's footprint
+  fit balloons for some tiles on curved walls (Open decision 14 in
+  ``docs/optimize-notes.md``) and then MISSES certain overlaps, so the
+  optimizer must not rely on it alone; ``robust=False`` is the planner
+  rule verbatim;
 - clique constraints for the MILP: per sampled anchor, a maximal clique of
   the pairwise graph grown greedily (nearest anchors first) from the
   anchor's first candidate inside the anchor neighbourhood (candidates whose
@@ -32,6 +38,7 @@ from ..interact import (
     _OVERLAP_NORMAL_DOT,
     _footprint_surface,
     _grid_triangles,
+    find_overlapping_tiles,
 )
 from . import CONFLICT_GAP_MM, CandidateSet, ConflictGraph
 from .candidates import tile_diagonal_mm
@@ -39,6 +46,28 @@ from .candidates import tile_diagonal_mm
 PLANNER_THRESHOLD_MM = 1.0
 # find_overlapping_tiles' default threshold: footprints closer than this
 # are flagged by the planner (edge-to-edge abutment stays legal).
+
+PROXY_NORMAL_DOT = 0.5
+# Proxy rule applies only to tiles on the same wall: anchor inward normals
+# must agree this much (the planner's own _OVERLAP_NORMAL_DOT), so tiles
+# facing each other across a narrow cavity are never proxy conflicts.
+
+PROXY_ANCHOR_MM = 18.0
+# Proxy rule, full-full: each full tile contains the 10 mm disc about its
+# anchor, so two anchors closer than 10 + 10 - 2 (1 mm of draping slack per
+# tile) with the same wall orientation must overlap.
+
+PROXY_ANCHOR_HALF_MM = 13.0
+# Proxy rule, full-half: a half tile (10 x 20 strip) contains the 5 mm disc
+# about its anchor, so 10 + 5 - 2 = 13 mm (coordinator rule "10 + 3").
+
+PROXY_ANCHOR_HALF_HALF_MM = 8.0
+# Proxy rule, half-half: 5 + 5 - 2 = 8 mm by the same derivation (two
+# abutting strips have anchors 10 mm apart and must stay legal).
+
+PROXY_SEED_MM = 9.0
+# Proxy rule: the seed pitch is 10 mm, so seeds of DIFFERENT tiles closer
+# than 9 mm imply overlapping footprints.
 
 
 def conflict_threshold_mm(gap_mm: float = CONFLICT_GAP_MM) -> float:
@@ -344,11 +373,124 @@ def anchor_cliques(candidates: CandidateSet, pairs: sp.csr_matrix) -> List[np.nd
     return out
 
 
+# ------------------------------------------------------------------ proxy
+def proxy_anchor_mm(kind_a: str, kind_b: str) -> float:
+    """Anchor-chord threshold of the proxy rule for a pair of tile kinds:
+    18 mm full-full, 13 mm full-half, 8 mm half-half."""
+    n_half = int(kind_a == "half") + int(kind_b == "half")
+    return (PROXY_ANCHOR_MM, PROXY_ANCHOR_HALF_MM, PROXY_ANCHOR_HALF_HALF_MM)[n_half]
+
+
+def tile_pair_proxy_conflict(tile_a, tile_b) -> bool:
+    """Geometric proxy conflict between two conformed tiles (coordinator
+    rule, shared with A5's validation campaign -- keep identical):
+
+    conflict iff the anchor inward normals agree (``dot > PROXY_NORMAL_DOT``)
+    AND (anchor chord < :func:`proxy_anchor_mm` of the two kinds, OR any
+    seed of a lies within ``PROXY_SEED_MM`` of any seed of b).
+
+    Independent of the planner's footprint fit, so it still catches the
+    overlaps the planner misses when that fit balloons (Open decision 14).
+    """
+    na = np.asarray(tile_a.normal_ras, dtype=float)
+    nb = np.asarray(tile_b.normal_ras, dtype=float)
+    if float(na @ nb) <= PROXY_NORMAL_DOT:
+        return False
+    chord = float(np.linalg.norm(np.asarray(tile_a.anchor_ras, dtype=float)
+                                 - np.asarray(tile_b.anchor_ras, dtype=float)))
+    if chord < proxy_anchor_mm(tile_a.kind, tile_b.kind):
+        return True
+    sa = np.asarray(tile_a.seed_centers, dtype=float).reshape(-1, 3)
+    sb = np.asarray(tile_b.seed_centers, dtype=float).reshape(-1, 3)
+    d = np.linalg.norm(sa[:, None, :] - sb[None, :, :], axis=2)
+    return bool((d < PROXY_SEED_MM).any())
+
+
+def _proxy_pairs(anchors: np.ndarray, normals: np.ndarray, kinds: np.ndarray,
+                 seeds: np.ndarray, seed_owner: np.ndarray) -> np.ndarray:
+    """Vectorized :func:`tile_pair_proxy_conflict` over tiles: ``(P, 2)``
+    int pairs ``i < j``.  ``seeds`` (S, 3) are the valid seed centres of all
+    tiles with ``seed_owner`` (S,) their tile index."""
+    n = anchors.shape[0]
+    if n < 2:
+        return np.zeros((0, 2), dtype=int)
+    cand = cKDTree(anchors).query_pairs(PROXY_ANCHOR_MM, output_type="ndarray")
+    cand = np.asarray(cand, dtype=int).reshape(-1, 2)
+    if cand.size:
+        chord = np.linalg.norm(anchors[cand[:, 0]] - anchors[cand[:, 1]], axis=1)
+        limit = np.asarray([proxy_anchor_mm(kinds[i], kinds[j]) for i, j in cand])
+        cand = cand[chord < limit]
+    if seeds.shape[0] >= 2:
+        sp_pairs = cKDTree(seeds).query_pairs(PROXY_SEED_MM, output_type="ndarray")
+        sp_pairs = np.asarray(sp_pairs, dtype=int).reshape(-1, 2)
+        owners = seed_owner[sp_pairs]
+        owners = owners[owners[:, 0] != owners[:, 1]]
+        owners = np.sort(owners, axis=1)
+        cand = np.vstack([cand, owners]) if cand.size else owners
+    if cand.size == 0:
+        return np.zeros((0, 2), dtype=int)
+    cand = np.unique(np.sort(cand, axis=1), axis=0)
+    dots = (normals[cand[:, 0]] * normals[cand[:, 1]]).sum(axis=1)
+    return cand[dots > PROXY_NORMAL_DOT].astype(int).reshape(-1, 2)
+
+
+def _tile_arrays(tiles):
+    tiles = list(tiles)
+    anchors = np.asarray([t.anchor_ras for t in tiles], dtype=float).reshape(-1, 3)
+    normals = np.asarray([t.normal_ras for t in tiles], dtype=float).reshape(-1, 3)
+    normals = normals / np.maximum(np.linalg.norm(normals, axis=1), 1e-12)[:, None]
+    kinds = np.asarray([t.kind for t in tiles], dtype=object)
+    seeds, owner = [], []
+    for i, t in enumerate(tiles):
+        sc = np.asarray(t.seed_centers, dtype=float).reshape(-1, 3)
+        sc = sc[np.isfinite(sc).all(axis=1)]
+        seeds.append(sc)
+        owner.append(np.full(sc.shape[0], i, dtype=int))
+    seeds = np.vstack(seeds) if seeds else np.zeros((0, 3))
+    owner = np.concatenate(owner) if owner else np.zeros(0, dtype=int)
+    return anchors, normals, kinds, seeds, owner
+
+
+def proxy_conflicts(candidates: CandidateSet) -> np.ndarray:
+    """``(P, 2)`` int pairs ``i < j`` of candidates in proxy conflict
+    (vectorized :func:`tile_pair_proxy_conflict`; kd-tree queries on anchors
+    and seeds, O(C log C))."""
+    if not isinstance(candidates, CandidateSet):
+        raise TypeError("proxy_conflicts expects a CandidateSet")
+    return _proxy_pairs(*_tile_arrays(candidates.tiles))
+
+
+def tiles_conflict(tiles, robust: bool = True,
+                   threshold_mm: float = PLANNER_THRESHOLD_MM) -> List[Tuple[int, int]]:
+    """Robust counterpart of ``interact.find_overlapping_tiles`` for
+    arbitrary ``PlacedTile`` sequences: the planner's pairs (the multi-tile
+    call at ``threshold_mm``) unioned with the proxy pairs when ``robust``;
+    the planner's pairs alone otherwise.  Sorted ``(i, j)`` with ``i < j``.
+    """
+    tiles = list(tiles)
+    if len(tiles) < 2:
+        return []
+    pairs = {(int(i), int(j)) for i, j in
+             find_overlapping_tiles(tiles, threshold_mm=float(threshold_mm))}
+    if robust:
+        for i, j in _proxy_pairs(*_tile_arrays(tiles)):
+            pairs.add((int(i), int(j)))
+    return sorted(pairs)
+
+
 # ------------------------------------------------------------------ build
-def build_conflicts(candidates: CandidateSet, gap_mm: float = CONFLICT_GAP_MM
-                    ) -> ConflictGraph:
-    """Pairwise conflicts (the planner's overlap rule at threshold
-    ``1 mm + gap_mm``) and anchor-neighbourhood cliques for ``candidates``.
+def build_conflicts(candidates: CandidateSet, gap_mm: float = CONFLICT_GAP_MM,
+                    robust: bool = True) -> ConflictGraph:
+    """Pairwise conflicts and anchor-neighbourhood cliques for ``candidates``.
+
+    ``robust=True`` (default): the planner's overlap rule at threshold
+    ``1 mm + gap_mm`` UNIONED with the geometric proxy rule
+    (:func:`tile_pair_proxy_conflict`), so the graph never misses a certain
+    overlap when the planner's footprint fit balloons.  ``robust=False``:
+    the planner rule verbatim.  Cliques are grown on the resulting matrix,
+    so they stay valid under the union.  The graph carries plain attributes
+    ``n_pairs_planner``, ``n_pairs_proxy``, ``n_pairs_proxy_added`` (proxy
+    pairs the planner missed) and ``robust``.
 
     O(C log C) bounding-sphere candidates, exact footprint tests only for
     close pairs, O(A * neighbourhood) clique growth.
@@ -358,10 +500,32 @@ def build_conflicts(candidates: CandidateSet, gap_mm: float = CONFLICT_GAP_MM
     n = len(candidates)
     thr = conflict_threshold_mm(gap_mm)
     pairs_arr, _n_exact = pairwise_conflicts(candidates.tiles, thr)
+    n_planner = int(pairs_arr.shape[0])
+    n_proxy = 0
+    n_added = 0
+    if robust and n >= 2:
+        prox = proxy_conflicts(candidates)
+        n_proxy = int(prox.shape[0])
+        if n_proxy:
+            planner_set = {(int(i), int(j)) for i, j in pairs_arr}
+            added = [(int(i), int(j)) for i, j in prox
+                     if (int(i), int(j)) not in planner_set]
+            n_added = len(added)
+            if added:
+                pairs_arr = np.vstack([pairs_arr.reshape(-1, 2),
+                                       np.asarray(added, dtype=int)])
     pairs = _pairs_matrix(n, pairs_arr)
     cliques = anchor_cliques(candidates, pairs) if n else []
-    return ConflictGraph(n=n, pairs=pairs, cliques=cliques, gap_mm=float(gap_mm))
+    graph = ConflictGraph(n=n, pairs=pairs, cliques=cliques, gap_mm=float(gap_mm))
+    graph.robust = bool(robust)
+    graph.n_pairs_planner = n_planner
+    graph.n_pairs_proxy = n_proxy
+    graph.n_pairs_proxy_added = n_added
+    return graph
 
 
-__all__ = ["PLANNER_THRESHOLD_MM", "PAIR_CHUNK", "ITEM_CHUNK", "conflict_threshold_mm",
-           "pairwise_conflicts", "anchor_cliques", "build_conflicts"]
+__all__ = ["PLANNER_THRESHOLD_MM", "PAIR_CHUNK", "ITEM_CHUNK", "PROXY_NORMAL_DOT",
+           "PROXY_ANCHOR_MM", "PROXY_ANCHOR_HALF_MM", "PROXY_ANCHOR_HALF_HALF_MM",
+           "PROXY_SEED_MM", "conflict_threshold_mm", "pairwise_conflicts",
+           "proxy_anchor_mm", "tile_pair_proxy_conflict", "proxy_conflicts",
+           "tiles_conflict", "anchor_cliques", "build_conflicts"]

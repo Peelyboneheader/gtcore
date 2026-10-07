@@ -1033,7 +1033,7 @@ class _ContinuousCore:
 
     # ---- coordinate descent over all tiles
     def descend(self, tiles: List[PlacedTile], n_passes: int) -> Tuple[List[PlacedTile], Dict[str, Any]]:
-        from ..interact import find_overlapping_tiles
+        from .conflicts import tiles_conflict        # planner rule + geometric proxy
         tiles = list(tiles)
         n = len(tiles)
         doses = [self.tile_dose(t) for t in tiles]
@@ -1041,7 +1041,7 @@ class _ContinuousCore:
         info: Dict[str, Any] = {
             "hard_before": self.hard(total), "soft_before": self.soft(total),
             "V100_before": self.v100(total), "n_tiles": n,
-            "overlaps_before": list(find_overlapping_tiles(tiles)),
+            "overlaps_before": list(tiles_conflict(tiles)),
         }
         accepted = 0
         rejected = {"v100": 0, "soft": 0, "overlap": 0, "nm_failed": 0}
@@ -1073,7 +1073,7 @@ class _ContinuousCore:
                         continue
                     trial = list(tiles)
                     trial[i] = new_tile
-                    if find_overlapping_tiles(trial):
+                    if tiles_conflict(trial):
                         rejected["overlap"] += 1
                         continue
                     tiles, doses[i], total = trial, new_dose, new_total
@@ -1089,7 +1089,7 @@ class _ContinuousCore:
             "metrics_after": self.metrics(total), "accepted": accepted, "rejected": rejected,
             "history": history, "passes_done": passes_done, "deadline_hit": deadline_hit,
             "offsets_uv_mm_theta_rad": [o.tolist() for o in offsets],
-            "overlaps_after": list(find_overlapping_tiles(tiles)),
+            "overlaps_after": list(tiles_conflict(tiles)),
         })
         return tiles, info
 
@@ -1113,7 +1113,8 @@ def refine_continuous(mesh, candidates: CandidateSet, selection, target: TargetS
     dose comes from ``dose_at_points(exact=False)`` on ``target`` subsampled
     to ``m_opt`` points.  A new pose is accepted only if hard V100 does not
     decrease, the soft objective improves, and
-    ``find_overlapping_tiles(new_tiles) == []``.  ``time_budget_s`` (optional)
+    ``plan.tiles_conflict(new_tiles) == []`` (planner rule + geometric proxy).
+    ``time_budget_s`` (optional)
     aborts NM at the deadline and returns the tiles refined so far.
 
     Returns ``(tiles, info)``; ``info`` has ``hard_before/after``,
@@ -1137,15 +1138,15 @@ def refine_continuous(mesh, candidates: CandidateSet, selection, target: TargetS
 
 
 def _conflicts_from_tiles(candidates: CandidateSet):
-    """ConflictGraph from ``find_overlapping_tiles`` on the candidate tiles
-    (fallback when no :class:`ConflictGraph` is supplied; O(C^2) footprint
-    tests, fine for a few hundred candidates)."""
+    """ConflictGraph from ``plan.tiles_conflict`` (planner rule + geometric
+    proxy) on the candidate tiles (fallback when no :class:`ConflictGraph`
+    is supplied; O(C^2) footprint tests, fine for a few hundred candidates)."""
     import scipy.sparse as sp
     from . import ConflictGraph
-    from ..interact import find_overlapping_tiles
+    from .conflicts import tiles_conflict
     c = len(candidates)
     pairs = sp.lil_matrix((c, c), dtype=bool)
-    for i, j in find_overlapping_tiles(candidates.tiles):
+    for i, j in tiles_conflict(candidates.tiles):
         pairs[i, j] = True
         pairs[j, i] = True
     return ConflictGraph(n=c, pairs=pairs.tocsr(), cliques=[], gap_mm=0.0)
@@ -1168,11 +1169,11 @@ def solve_continuous(mesh, candidates: CandidateSet, target: TargetSet, rx_cgy: 
     greedy solution of ``objective`` if given, else the first random feasible
     selection; plus ``n_starts - 1`` random feasible selections drawn from
     ``candidates`` (``np.random.default_rng(seed)``; conflicts from
-    ``conflicts`` / ``objective.conflicts`` / ``find_overlapping_tiles`` on
+    ``conflicts`` / ``objective.conflicts`` / ``plan.tiles_conflict`` on
     the candidate tiles).  Each start is refined exactly as
     :func:`refine_continuous` does (soft surrogate ``tau = 0.05 rx`` inside
     NM; a tile move is accepted only if hard V100 does not drop, soft
-    improves and ``find_overlapping_tiles`` stays empty); the start with the
+    improves and ``plan.tiles_conflict`` stays empty); the start with the
     best final hard objective (then soft) wins.  ``time_budget_s`` is a
     strict wall-time cap: NM is aborted at the deadline and the best so far
     returned (``status="time_limit"``; reproducibility from ``seed`` then
@@ -1188,7 +1189,7 @@ def solve_continuous(mesh, candidates: CandidateSet, target: TargetSet, rx_cgy: 
     NM cost per tile.
     """
     from . import ConflictGraph
-    from ..interact import find_overlapping_tiles
+    from .conflicts import tiles_conflict           # planner rule + geometric proxy
 
     t0 = time.perf_counter()
     deadline = None if time_budget_s is None else t0 + float(time_budget_s)
@@ -1276,7 +1277,7 @@ def solve_continuous(mesh, candidates: CandidateSet, target: TargetSet, rx_cgy: 
             break
 
     _key, s_idx, ids, tiles, info = best
-    overlaps = list(find_overlapping_tiles(tiles))
+    overlaps = list(tiles_conflict(tiles))
     status = "time_limit" if deadline_hit else "ok"
     result = SolverResult(
         selection=np.asarray(ids, dtype=int), objective=float(info["hard_after"]),

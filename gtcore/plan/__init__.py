@@ -1025,15 +1025,29 @@ def build_influence(candidates: CandidateSet, target: TargetSet,
                  kernel=kernel, rng_seed=rng_seed)
 
 
-def build_conflicts(candidates: CandidateSet, gap_mm: float = CONFLICT_GAP_MM
-                    ) -> ConflictGraph:
+def build_conflicts(candidates: CandidateSet, gap_mm: float = CONFLICT_GAP_MM,
+                    robust: bool = True) -> ConflictGraph:
     """Pairwise conflicts (as ``interact.find_overlapping_tiles`` defines
     overlap, plus ``gap_mm``) and anchor-neighbourhood cliques.
 
+    ``robust=True`` (default) also adds the geometric proxy conflicts
+    (``conflicts.tile_pair_proxy_conflict``: same wall, anchors closer than
+    18 mm or seeds closer than 9 mm) that the planner's footprint fit can
+    miss; ``robust=False`` is the planner rule verbatim.
     O(C^2) bounding-sphere tests, exact footprint tests only for close pairs.
     """
     from .conflicts import build_conflicts as _impl
-    return _impl(candidates, gap_mm=gap_mm)
+    return _impl(candidates, gap_mm=gap_mm, robust=robust)
+
+
+def tiles_conflict(tiles: Sequence[PlacedTile], robust: bool = True) -> List[Tuple[int, int]]:
+    """Robust counterpart of ``interact.find_overlapping_tiles`` for any
+    placed tiles: the planner's overlapping pairs unioned with the geometric
+    proxy pairs (``robust=True``), or the planner's pairs alone.  Sorted
+    ``(i, j)`` with ``i < j``; empty for fewer than two tiles.
+    """
+    from .conflicts import tiles_conflict as _impl
+    return _impl(tiles, robust=robust)
 
 
 def make_objective(influence: InfluenceMatrix, conflicts: ConflictGraph,
@@ -1225,6 +1239,7 @@ __all__ = [
     "SolverResult", "SweepResult", "TileCountRecommendation", "OptimizeReport",
     # functions
     "build_candidates", "visible_faces", "build_influence", "build_conflicts",
+    "tiles_conflict",
     "make_objective", "evaluate", "solve_greedy", "solve_local", "solve_sa",
     "solve_milp", "refine_continuous", "sweep_n", "final_report",
     "recommend_tile_count", "optimize", "suggest_next",

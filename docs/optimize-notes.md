@@ -47,6 +47,11 @@ implementation tunables, not optimizer parameters):
 | `candidates.ELLIPSOID_P` | 1.6075 | Knud Thomsen ellipsoid-area exponent (relative error < 1.1 %). |
 | `candidates.MIN_FACES` | 4 | Fewer faces than a tetrahedron is a degenerate mesh (V8). |
 | `conflicts.PLANNER_THRESHOLD_MM` | 1.0 | `find_overlapping_tiles`' default threshold; `gap_mm` adds to it (decision 11). |
+| `conflicts.PROXY_NORMAL_DOT` | 0.5 | Proxy rule only between tiles on the same wall (anchor inward normals agree; the planner's own dot threshold). |
+| `conflicts.PROXY_ANCHOR_MM` | 18.0 | Proxy rule full–full: 10 + 10 − 2 mm (each full tile contains the 10 mm disc about its anchor; 1 mm draping slack per tile). |
+| `conflicts.PROXY_ANCHOR_HALF_MM` | 13.0 | Proxy rule full–half: 10 + 5 − 2 mm (coordinator's "10 + 3"). |
+| `conflicts.PROXY_ANCHOR_HALF_HALF_MM` | 8.0 | Proxy rule half–half: 5 + 5 − 2 mm (abutting strips, anchors 10 mm apart, stay legal). |
+| `conflicts.PROXY_SEED_MM` | 9.0 | Proxy rule: seed pitch 10 mm; seeds of different tiles closer than 9 mm imply overlapping footprints. |
 | `conflicts.PAIR_CHUNK` | 512 | Candidate pairs per vectorized sample-distance batch (~30 MB transient). |
 | `conflicts.ITEM_CHUNK` | 65 536 | (sample, triangle) pairs per batched point-triangle pass (~30 MB transient). |
 
@@ -1082,6 +1087,51 @@ A1 (`plan/candidates`, 2026-10-07).
     to the coordinator: change `rcond` to 1e-3 in `_footprint_surface` (and
     consider excluding fallback points from the fit); A1's graph then
     inherits the fix with no change.
+
+    **Follow-up (coordinator decision, 2026-10-07): `interact.py` stays
+    untouched; the optimizer is made robust inside `gtcore/plan`.** The
+    validation agent (A5) measured the consequence on real phantom cavities
+    at h = 4 mm / 3 spins: 565 of 20 869 certain-overlap pairs (anchor
+    chord < 18 mm, normal dot > 0.5) were absent from the planner-rule
+    conflict graph (9 of 433 candidates had exploded footprints), and every
+    solver returned physically overlapping plans (e.g. two tiles with
+    anchors 13.1 mm apart and seeds 1.9 mm apart, unflagged). Fix (A1,
+    `conflicts.py`): the geometric **proxy rule**
+    `tile_pair_proxy_conflict(a, b)` — conflict iff the anchor inward
+    normals' dot > 0.5 AND (anchor chord < `PROXY_ANCHOR_MM` = 18.0 mm OR
+    any seed of a within `PROXY_SEED_MM` = 9.0 mm of any seed of b).
+    Derivation: each full tile contains the 10 mm disc about its anchor, so
+    two anchors closer than 10 + 10 − 2 (1 mm draping slack per tile) with
+    the same wall orientation must overlap; the seed pitch is 10 mm, so
+    seeds of different tiles closer than 9 mm imply overlapping footprints.
+    Half tiles use the same anchor rule with 13.0 mm for a full–half pair
+    (10 + 5 − 2, the coordinator's "10 + 3") and 8.0 mm for half–half
+    (5 + 5 − 2; two abutting strips with anchors 10 mm apart stay legal) —
+    the half–half value is A1's extension by the same derivation, flagged
+    for the coordinator. `proxy_conflicts(candidates)` is the vectorized
+    form (kd-tree pairs on anchors and on seeds; tested equal to the pair
+    function). `build_conflicts(candidates, gap_mm, robust=True)` now
+    returns planner rule ∪ proxy (default) and the planner rule verbatim
+    for `robust=False`; the graph carries plain attributes
+    `n_pairs_planner`, `n_pairs_proxy`, `n_pairs_proxy_added`, `robust`;
+    cliques are grown on the union matrix so they stay true cliques.
+    `plan.tiles_conflict(tiles, robust=True)` is the robust counterpart of
+    `find_overlapping_tiles` for arbitrary placed tiles; the continuous
+    machinery (`solvers._ContinuousCore.descend` acceptance test and its
+    before/after overlap lists, `_conflicts_from_tiles`,
+    `solve_continuous`'s final feasibility) and `api.py`'s plan checks
+    (`compatible_with_placed`, the final overlapping-tiles check) use it.
+    **The planner's own amber caution keeps its original definition**
+    (`find_overlapping_tiles` in `interact.py`, and `OptimizeReport.overlaps`
+    / `report.py` still report it). Measured on the seed-1/2/3 phantom
+    cavities at h = 4 / 3 spins (commit of this change, `tests/test_plan_conflicts.py`
+    smoke): planner pairs 42 813 / 46 110 / 39 316, proxy pairs 24 411 /
+    28 967 / 24 490, proxy pairs the planner missed 1052 / 1787 / 1588
+    (exploded footprints 7 / 5 / 10 of 444 / 488 / 444 candidates); the
+    misses include sane-footprint pairs (radii 12.7 / 13.4 mm) with seeds
+    8.0 mm apart, so the proxy is needed beyond the exploded tiles. A
+    greedy 6-tile plan on the robust graph has no conflicts under either
+    rule.
 15. **`n_rejected` is counted in candidate units** (`"ineligible"` = dropped
     anchors × spins × kinds; `"hanging"`, `"detached"`, `"conform_error"`
     per (anchor, spin, kind)), so the counts add up with `len(cs)` to the
