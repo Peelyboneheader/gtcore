@@ -970,7 +970,10 @@ def build_candidates(mesh, h_mm: float = DEFAULT_H_MM, n_spins: Optional[int] = 
     counted in ``n_rejected``.  Complexity O(C) conformer calls, each a
     handful of ray casts and nearest-point queries.
     """
-    raise _stub("build_candidates", "candidates")
+    from .candidates import build_candidates as _impl
+    return _impl(mesh, h_mm=h_mm, n_spins=n_spins, kinds=kinds,
+                 eligible_faces=eligible_faces, rng_seed=rng_seed,
+                 detached_mm=detached_mm, min_fraction_on_wall=min_fraction_on_wall)
 
 
 def visible_faces(mesh, center_ras) -> np.ndarray:
@@ -981,7 +984,8 @@ def visible_faces(mesh, center_ras) -> np.ndarray:
     (e.g. the printed phantom's ``meshes["body"]``) from its outer surface.
     O(F) ray casts.
     """
-    raise _stub("visible_faces", "candidates")
+    from .candidates import visible_faces as _impl
+    return _impl(mesh, center_ras)
 
 
 def build_influence(candidates: CandidateSet, target: TargetSet,
@@ -1008,7 +1012,8 @@ def build_conflicts(candidates: CandidateSet, gap_mm: float = CONFLICT_GAP_MM
 
     O(C^2) bounding-sphere tests, exact footprint tests only for close pairs.
     """
-    raise _stub("build_conflicts", "candidates")
+    from .conflicts import build_conflicts as _impl
+    return _impl(candidates, gap_mm=gap_mm)
 
 
 def make_objective(influence: InfluenceMatrix, conflicts: ConflictGraph,
@@ -1126,7 +1131,9 @@ def recommend_tile_count(mesh, contraction_pct: float = 0.0, untreated_pct: floa
     estimate from the cavity's principal extents is reported alongside.
     O(F).
     """
-    raise _stub("recommend_tile_count", "candidates")
+    from .candidates import recommend_tile_count as _impl
+    return _impl(mesh, contraction_pct=contraction_pct, untreated_pct=untreated_pct,
+                 eligible_faces=eligible_faces)
 
 
 def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
