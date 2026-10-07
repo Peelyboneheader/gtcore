@@ -20,14 +20,25 @@ import gtcore.plan as plan
 import plan_fixtures as pf
 from gtcore.plan import ConflictGraph, InfluenceMatrix, Objective, SolverResult
 from gtcore.plan.milp import (
+    ENUM_MAX_C,
+    ENUM_MAX_N,
     PRUNE_FRACTION,
     brute_force,
     build_formulation,
     evaluate_selection,
     lp_bound,
-    solve_milp,
+    solve_enumeration,
     validate_cliques,
 )
+from gtcore.plan.milp import solve_milp as _solve_milp_auto
+
+
+def solve_milp(*args, **kw):
+    """The HiGHS path, pinned: the formulation tests below inspect its
+    rows / cuts / dual bound.  Enumeration and auto routing have their own
+    tests (``test_enumeration_*``)."""
+    kw.setdefault("method", "highs")
+    return _solve_milp_auto(*args, **kw)
 
 
 # ------------------------------------------------------------------ helpers
@@ -387,7 +398,124 @@ def test_package_wrapper_delegates(toy15):
     b = solve_milp(obj, 2)
     assert a.status == b.status == "optimal"
     assert a.extra["milp_objective"] == pytest.approx(b.extra["milp_objective"])
-    assert list(a.selection) == list(b.selection)
+    # the frozen wrapper routes with method="auto": enumeration on a toy
+    assert a.solver == "milp" and a.extra["method"] == "enum_bb"
+    assert b.extra["method"] == "highs"
+
+
+# ------------------------------------------------------- enumeration B&B
+@pytest.mark.parametrize("pitch,n_tiles", [(10.0, 1), (10.0, 2), (10.0, 3),
+                                           (15.0, 1), (15.0, 2), (15.0, 3)])
+def test_enumeration_equals_brute_force(toy10, toy15, pitch, n_tiles):
+    obj = _objective(toy10 if pitch == 10.0 else toy15)
+    for exact in (True, False):
+        bf = brute_force(obj, n_tiles, exact_n=exact)
+        for order in ("degree", "potential"):
+            e = solve_enumeration(obj, n_tiles, exact_n=exact, order=order)
+            assert e.solver == "enum_bb" and e.extra["method"] == "enum_bb"
+            assert e.status == bf.status, (exact, order)
+            if bf.status == "infeasible":
+                assert e.selection.size == 0 and not e.feasible and e.reason
+                assert np.isnan(e.bound)
+                continue
+            assert e.status == "optimal" and e.feasible
+            assert e.extra["milp_objective"] == pytest.approx(bf.extra["milp_objective"], abs=1e-9)
+            assert _v100(obj, e.selection) == pytest.approx(bf.extra["milp_objective"], abs=1e-9)
+            assert e.bound == pytest.approx(e.extra["milp_objective"]) and e.mip_gap == 0.0
+            assert obj.conflicts.is_feasible(e.selection)
+            assert (e.selection.size == n_tiles) if exact else (e.selection.size <= n_tiles)
+            assert e.objective == pytest.approx(evaluate_selection(obj, e.selection)[0])
+            assert e.history == [(0, e.objective)]
+            assert e.extra["n_nodes"] >= 1 and e.extra["incumbent_source"] in ("greedy", "first_leaf")
+
+
+def test_enumeration_equals_highs_where_highs_proves_optimality(toy15):
+    obj = _objective(toy15)
+    for n in (2, 3):
+        h = solve_milp(obj, n)                      # HiGHS, pinned
+        e = solve_enumeration(obj, n)
+        assert h.status == "optimal" and e.status == "optimal"
+        assert e.extra["milp_objective"] == pytest.approx(h.extra["milp_objective"], abs=1e-6)
+
+
+def test_enumeration_time_limit_bound_dominates_incumbent():
+    inst = pf.toy_instance(n_candidates=80, n_targets=300)
+    obj = _objective(inst)
+    e = solve_enumeration(obj, 6, time_limit_s=0.05)
+    assert e.status == "time_limit"
+    assert e.runtime_s < 10.0
+    assert "bound" in e.reason and "reference" in e.reason
+    assert e.extra["n_open_nodes"] > 0
+    assert np.isfinite(e.bound) and e.bound <= 1.0 + 1e-9
+    if e.selection.size:
+        assert e.feasible and e.selection.size == 6 and obj.conflicts.is_feasible(e.selection)
+        assert e.bound >= e.extra["milp_objective"] - 1e-9
+        assert e.mip_gap == pytest.approx((e.bound - e.extra["milp_objective"]) / e.extra["milp_objective"])
+        assert e.extra["milp_objective"] == pytest.approx(_v100(obj, e.selection), abs=1e-9)
+    # the proven N = 4 optimum sits under every bound and above HiGHS's incumbent-free start
+    full = solve_enumeration(obj, 4, time_limit_s=60.0)
+    assert full.status == "optimal" and full.extra["n_nodes"] > 1000
+    partial = solve_enumeration(obj, 4, time_limit_s=0.02)
+    if partial.status == "time_limit":
+        assert partial.bound >= full.extra["milp_objective"] - 1e-9
+    else:
+        assert partial.extra["milp_objective"] == pytest.approx(full.extra["milp_objective"])
+
+
+def test_enumeration_respects_oar_and_start(toy10):
+    obj0 = _objective(toy10)
+    free = solve_enumeration(obj0, 2)
+    hot = int(free.selection[-1])
+    inf0 = obj0.influence
+    tile = toy10["candidates"].tiles[hot]
+    oar_pts = tile.seed_centers + np.array([0.0, 0.0, 1.0])
+    oar = np.empty((inf0.n_candidates, oar_pts.shape[0]), dtype=np.float32)
+    for c, t in enumerate(toy10["candidates"].tiles):
+        oar[c] = pf.analytic_point_dose(oar_pts, t.seed_centers, inf0.rx_cgy)
+    limit = float(oar[hot].max()) * 0.5
+    inf = InfluenceMatrix(dose=inf0.dose, target=inf0.target, target_index=inf0.target_index,
+                          rx_cgy=inf0.rx_cgy, oar={"oar": oar}, oar_limits={"oar": limit},
+                          kernel="analytic")
+    obj = Objective(inf, obj0.conflicts, rx_cgy=obj0.rx_cgy)
+    e = solve_enumeration(obj, 2)
+    bf = brute_force(obj, 2)
+    h = solve_milp(obj, 2)
+    assert e.status == "optimal" and hot not in e.selection
+    assert inf.oar_dose_of("oar", e.selection).max() <= limit * (1 + 1e-6)
+    assert e.extra["milp_objective"] == pytest.approx(bf.extra["milp_objective"], abs=1e-9)
+    assert e.extra["milp_objective"] == pytest.approx(h.extra["milp_objective"], abs=1e-6)
+    # a start that violates the limit is discarded; a valid one seeds the incumbent
+    bad = solve_enumeration(obj, 2, start=free.selection)
+    assert bad.extra["incumbent_source"] == "first_leaf"
+    assert bad.extra["milp_objective"] == pytest.approx(e.extra["milp_objective"], abs=1e-9)
+    good = solve_enumeration(obj, 2, start=e.selection)
+    assert good.extra["incumbent_source"] == "start"
+    assert good.extra["milp_objective"] == pytest.approx(e.extra["milp_objective"], abs=1e-9)
+    # infeasible limit -> infeasible, no exception
+    inf_bad = dataclasses.replace(inf, oar_limits={"oar": 0.0})
+    r = solve_enumeration(Objective(inf_bad, obj0.conflicts, rx_cgy=obj0.rx_cgy), 2)
+    assert r.status == "infeasible" and r.selection.size == 0 and r.reason
+
+
+def test_solve_milp_method_routing(toy15):
+    obj = _objective(toy15)
+    assert ENUM_MAX_C == 600 and ENUM_MAX_N == 8
+    auto = _solve_milp_auto(obj, 2)
+    assert auto.solver == "milp" and auto.extra["method"] == "enum_bb"
+    forced = _solve_milp_auto(obj, 2, method="enum")
+    assert forced.extra["method"] == "enum_bb" and forced.solver == "milp"
+    highs = _solve_milp_auto(obj, 2, method="highs")
+    assert highs.extra["method"] == "highs" and "formulation" in highs.extra
+    assert auto.extra["milp_objective"] == pytest.approx(highs.extra["milp_objective"], abs=1e-6)
+    # above the enumeration size limits auto falls back to HiGHS
+    big = _solve_milp_auto(obj, ENUM_MAX_N + 1)
+    assert big.extra["method"] == "highs" and big.status == "infeasible"
+    with pytest.raises(ValueError):
+        _solve_milp_auto(obj, 2, method="simplex")
+    with pytest.raises(ValueError):
+        solve_enumeration(obj, 2, order="random")
+    assert solve_enumeration(obj, 0).status == "optimal"
+    assert solve_enumeration(obj, 13).status == "infeasible"
 
 
 def test_brute_force_guard(toy15):

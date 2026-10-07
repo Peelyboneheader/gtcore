@@ -138,6 +138,44 @@ the extra 300 rows cost node throughput, so the 60 s incumbent is worse
 `LP_COVER_CUTS = True` for `lp_bound` (a valid row never loosens an LP). The
 §7.3 negative result stands: no bound within 5 % of the incumbent on this toy.
 
+#### Enumeration branch-and-bound (`solve_enumeration`, the §7.3 scout's `--bb`)
+
+Port of the scout's exact DFS over conflict-free N-subsets (fixed candidate
+order, every subset once; incremental conflict masks; OAR limits pruned at
+each node; incumbent from `solve_greedy` when implemented, else `start` or
+the first leaf). Node bound: with r tiles left and current dose d, a newly
+covered m needs ≥ (rx − d_m)/r from one new tile, so gain ≤ sum of the r
+largest w({m uncovered : D[c,m] ≥ (rx − d_m)/r}) over the allowed c. At the
+time limit `bound` = max(incumbent, bound of every open node). `solve_milp`
+now routes with `method="auto"`: enumeration when C ≤ 600 and N ≤ 8
+(`ENUM_MAX_C`, `ENUM_MAX_N`), HiGHS otherwise; `method="enum"|"highs"` force.
+Same instances / seed / hardware as above; direct calls, uncontended.
+
+| instance | N | enumeration (order=degree) | nodes | time | HiGHS (60 s, no cuts) for comparison |
+|---|---|---|---|---|---|
+| pitch-10 toy (C=12) | 1 / 2 / 3 | optimal 0.3133 / 0.6733 / infeasible | 1 / 13 / 19 | < 0.01 s | same |
+| pitch-15 toy (C=12) | 1 / 2 / 3 / 4 | optimal 0.1800 / 0.4867 / 0.6800 / 0.8267 | 1 / 13 / 45 / 64 | < 0.05 s | same (0.04–1.1 s) |
+| toy80 (C=80, M=300) | 4 | **optimal 0.5833** | 37 772 | 1.0 s | 5 s: time_limit, incumbent 0.5433, bound 0.8833 |
+| toy80 | 6 | **optimal 0.9033** | 1 304 394 | 34.2 s | 60 s: time_limit, incumbent 0.8667, bound 0.9967 (gap 0.15) |
+| toy80 | 8 | **optimal 1.0000** | 509 530 | 10.0 s | — |
+| toy80, 0.05 s limit | 6 | time_limit, incumbent 0.84, bound 1.00 | 1 958 (169 open) | 0.05 s | — |
+
+`order="potential"` (the scout's weighted-dose-potential order) gives the
+same optima with 63–71 nodes on the toys (table uses the default
+"single-coverage, then degree" order). Both count forms (exact N and ≤ N)
+match brute force on every toy case (`test_enumeration_equals_brute_force`).
+
+Findings. The enumeration proves the toy80 optimum at N = 6 in 34 s where
+HiGHS had stalled at 60 s with a 0.867 incumbent (4 % below the true
+optimum 0.903) and a 0.997 bound; the true V3 gap of that HiGHS incumbent
+was 0.04, not the reported 0.15. This matches the scout's finding on real
+synthetic cavities (C = 138–498: HiGHS gaps 67–460 %, enumeration 4–237 s).
+The HiGHS path stays as the fallback above the size limits and as an
+incumbent finder; its bound must be reported as "loose" in V3. No synthetic
+cavity run here: A1 (`build_candidates`) is not on main as of this commit
+(`git log main` shows A2 and A3 merged only), so the V3 cavity rows wait for
+sync point (1).
+
 ## V4 Discretization
 
 _Pending._ Sweep h and n_spins; gain from E5.
@@ -253,6 +291,20 @@ A4 (`plan/milp`, 2026-10-07).
     compare with the other solvers in sweep tables; V3 compares on
     `extra["milp_objective"]`. The OAR limits are hard rows in the MILP
     (not penalties), so a MILP selection never carries an OAR penalty.
+14. **`solve_milp(method="auto")` routes to the enumeration B&B for
+    C ≤ 600 and N ≤ 8** (`milp.ENUM_MAX_C`, `milp.ENUM_MAX_N`; HiGHS beyond)
+    after the §7.3 scout showed HiGHS cannot close real reduced instances
+    and the enumeration can (see V3). The result keeps `solver="milp"` with
+    `extra["method"]` = `"enum_bb"` / `"highs"` so callers of the frozen
+    wrapper see one reference solver; `solve_enumeration` called directly
+    reports `solver="enum_bb"`. Alternatives: always enumerate (unbounded
+    worst case above ~600 candidates), always HiGHS (loose bound), or
+    report `solver="enum_bb"` from `solve_milp` too (would split sweep
+    tables by method). The size limits are from the scout's largest proven
+    case (C = 498, N = 8); they are constants in `milp.py`, not in
+    `__init__.py`, because they are not tunables of the problem.
+    Candidate order default "degree" (single-coverage, then conflict
+    degree) as directed; `order="potential"` (the scout's) is kept.
 
 ---
 
@@ -278,3 +330,4 @@ _To be pasted unedited._
 | 2026-10-07 | `python -m pytest -q tests/test_plan_interface.py` | — | (Phase 0 commit) | 34 passed (full suite 470 passed, 205 s) | interface freeze |
 | 2026-10-07 | `python -m pytest -q tests/test_plan_milp.py` | toy rng_seed 0 | (A4 commit, plan/milp) | 20 passed, 17 s (full suite 490 passed, 1 skipped, 385 s under load) | MILP = brute force on the toy; 80-candidate toy at N = 6 not closed in 60 s (gap 0.14) |
 | 2026-10-07 | `python -m pytest -q tests/test_plan_milp.py` + direct `solve_milp(..., cover_cuts=…)` calls on `toy_instance(80, 300)` N = 6 | toy rng_seed 0 | (A4 cover-cut commit, plan/milp) | 22 passed, 32 s (full suite 491 passed, 1 skipped, 328 s) | pigeonhole cover cuts: optimum unchanged; LP bound exact at N = 1; no bound gain on toy80 N = 6, worse 60 s incumbent (0.787 vs 0.867) → off for the MILP, on for `lp_bound` |
+| 2026-10-07 | `python -m pytest -q tests/test_plan_milp.py` + direct `solve_enumeration` calls on `toy_instance(12,150)` (pitch 10/15) and `toy_instance(80,300)` N = 4/6/8 | toy rng_seed 0 | (A4 enumeration commit, plan/milp) | 32 passed, 29 s (full suite 501 passed, 1 skipped, 267 s) | enumeration B&B = brute force on every toy case; proves toy80 N = 6 (0.9033) in 34 s where HiGHS stalled at 0.867 / 0.997; `solve_milp` auto-routes to it for C ≤ 600, N ≤ 8 |

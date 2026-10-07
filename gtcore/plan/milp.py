@@ -1,10 +1,18 @@
 """Exact reference (section 3 E4). Owner: A4 Exact, branch ``plan/milp``.
 
-Mixed-integer formulation of the discretized placement problem, solved with
-``scipy.optimize.milp`` (HiGHS).  Used as the *reference* for the heuristic
-solvers (section 4 V3), not as a production solver: the worst case is
-exponential and the intended inputs are reduced instances (coarser anchor
-spacing, fewer spins, subsampled targets).
+Two exact methods for the discretized placement problem, both maximizing
+V100 over conflict-free selections: a mixed-integer formulation solved with
+``scipy.optimize.milp`` (HiGHS) and a depth-first branch-and-bound
+enumeration (:func:`solve_enumeration`).  :func:`solve_milp` with
+``method="auto"`` picks the enumeration up to ``ENUM_MAX_C`` candidates and
+``ENUM_MAX_N`` tiles and HiGHS beyond.  The section 7.3 scout showed on
+real synthetic cavities (C = 138-498, N = 4-8) that HiGHS hits the 60 s
+limit at 67-460 % gaps while its LP / dual bound is 1.6-2.5x the proven
+optimum (no single tile reaches rx on the +5 mm shell, so fractional
+neighbours cover everything); the enumeration proved every optimum in
+4-237 s.  The HiGHS path is therefore an incumbent finder with a loose
+bound; the enumeration is the reference.  Both are for reduced instances
+(coarser anchor spacing, fewer spins, subsampled targets), not production.
 
 Formulation
 -----------
@@ -102,6 +110,12 @@ COVER_CUTS = False
 LP_COVER_CUTS = True
 # ... but ON for lp_bound: an extra valid row can only tighten an LP, and on
 # the pitch-15 toy they cut the LP bound from 0.53 to 0.18 (exact) at N = 1.
+
+ENUM_MAX_C = 600
+ENUM_MAX_N = 8
+# solve_milp(method="auto") enumerates (branch and bound) up to these sizes:
+# the section 7.3 scout proved optimality on C <= 498, N <= 8 in 4-237 s
+# where HiGHS stalled at 67-460 % gaps; beyond them HiGHS is the fallback.
 
 BRUTE_FORCE_MAX_SUBSETS = 200_000
 # Enumeration guard for brute_force (C <= 15, N <= 4 gives at most 1365).
@@ -430,25 +444,61 @@ def _feasible(objective: Objective, ids: np.ndarray, n_tiles: int, exact_n: bool
 # ------------------------------------------------------------------- MILP
 def solve_milp(objective: Objective, n_tiles: int,
                time_limit_s: float = MILP_TIME_LIMIT_S, exact_n: bool = True,
-               mip_rel_gap: float = 1e-4, *, prune_frac: float = PRUNE_FRACTION,
-               use_cliques: bool = True, cover_cuts: bool = COVER_CUTS) -> SolverResult:
-    """E4 exact reference: maximize weighted coverage (V100) with HiGHS.
+               mip_rel_gap: float = 1e-4, *, method: str = "auto",
+               prune_frac: float = PRUNE_FRACTION, use_cliques: bool = True,
+               cover_cuts: bool = COVER_CUTS, order: str = "degree") -> SolverResult:
+    """E4 exact reference: maximize weighted coverage (V100).
 
-    See the module docstring for the formulation.  Hot-spot terms are NOT in
-    the MILP; ``extra["milp_objective"]`` is the solver's coverage value
-    (V100 of the incumbent), ``objective`` the P1 hard value recomputed from
-    ``selection``.  ``bound`` (upper bound on V100) and ``mip_gap`` are
-    always filled; on ``status="time_limit"`` the bound, not the incumbent,
-    is the reference (section 3 E4).  Infeasible instances (no ``n_tiles``
-    subset satisfies the conflict / OAR rows) return ``status="infeasible"``
-    with an empty selection and a reason; nothing is raised for them.
+    ``method``: ``"auto"`` (default) runs :func:`solve_enumeration` when
+    ``C <= ENUM_MAX_C`` and ``n_tiles <= ENUM_MAX_N`` and the HiGHS MILP
+    otherwise; ``"enum"`` / ``"highs"`` force one.  The enumeration proves
+    optimality on reduced instances where HiGHS stalls (section 7.3 scout:
+    C = 138-498, N = 4-8); the HiGHS path is an *incumbent finder* whose
+    dual / LP bound is loose (1.6-2.5x the proven optimum on the +5 mm
+    shell, where no single tile reaches rx and fractional neighbours cover
+    everything).  ``extra["method"]`` records which ran (``"enum_bb"`` /
+    ``"highs"``); ``solver`` is ``"milp"`` either way.
+
+    Hot-spot terms are NOT in either model; ``extra["milp_objective"]`` is
+    the coverage value (V100 of the incumbent), ``objective`` the P1 hard
+    value recomputed from ``selection``.  ``bound`` (upper bound on V100)
+    and ``mip_gap`` are always filled; on ``status="time_limit"`` the bound,
+    not the incumbent, is the reference (section 3 E4).  Infeasible
+    instances (no ``n_tiles`` subset satisfies the conflict / OAR rows)
+    return ``status="infeasible"`` with an empty selection and a reason;
+    nothing is raised for them.
 
     Keyword-only extras (not in the frozen signature): ``prune_frac``
-    (coverage-row pruning threshold as a fraction of rx; 0 disables),
-    ``use_cliques`` (False -> pairwise rows only; same optimum, weaker LP)
-    and ``cover_cuts`` (pigeonhole rows, module docstring; same optimum).
-    ``extra`` also carries ``n_rows``, ``nnz`` and ``build_s`` of the model.
+    (HiGHS coverage-row pruning threshold as a fraction of rx; 0 disables),
+    ``use_cliques`` (False -> pairwise rows only; same optimum, weaker LP),
+    ``cover_cuts`` (HiGHS pigeonhole rows; same optimum) and ``order`` (the
+    enumeration's candidate order).  The HiGHS path adds ``n_rows``,
+    ``nnz`` and ``build_s`` to ``extra``; the enumeration adds ``n_nodes``,
+    ``n_pruned``, ``incumbent_source``.
     """
+    N = int(n_tiles)
+    C = objective.influence.n_candidates
+    if method == "auto":
+        method = "enum" if (C <= ENUM_MAX_C and N <= ENUM_MAX_N) else "highs"
+    if method == "enum":
+        res = solve_enumeration(objective, N, time_limit_s=time_limit_s,
+                                exact_n=exact_n, order=order)
+        res.solver = "milp"
+        res.extra["method"] = "enum_bb"
+        return res
+    if method != "highs":
+        raise ValueError("method must be 'auto', 'enum' or 'highs'")
+    res = _solve_highs(objective, N, time_limit_s=time_limit_s, exact_n=exact_n,
+                       mip_rel_gap=mip_rel_gap, prune_frac=prune_frac,
+                       use_cliques=use_cliques, cover_cuts=cover_cuts)
+    res.extra["method"] = "highs"
+    return res
+
+
+def _solve_highs(objective: Objective, n_tiles: int, time_limit_s: float,
+                 exact_n: bool, mip_rel_gap: float, prune_frac: float,
+                 use_cliques: bool, cover_cuts: bool) -> SolverResult:
+    """The HiGHS MILP path of :func:`solve_milp` (module docstring)."""
     t0 = time.perf_counter()
     N = int(n_tiles)
     if N < 0:
@@ -540,6 +590,254 @@ def solve_milp(objective: Objective, n_tiles: int,
     elif status == "error":
         reason = "HiGHS status %d: %s" % (hstat, message)
     return finish(ids, status, reason, bound, gap, extra, feasible=True)
+
+
+# ------------------------------------------------------- enumeration B&B
+def _node_bound(DA: np.ndarray, need_u: np.ndarray, wu: np.ndarray, base: float,
+                r: int, total_w: float) -> float:
+    """Upper bound on the final covered weight at a node (module docstring):
+    ``base`` (already covered) plus the ``r`` largest pigeonhole coverages
+    ``w({m uncovered : D[c,m] >= need_m / r})`` over the allowed candidates."""
+    if DA.shape[0] == 0 or r <= 0:
+        return min(base, total_w)
+    cov = (DA >= need_u / float(r)) @ wu
+    if cov.size > r:
+        top = np.partition(cov, cov.size - r)[-r:]
+    else:
+        top = cov
+    return min(base + float(top.sum()), total_w)
+
+
+def solve_enumeration(objective: Objective, n_tiles: int,
+                      time_limit_s: float = MILP_TIME_LIMIT_S, exact_n: bool = True,
+                      order: str = "degree", *, start=None) -> SolverResult:
+    """Exact depth-first branch-and-bound over conflict-free selections
+    (``solver="enum_bb"``), the reference that actually proves optimality
+    on reduced instances where HiGHS stalls (section 7.3 scout).
+
+    Nodes are partial selections; a node may only add candidates later in a
+    fixed candidate order than its last pick (every subset once), restricted
+    to the candidates compatible with all picks (conflict graph applied
+    incrementally) and within every OAR limit.  At a node with dose ``d``
+    and ``r`` tiles still to place, a newly covered point ``m`` must get at
+    least ``(rx - d_m)/r`` from one of the new tiles, so the gain is at most
+    the sum of the ``r`` largest ``w({m uncovered : D[c,m] >= (rx - d_m)/r})``
+    over the allowed candidates -- nodes whose bound cannot beat the incumbent
+    are pruned; with one tile left the best completion is read off directly.
+
+    ``order``: ``"degree"`` (default) visits candidates by descending
+    single-tile coverage ``w({m : D[c,m] >= rx})``, then descending conflict
+    degree, then id; ``"potential"`` by descending ``sum_m w_m min(D[c,m], rx)``
+    (the scout's order).  ``exact_n=False`` solves the ``<= N`` form (every
+    node is itself a candidate solution).  The incumbent starts from
+    ``gtcore.plan.solve_greedy`` when that is implemented (feasibility-aware
+    greedy; discarded if it violates an OAR limit), else from ``start``
+    (a selection) or the first leaf reached.  Maximizes V100 only (same
+    objective and feasible set as the MILP); ``objective`` is the P1 hard
+    value of the returned selection, ``extra["milp_objective"]`` its V100.
+
+    At the time limit the result carries ``status="time_limit"``, the
+    incumbent as ``selection`` and ``bound`` = max(incumbent, bound of every
+    open node) -- a valid upper bound on the optimum; ``status="optimal"``
+    gives ``bound == extra["milp_objective"]`` and ``mip_gap == 0``.  A
+    fully searched tree without any feasible leaf is ``"infeasible"``.
+    """
+    t0 = time.perf_counter()
+    N = int(n_tiles)
+    if N < 0:
+        raise ValueError("n_tiles must be >= 0")
+    inf = objective.influence
+    conflicts = objective.conflicts
+    C, M = inf.n_candidates, inf.n_targets
+    rx = float(objective.rx_cgy)
+    D = np.asarray(inf.dose, dtype=np.float64)
+    w = np.asarray(inf.target.weights, dtype=np.float64)
+    total_w = float(w.sum())
+    oars = [(np.asarray(inf.oar[name], dtype=np.float64), float(inf.oar_limits[name]))
+            for name in inf.oar if name in inf.oar_limits]
+    base_extra: Dict[str, Any] = {"exact_n": bool(exact_n), "time_limit_s": float(time_limit_s),
+                                  "order": str(order), "n_tiles": N, "method": "enum_bb"}
+
+    def finish(ids, status, reason, bound, gap, extra, feasible=None):
+        ids = np.asarray(ids, dtype=int).reshape(-1)
+        if feasible is None:
+            feasible = _feasible(objective, ids, N, exact_n)
+        if ids.size or status in ("optimal", "time_limit"):
+            hard, metrics = evaluate_selection(objective, ids)
+        else:
+            hard, metrics = float("nan"), {}
+        extra = dict(base_extra, **extra)
+        extra.setdefault("v100", metrics.get("V100", float("nan")))
+        return SolverResult(
+            selection=np.sort(ids), objective=hard, metrics=metrics,
+            history=[(0, hard)], runtime_s=time.perf_counter() - t0,
+            solver="enum_bb", seed=None, status=status, reason=reason,
+            bound=bound, mip_gap=gap, feasible=bool(feasible), extra=extra)
+
+    if N > C:
+        return finish([], "infeasible", "n_tiles=%d exceeds the %d candidates" % (N, C),
+                      float("nan"), float("nan"), {"milp_objective": float("nan")},
+                      feasible=False)
+    if N == 0 or total_w <= 0:
+        return finish([], "optimal", "", 0.0, 0.0,
+                      {"milp_objective": 0.0, "n_nodes": 0, "n_pruned": 0,
+                       "incumbent_source": "trivial"}, feasible=True)
+
+    # ---- candidate order
+    single = (D >= rx) @ w
+    degree = np.asarray(conflicts.pairs.sum(axis=1)).reshape(-1).astype(float)
+    if order == "degree":
+        perm = np.lexsort((np.arange(C), -degree, -single))
+    elif order == "potential":
+        pot = (np.minimum(D, rx) * w[None, :]).sum(axis=1)
+        perm = np.lexsort((np.arange(C), -pot))
+    else:
+        raise ValueError("order must be 'degree' or 'potential'")
+    inv = np.empty(C, dtype=int)
+    inv[perm] = np.arange(C)
+    Dp = D[perm]
+    conf = conflicts.pairs.toarray()[perm][:, perm]
+    np.fill_diagonal(conf, False)
+    oars_p = [(mat[perm], limit) for mat, limit in oars]
+
+    def oar_ok(ids_p) -> bool:
+        return all(mat[ids_p].sum(axis=0).max(initial=0.0) <= limit * (1 + 1e-9)
+                   for mat, limit in oars_p)
+
+    def covered_w(ids_p) -> float:
+        if len(ids_p) == 0:
+            return 0.0
+        return float(w[Dp[ids_p].sum(axis=0) >= rx].sum())
+
+    # ---- incumbent
+    best_val = -1.0
+    best_sel: List[int] = []
+    source = "first_leaf"
+    start_ids = None
+    if start is not None:
+        start_ids = _as_ids(start, C)
+        source = "start"
+    else:
+        try:
+            from . import solve_greedy
+            g = solve_greedy(objective, N)
+            if g.status == "ok" and g.feasible:
+                start_ids = _as_ids(g.selection, C)
+                source = "greedy"
+        except NotImplementedError:
+            pass
+        except Exception:        # greedy is a convenience; never fail the reference
+            pass
+    if start_ids is not None:
+        sp_ids = [int(inv[c]) for c in start_ids]
+        ok_n = (len(sp_ids) == N) if exact_n else (len(sp_ids) <= N)
+        if ok_n and conflicts.is_feasible(start_ids) and oar_ok(sp_ids):
+            best_val = covered_w(sp_ids)
+            best_sel = sp_ids
+        else:
+            source = "first_leaf"
+
+    # ---- depth-first branch and bound
+    n_nodes = 0
+    n_pruned = 0
+    timed_out = False
+    stack: List[Tuple[List[int], np.ndarray]] = [([], np.ones(C, dtype=bool))]
+    while stack:
+        if time.perf_counter() - t0 > time_limit_s:
+            timed_out = True
+            break
+        chosen, allowed = stack.pop()
+        n_nodes += 1
+        r = N - len(chosen)
+        d = Dp[chosen].sum(axis=0) if chosen else np.zeros(M)
+        if not exact_n:
+            val = float(w[d >= rx].sum())
+            if val > best_val:
+                best_val, best_sel = val, list(chosen)
+        if r == 0:
+            if exact_n:
+                val = float(w[d >= rx].sum())
+                if val > best_val:
+                    best_val, best_sel = val, list(chosen)
+            continue
+        if oars_p:
+            od = [mat[chosen].sum(axis=0) if chosen else np.zeros(mat.shape[1])
+                  for mat, _ in oars_p]
+            for (mat, limit), cur in zip(oars_p, od):
+                allowed = allowed & np.all(mat + cur[None, :] <= limit * (1 + 1e-9), axis=1)
+        A = np.flatnonzero(allowed)
+        if A.size == 0 or (exact_n and A.size < r):
+            continue
+        need = rx - d
+        u = need > 0.0
+        base = float(w[~u].sum())
+        DA = Dp[A][:, u]
+        wu = w[u]
+        need_u = need[u]
+        if r == 1:
+            gains = (DA >= need_u) @ wu
+            i = int(np.argmax(gains))
+            if base + gains[i] > best_val:
+                best_val = base + float(gains[i])
+                best_sel = chosen + [int(A[i])]
+            continue
+        ub = _node_bound(DA, need_u, wu, base, r, total_w)
+        if ub <= best_val:
+            n_pruned += 1
+            continue
+        hard = (DA >= need_u) @ wu
+        soft = np.minimum(DA, need_u) @ wu
+        kids = A[np.lexsort((-soft, -hard))]
+        for c in kids[::-1]:                 # most promising child on top
+            na = allowed & ~conf[c]
+            na[:c + 1] = False
+            stack.append((chosen + [int(c)], na))
+
+    open_bound = 0.0
+    if timed_out:
+        for chosen, allowed in stack:
+            r = N - len(chosen)
+            A = np.flatnonzero(allowed)
+            if exact_n and A.size < r:
+                continue
+            d = Dp[chosen].sum(axis=0) if chosen else np.zeros(M)
+            need = rx - d
+            u = need > 0.0
+            base = float(w[~u].sum())
+            DA = Dp[A][:, u]
+            if r == 0:
+                ub = min(base, total_w)
+            elif r == 1:
+                ub = min(base + float(((DA >= need[u]) @ w[u]).max(initial=0.0)), total_w)
+            else:
+                ub = _node_bound(DA, need[u], w[u], base, r, total_w)
+            open_bound = max(open_bound, ub)
+
+    extra = {"n_nodes": n_nodes, "n_pruned": n_pruned, "incumbent_source": source,
+             "n_open_nodes": len(stack) if timed_out else 0}
+    if best_val < 0.0:
+        if timed_out:
+            return finish([], "time_limit",
+                          "time limit %.3g s hit before any feasible leaf; bound %.4f"
+                          % (time_limit_s, open_bound / total_w),
+                          open_bound / total_w, float("nan"),
+                          dict(extra, milp_objective=float("nan")), feasible=False)
+        return finish([], "infeasible",
+                      "no %s%d-candidate selection satisfies the conflict / OAR rows "
+                      "(%d nodes searched)" % ("" if exact_n else "<= ", N, n_nodes),
+                      float("nan"), float("nan"), dict(extra, milp_objective=float("nan")),
+                      feasible=False)
+    ids = np.asarray([int(perm[i]) for i in best_sel], dtype=int)
+    v100 = best_val / total_w
+    extra["milp_objective"] = v100
+    if timed_out:
+        bound = max(best_val, open_bound) / total_w
+        gap = (bound - v100) / v100 if v100 > 0 else float("inf")
+        return finish(ids, "time_limit",
+                      "time limit %.3g s hit after %d nodes: bound %.4f is the reference, "
+                      "incumbent V100 %.4f (gap %.3g)" % (time_limit_s, n_nodes, bound, v100, gap),
+                      bound, gap, extra)
+    return finish(ids, "optimal", "", v100, 0.0, extra)
 
 
 # --------------------------------------------------------------- LP bound
@@ -646,5 +944,6 @@ def brute_force(objective: Objective, n_tiles: int, exact_n: bool = True,
         extra=dict(extra, milp_objective=best_val, v100=best_val))
 
 
-__all__ = ["PRUNE_FRACTION", "COVER_CUTS", "LP_COVER_CUTS", "BRUTE_FORCE_MAX_SUBSETS", "solve_milp", "lp_bound",
+__all__ = ["PRUNE_FRACTION", "COVER_CUTS", "LP_COVER_CUTS", "ENUM_MAX_C", "ENUM_MAX_N",
+           "BRUTE_FORCE_MAX_SUBSETS", "solve_milp", "solve_enumeration", "lp_bound",
            "brute_force", "build_formulation", "validate_cliques", "evaluate_selection"]
