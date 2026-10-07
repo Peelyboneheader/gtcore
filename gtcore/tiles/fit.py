@@ -109,11 +109,47 @@ class TilePose:
                                     # cavity mesh was available: the tile
                                     # conformed onto the wall, its footprint,
                                     # and the attached / consistent verdict
+    confidence: str = "supported"   # "supported": passed the calibrated
+                                    # gates / model selection; "tentative":
+                                    # admitted by the cover pass of auto mode
+                                    # (relaxed, spacing-scaled gates) or by
+                                    # triplet completion -- shown to the user
+                                    # as a proposal to verify, never silently
+    inferred_seed_ras: object = None  # (3,) mm: the 4th seed of a full tile
+                                    # that detection MISSED, placed by the
+                                    # manufactured geometry from the other 3
+                                    # (``seed_indices`` then holds 3 entries;
+                                    # a tile always has 4 seeds physically)
 
     def __post_init__(self):
         self.center_ras = np.asarray(self.center_ras, dtype=float).reshape(3)
         self.normal_ras = np.asarray(self.normal_ras, dtype=float).reshape(3)
         self.axis_ras = np.asarray(self.axis_ras, dtype=float).reshape(3)
+        if self.inferred_seed_ras is not None:
+            self.inferred_seed_ras = np.asarray(
+                self.inferred_seed_ras, dtype=float).reshape(3)
+
+    @property
+    def tentative(self) -> bool:
+        return self.confidence == "tentative"
+
+    def seed_points(self, centers_ras, axes_ras=None):
+        """The tile's seed centres (and axes) as (4, 3) / (2, 3) arrays,
+        including the inferred seed when detection missed one.  The
+        inferred seed takes the mean axis of its observed tile-mates."""
+        idx = list(self.seed_indices)
+        c = np.asarray(centers_ras, dtype=float)[idx]
+        a = None if axes_ras is None else np.asarray(axes_ras, dtype=float)[idx]
+        if self.inferred_seed_ras is not None:
+            c = np.vstack([c, self.inferred_seed_ras[None, :]])
+            if a is not None:
+                ref = a[0]
+                signed = np.array([ax if ax @ ref >= 0 else -ax for ax in a])
+                mean = signed.mean(axis=0)
+                nrm = np.linalg.norm(mean)
+                mean = ref if nrm < 1e-9 else mean / nrm
+                a = np.vstack([a, mean[None, :]])
+        return (c, a) if axes_ras is not None else c
 
 
 @dataclass

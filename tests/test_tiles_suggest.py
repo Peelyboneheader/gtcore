@@ -121,15 +121,118 @@ def test_cli_plan_has_suggest_flag(monkeypatch):
 
     seen = {}
 
-    def fake_run(result, rx_cgy=6000.0, suggest=False):
+    def fake_run(result, rx_cgy=6000.0, suggest=False, prior=None):
         seen["suggest"] = suggest
+        seen["prior"] = prior
         return []
+
+    def fake_reconstruct(vol, n_seeds_expected=None):
+        seen["n_seeds_expected"] = n_seeds_expected
+        return object()
 
     from types import SimpleNamespace
 
     fake_vol = SimpleNamespace(array=np.zeros((2, 2, 2)), spacing=(1.0, 1.0, 1.0))
     monkeypatch.setattr(cli, "_load", lambda path, spacing: (fake_vol, "t"))
-    monkeypatch.setattr("gtcore.pipeline.reconstruct", lambda vol: object())
+    monkeypatch.setattr("gtcore.pipeline.reconstruct", fake_reconstruct)
     monkeypatch.setattr("gtcore.planner.run_planner", fake_run)
     assert cli.main(["plan", "--suggest"]) == 0
     assert seen["suggest"] is True
+    # no OR input: count unknown, no half tiles assumed, nothing to check
+    assert seen["prior"].count_known is False
+    assert seen["prior"].n_half == 0 and seen["n_seeds_expected"] is None
+
+    assert cli.main(["plan", "--tiles", "5", "--half", "1"]) == 0
+    assert seen["prior"].n_full == 5 and seen["prior"].n_half == 1
+    assert seen["prior"].n_seeds == 22 and seen["n_seeds_expected"] == 22
+    assert cli.main(["plan", "--seeds", "12"]) == 0
+    assert seen["prior"].count_known is False and seen["n_seeds_expected"] == 12
+
+
+def test_suggested_tile_owns_its_detected_seeds(result):
+    """A suggested (or adopted) tile OWNS the detected seeds it was built
+    from: they are hidden while the tile is on the board (the tile draws
+    them at its current position, so dragging moves them), they are not
+    counted twice for dose / export, and deleting the tile releases them."""
+    pytest.importorskip("pyvista")
+    from gtcore.planner import _PlannerApp
+
+    res, truth = result
+    try:
+        app = _PlannerApp(res, off_screen=True)
+        app.pl.render()
+    except Exception as exc:
+        pytest.skip("off-screen rendering unavailable: %r" % (exc,))
+    try:
+        n_det = len(res.seeds)
+        names = lambda: set(app.pl.actors.keys())
+        assert sum(1 for n in names() if n.startswith("det_seed_")) == n_det
+        placed = app.suggest_tiles()
+        assert len(placed) == 2
+        owned = app._owned_seed_indices()
+        assert len(owned) == 8
+        shown = {n for n in names() if n.startswith("det_seed_")}
+        assert shown == {"det_seed_%d" % k for k in range(n_det) if k not in owned}
+        free_c, _ = app._free_detected()
+        assert len(free_c) == n_det - 8
+        # drag: the tile's seeds move, nothing is left behind
+        app.selected = 0
+        before = app.tiles[0].seed_centers.copy()
+        app._translate_selected(3.0, 0.0)
+        assert not np.allclose(app.tiles[0].seed_centers, before)
+        assert sum(1 for n in names() if n.startswith("det_seed_")) == n_det - 8
+        # delete releases the seeds; undo hides them again
+        app._delete_selected()
+        assert sum(1 for n in names() if n.startswith("det_seed_")) == n_det - 4
+        app.undo()
+        assert sum(1 for n in names() if n.startswith("det_seed_")) == n_det - 8
+    finally:
+        app.close()
+
+
+def test_free_space_move_when_no_surface(result):
+    """A scan with no cavity / shell mesh (degraded export) still lets the
+    user nudge, rotate and drag suggested tiles: rigid free-space moves,
+    and the owned seeds travel with the tile."""
+    pytest.importorskip("pyvista")
+    from gtcore.interact import rotate_free, translate_free
+    from gtcore.planner import _PlannerApp
+
+    res, truth = result
+    try:
+        app = _PlannerApp(res, off_screen=True)
+        app.pl.render()
+    except Exception as exc:
+        pytest.skip("off-screen rendering unavailable: %r" % (exc,))
+    try:
+        app.suggest_tiles()
+        assert len(app.tiles) == 2
+        app.cavity = None                      # pretend: nothing to conform to
+        assert not app._has_surface()
+        app.selected = 0
+        t0 = app.tiles[0]
+        app._translate_selected(1.0, 0.0)
+        t1 = app.tiles[0]
+        d = t1.seed_centers - t0.seed_centers
+        assert np.allclose(d, d[0]) and np.linalg.norm(d[0]) > 0.5
+        assert np.allclose(t1.corners_ras - t0.corners_ras, d[0])
+        app._rotate_selected(np.deg2rad(90.0))
+        t2 = app.tiles[0]
+        assert np.allclose(t2.center_ras, t1.center_ras)
+        assert abs(float(t2.axis_ras @ t1.axis_ras)) < 1e-6
+        assert set(map(tuple, np.round(t2.seed_centers, 3))) != \
+            set(map(tuple, np.round(t1.seed_centers, 3)))
+        # free-space drag through the interactor path
+        app._drag_idx = 0
+        app._drag_free_offset = np.zeros(3)
+        ok = app._apply_drag(0, (400, 450))
+        assert ok and not np.allclose(app.tiles[0].center_ras, t2.center_ras)
+        app._drag_idx = -1
+        # pure helpers are exact inverses
+        back = translate_free(translate_free(t0, [3.0, -2.0, 1.0]), [-3.0, 2.0, -1.0])
+        assert np.allclose(back.seed_centers, t0.seed_centers)
+        spun = rotate_free(rotate_free(t0, 1.0), -1.0)
+        assert np.allclose(spun.seed_centers, t0.seed_centers)
+        assert np.allclose(spun.axis_ras, t0.axis_ras)
+    finally:
+        app.close()

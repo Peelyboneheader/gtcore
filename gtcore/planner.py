@@ -55,7 +55,9 @@ import numpy as np
 from .interact import (
     PlacedTile,
     conform_tile,
+    rotate_free,
     rotate_on_wall,
+    translate_free,
     snap_to_wall,
     tiles_to_seed_arrays,
     translate_on_wall,
@@ -94,7 +96,8 @@ HELP_TEXT = """GAMMATILE PLANNER                       ?  hide/show this legend
 PLACE    hover the blue wall : ghost preview of the next tile (amber = overlaps)
          gold outline        : tile fitted FROM THE SCAN (green = placed by hand)
          right-click or P    : drop tile there      H : next tile full/half
-         T                   : suggest tiles from the detected seeds (auto count)
+         T                   : suggest tiles from the detected seeds (OR count
+                               if given, else auto; orange = tentative)
 ADJUST   left-drag ON a tile : grab it (quad or seeds) and slide it along the wall
          Ctrl + left-drag    : slide the SELECTED tile from anywhere on the wall
          Tab                 : select next tile     arrows : nudge 2 mm
@@ -137,6 +140,14 @@ _TILE_STYLE: Dict[str, Dict] = {
 _OVERLAP_COLOR = {"normal": "darkgoldenrod", "hover": "goldenrod",
                   "selected": "goldenrod", "dragging": "goldenrod"}
 _ADOPTED_OUTLINE = "gold"  # provenance cue: tile recovered from the scan
+# a TENTATIVE suggestion (cover pass / triplet completion): the algorithm's
+# lower-confidence reading, drawn thinner and in orange so the surgeon
+# verifies it rather than trusts it; its inferred (undetected) seed is a
+# hollow wireframe capsule
+_TENTATIVE_OUTLINE = "darkorange"
+_INFERRED_SEED_COLOR = "orange"
+_UNASSIGNED_SEED_COLOR = "magenta"   # detected seed no suggested tile explains
+_DETECTED_SEED_COLOR = "gold"
 # amber caution tint; "orange" (1.0, 0.65, 0) keeps >0.5 contrast in some
 # channel against every background in _BACKGROUNDS (goldenrod fails on gray)
 _GHOST_OVERLAP_COLOR = "orange"
@@ -181,12 +192,16 @@ class _PlannerApp:
     """State + rendering for the planner; drives one pyvista Plotter."""
 
     def __init__(self, result: PipelineResult, rx_cgy: float = 6000.0,
-                 off_screen: bool = False, title: str = "GammaTile planner"):
+                 off_screen: bool = False, title: str = "GammaTile planner",
+                 prior=None):
         import pyvista as pv
 
         self.pv = pv
         self.result = result
         self.rx_cgy = float(rx_cgy)
+        # what the OR team told us (counts); None -> the safe defaults
+        from .tiles.auto import ImplantPrior
+        self.prior = prior if prior is not None else ImplantPrior()
         # interaction surface: the cavity wall, or -- for phantoms and other
         # scans without a segmented cavity -- the object/body shell, so tiles
         # can still be placed, selected and dragged on something real
@@ -204,6 +219,17 @@ class _PlannerApp:
         # recovered FROM THE SCAN -- the implant physically in the patient,
         # as opposed to proposals dropped by hand
         self._adopted_ids = set()
+        # ids of TENTATIVE suggestions (subset of _adopted_ids) and, per id,
+        # the inferred seed position when detection missed one
+        self._tentative_ids = set()
+        self._inferred_seed = {}     # tile id -> (3,) RAS mm
+        self._unassigned = []        # detected-seed indices no tile explains
+        # tile id -> detected-seed indices that tile OWNS (adopted from the
+        # scan or suggested by T).  An owned seed is the tile's seed: it is
+        # not drawn separately, moves with the tile, and is not counted
+        # twice in dose / export.  Deleting the tile (or undo) releases it.
+        self._owned_seeds = {}
+        self._det_hidden = set()     # detected-seed actors currently removed
         self._next_id = 0
         self.selected = -1
         self.next_kind = "full"
@@ -279,11 +305,9 @@ class _PlannerApp:
                 if mesh is self.cavity:  # whichever mesh is the pick surface
                     self._cavity_actor = actor
 
-        for c, a in zip(self.result.seeds.centers_ras,
-                        self.result.seeds.axes_ras):
-            pl.add_mesh(pv.Cylinder(center=c, direction=a, radius=0.6,
-                                    height=SEED_LENGTH_MM),
-                        color="gold", specular=0.8)
+        for k, (c, a) in enumerate(zip(self.result.seeds.centers_ras,
+                                       self.result.seeds.axes_ras)):
+            self._draw_detected_seed(k, c, a, _DETECTED_SEED_COLOR)
 
         self._draw_help()
         self._add_buttons()
@@ -291,6 +315,61 @@ class _PlannerApp:
         pl.camera_position = "yz"
         pl.camera.azimuth = 135
         pl.camera.elevation = 15
+
+    def _draw_detected_seed(self, k, c, a, color):
+        pv = self.pv
+        self.pl.add_mesh(pv.Cylinder(center=c, direction=a, radius=0.6,
+                                     height=SEED_LENGTH_MM),
+                         name="det_seed_%d" % k, color=color, specular=0.8,
+                         reset_camera=False)
+
+    def _owned_seed_indices(self):
+        """Detected-seed indices owned by a tile currently on the board."""
+        out = set()
+        for tid in self._tile_ids:
+            out.update(self._owned_seeds.get(tid, ()))
+        return out
+
+    def _free_detected(self):
+        """Detected seeds NOT owned by any tile on the board: (centers,
+        axes) -- what dose and export count alongside the placed tiles."""
+        owned = self._owned_seed_indices()
+        c = np.asarray(self.result.seeds.centers_ras, dtype=float).reshape(-1, 3)
+        a = np.asarray(self.result.seeds.axes_ras, dtype=float).reshape(-1, 3)
+        keep = [i for i in range(len(c)) if i not in owned]
+        return c[keep], a[keep]
+
+    def _refresh_detected_seeds(self):
+        """Hide detected seeds owned by a tile on the board (the tile draws
+        them, at the tile's current position); show the rest again."""
+        owned = self._owned_seed_indices()
+        seeds = self.result.seeds
+        for k in owned - self._det_hidden:
+            try:
+                self.pl.remove_actor("det_seed_%d" % k, render=False)
+            except Exception:
+                pass
+        for k in self._det_hidden - owned:
+            if 0 <= k < len(seeds):
+                self._draw_detected_seed(
+                    k, seeds.centers_ras[k], seeds.axes_ras[k],
+                    _UNASSIGNED_SEED_COLOR if k in self._unassigned
+                    else _DETECTED_SEED_COLOR)
+        self._det_hidden = set(owned)
+
+    def _mark_unassigned(self, indices):
+        """Recolour detected seeds: magenta = inside the implant region but
+        explained by no suggested tile (place one by hand), gold otherwise."""
+        want = set(int(i) for i in indices)
+        seeds = self.result.seeds
+        changed = want ^ set(self._unassigned)
+        for k in changed:
+            if k < 0 or k >= len(seeds) or k in self._det_hidden:
+                continue
+            self._draw_detected_seed(
+                k, seeds.centers_ras[k], seeds.axes_ras[k],
+                _UNASSIGNED_SEED_COLOR if k in want else _DETECTED_SEED_COLOR)
+        self._unassigned = sorted(want)
 
     def _add_buttons(self):
         """Clickable on-screen buttons above the DVH chart (lower right).
@@ -481,6 +560,31 @@ class _PlannerApp:
         except Exception:
             return None
 
+    def _has_surface(self):
+        """True when there is a wall (cavity or phantom shell) to conform
+        tiles to.  Without one (e.g. a degraded export whose cavity mask is
+        empty) tiles are moved rigidly in free space instead."""
+        return self.cavity is not None and len(getattr(self.cavity, "vertices", ())) > 0
+
+    def _screen_to_world_at(self, xy, ref_ras):
+        """World point under screen position ``xy`` at the viewing depth of
+        ``ref_ras`` (free-space drag: the tile follows the cursor in the
+        plane facing the camera through the tile)."""
+        try:
+            ren = self.pl.renderer
+            ren.SetWorldPoint(float(ref_ras[0]), float(ref_ras[1]),
+                              float(ref_ras[2]), 1.0)
+            ren.WorldToDisplay()
+            depth = ren.GetDisplayPoint()[2]
+            ren.SetDisplayPoint(float(xy[0]), float(xy[1]), depth)
+            ren.DisplayToWorld()
+            w = np.asarray(ren.GetWorldPoint(), dtype=float)
+            if abs(w[3]) < 1e-12 or not np.all(np.isfinite(w)):
+                return None
+            return w[:3] / w[3]
+        except Exception:
+            return None
+
     def _pick_cavity_point(self, x, y):
         """Cast the cursor ray against the CAVITY actor only; None on miss."""
         if self._cavity_picker is None or self._cavity_actor is None:
@@ -572,6 +676,12 @@ class _PlannerApp:
         self._drag_idx = idx
         self._drag_last_t = float("-inf")  # first move conforms at once
         self._drag_pending_xy = self._drag_applied_xy = None
+        # free-space drag keeps the grab point fixed under the cursor
+        self._drag_free_offset = None
+        if not self._has_surface():
+            under = self._screen_to_world_at(xy, self.tiles[idx].center_ras)
+            if under is not None:
+                self._drag_free_offset = self.tiles[idx].center_ras - under
         self.selected = idx
         self._redraw_tiles()
         self._update_status("dragging tile %d -- release to drop" % (idx + 1))
@@ -630,13 +740,23 @@ class _PlannerApp:
         """
         self._drag_last_t = time.perf_counter() if now is None else now
         self._drag_applied_xy = xy
-        pt = self._pick_cavity_point(xy[0], xy[1])
-        if pt is None:
-            return False  # cursor slid off the wall: tile stays where it was
         tile = self.tiles[idx]
-        surf, n_in = snap_to_wall(self.cavity, pt)
-        self.tiles[idx] = conform_tile(self.cavity, surf, n_in, tile.axis_ras,
-                                       kind=tile.kind)
+        if not self._has_surface():
+            # no wall: slide rigidly in the camera-facing plane through the
+            # tile, keeping the grabbed point under the cursor
+            under = self._screen_to_world_at(xy, tile.center_ras)
+            if under is None:
+                return False
+            offset = self._drag_free_offset
+            target = under + (offset if offset is not None else 0.0)
+            self.tiles[idx] = translate_free(tile, target - tile.center_ras)
+        else:
+            pt = self._pick_cavity_point(xy[0], xy[1])
+            if pt is None:
+                return False  # cursor slid off the wall: tile stays where it was
+            surf, n_in = snap_to_wall(self.cavity, pt)
+            self.tiles[idx] = conform_tile(self.cavity, surf, n_in,
+                                           tile.axis_ras, kind=tile.kind)
         before = self._flagged()
         self._refresh_overlaps()
         if self._flagged() != before:
@@ -798,6 +918,19 @@ class _PlannerApp:
                      "shown" if self.isodose_visible else "hidden"),
                     "    surface: " + self._surface_label
                     if self._surface_label != "cavity wall" else ""))
+        n_tent = sum(1 for tid in self._tile_ids if tid in self._tentative_ids)
+        text += "\nimplant: %s" % self.prior.describe()
+        if n_tent or self._unassigned:
+            bits = []
+            if n_tent:
+                bits.append("%d tentative tile%s (orange: verify)"
+                            % (n_tent, "" if n_tent == 1 else "s"))
+            if self._unassigned:
+                bits.append("%d detected seed%s unassigned (magenta: place "
+                            "a tile by hand)" % (
+                                len(self._unassigned),
+                                "" if len(self._unassigned) == 1 else "s"))
+            text += "    " + ", ".join(bits)
         if extra:
             text += "\n" + extra
         for i, j in self._overlap_pairs[:4]:  # tile numbers as displayed (1-based)
@@ -888,6 +1021,7 @@ class _PlannerApp:
         """One funnel for every tile mutation: checks -> redraw -> status."""
         self._refresh_overlaps()
         self._refresh_shadowing()
+        self._refresh_detected_seeds()
         self._redraw_tiles()
         if self._dose_report is not None and not self._dose_stale:
             self._dose_stale = True  # seeds moved: the panel no longer applies
@@ -920,7 +1054,7 @@ class _PlannerApp:
     def _remove_tile_actors(self, tid):
         self._tile_actors.pop(tid, None)
         self._seed_actors.pop(tid, None)
-        for suffix in ("quad", "edge", "seeds"):
+        for suffix in ("quad", "edge", "seeds", "inferred"):
             try:
                 self.pl.remove_actor("tile_%d_%s" % (tid, suffix),
                                      render=False)
@@ -964,6 +1098,8 @@ class _PlannerApp:
             self.tiles.append(tile)
             self._tile_ids.append(self._next_id)
             self._adopted_ids.add(self._next_id)
+            self._owned_seeds[self._next_id] = [
+                int(i) for i in getattr(tp, "seed_indices", [])]
             self._next_id += 1
             adopted += 1
         if adopted:
@@ -1007,7 +1143,7 @@ class _PlannerApp:
         count needed) and put the tiles on the board as ordinary placed
         tiles -- movable, rotatable, deletable -- conformed to the cavity
         wall when one exists, otherwise as the free bent-tile fits."""
-        from .tiles import fit_tiles_auto, to_placed_tiles
+        from .tiles import fit_tiles_prior, to_placed_tiles
 
         seeds = self.result.seeds
         if len(seeds) < 2:
@@ -1018,24 +1154,38 @@ class _PlannerApp:
                                and len(self.cavity.vertices)) else None
         if mesh is not None:
             cavity_center = np.asarray(mesh.vertices, float).mean(axis=0)
-        fit = fit_tiles_auto(seeds.centers_ras, seeds.axes_ras,
-                             cavity_center_ras=cavity_center, mesh=mesh)
+        spacing = getattr(getattr(self.result, "volume", None), "spacing", None)
+        fit = fit_tiles_prior(seeds.centers_ras, seeds.axes_ras, self.prior,
+                              cavity_center_ras=cavity_center, mesh=mesh,
+                              spacing_mm=spacing)
         placed = to_placed_tiles(fit, seeds.centers_ras, seeds.axes_ras)
+        poses = fit.all_tiles
         if placed:
             self._push_history()          # one undo step restores the board
-        for tile in placed:
+        for tile, pose in zip(placed, poses):
             self.tiles.append(tile)
             self._tile_ids.append(self._next_id)
             # suggestions are the algorithm's belief about the implant, like
             # adopted fitted tiles: gold outline, kept by Backspace
             self._adopted_ids.add(self._next_id)
+            self._owned_seeds[self._next_id] = [int(i) for i in pose.seed_indices]
+            if pose.tentative:
+                self._tentative_ids.add(self._next_id)
+            if pose.inferred_seed_ras is not None:
+                self._inferred_seed[self._next_id] = np.asarray(
+                    pose.inferred_seed_ras, float)
             self._next_id += 1
         self.selected = len(self.tiles) - 1 if placed else self.selected
         self._last_suggestion = fit
+        self._mark_unassigned(fit.unassigned_indices)
         notes = []
-        for pose in fit.tiles:
+        for pose in poses:
             tag = "T%d" % (pose.tile_id + 1)
-            if pose.degraded:
+            if pose.tentative:
+                tag += " tentative"
+                if pose.inferred_seed_ras is not None:
+                    tag += " (1 seed inferred)"
+            elif pose.degraded:
                 tag += " crumpled"
             if pose.surface is not None and not pose.surface.attached:
                 tag += " DETACHED"
@@ -1043,7 +1193,13 @@ class _PlannerApp:
                 tag += " inconsistent"
             if len(tag) > 3:
                 notes.append(tag)
-        msg = "suggested %d tile(s): %s" % (len(placed), fit.summary())
+        n_sup = len(fit.tiles)
+        n_ten = len(fit.tentative_tiles)
+        if n_ten:
+            msg = "suggested %d tile(s): %d supported + %d tentative: %s" % (
+                len(placed), n_sup, n_ten, fit.summary())
+        else:
+            msg = "suggested %d tile(s): %s" % (len(placed), fit.summary())
         if notes:
             msg += "\n  " + ", ".join(notes)
         if mesh is None:
@@ -1162,15 +1318,22 @@ class _PlannerApp:
             return
         delta = TRANSLATE_STEP_MM * move / norm
         self._push_history()
-        self.tiles[self.selected] = translate_on_wall(self.cavity, tile, delta)
+        if self._has_surface():
+            self.tiles[self.selected] = translate_on_wall(self.cavity, tile, delta)
+        else:
+            self.tiles[self.selected] = translate_free(tile, delta)
         self._after_change()
 
     def _rotate_selected(self, angle_rad: float):
         if not (0 <= self.selected < len(self.tiles)):
             return
         self._push_history()
-        self.tiles[self.selected] = rotate_on_wall(
-            self.cavity, self.tiles[self.selected], angle_rad)
+        if self._has_surface():
+            self.tiles[self.selected] = rotate_on_wall(
+                self.cavity, self.tiles[self.selected], angle_rad)
+        else:
+            self.tiles[self.selected] = rotate_free(
+                self.tiles[self.selected], angle_rad)
         self._after_change()
 
     # -------------------------------------------------------------- drawing
@@ -1193,8 +1356,12 @@ class _PlannerApp:
         # provenance: an adopted tile at rest keeps a gold outline; the
         # interaction outline (hover/selected/dragging) takes over while active
         if style["outline"] is None and self._tile_ids[i] in self._adopted_ids:
-            style["outline"] = _ADOPTED_OUTLINE
-            style["line_width"] = 2
+            if self._tile_ids[i] in self._tentative_ids:
+                style["outline"] = _TENTATIVE_OUTLINE
+                style["line_width"] = 1
+            else:
+                style["outline"] = _ADOPTED_OUTLINE
+                style["line_width"] = 2
         return style
 
     def _redraw_tile(self, i):
@@ -1220,6 +1387,18 @@ class _PlannerApp:
             self._seed_actors[tid] = pl.add_mesh(
                 seeds, name="tile_%d_seeds" % tid, color="gold",
                 specular=0.8, reset_camera=False)
+        inferred = self._inferred_seed.get(tid)
+        if inferred is not None:
+            # hollow marker at the position detection missed; it follows the
+            # tile's conformed seed nearest to it when the tile is moved
+            pos = inferred
+            if len(tile.seed_centers) >= 4:
+                d = np.linalg.norm(tile.seed_centers - inferred[None, :], axis=1)
+                pos = tile.seed_centers[int(d.argmin())]
+            pl.add_mesh(pv.Sphere(radius=1.6, center=pos),
+                        name="tile_%d_inferred" % tid, style="wireframe",
+                        color=_INFERRED_SEED_COLOR, line_width=1,
+                        pickable=False, reset_camera=False)
 
     def _redraw_tiles(self):
         for i in range(len(self.tiles)):
@@ -1249,8 +1428,9 @@ class _PlannerApp:
             return
 
         placed_c, placed_a = tiles_to_seed_arrays(self.tiles)
-        det_c = np.asarray(self.result.seeds.centers_ras, dtype=float).reshape(-1, 3)
-        det_a = np.asarray(self.result.seeds.axes_ras, dtype=float).reshape(-1, 3)
+        # detected seeds owned by a tile on the board are that tile's seeds
+        # (already in placed_c at the tile's current position): never twice
+        det_c, det_a = self._free_detected()
         centers = np.vstack([det_c, placed_c])
         axes = np.vstack([det_a, placed_a])
         if centers.shape[0] == 0:
@@ -1386,9 +1566,9 @@ class _PlannerApp:
             os.makedirs(out_dir, exist_ok=True)
             path = os.path.join(out_dir, _time.strftime("plan_%Y%m%d_%H%M%S.csv"))
         try:
-            n = export_plan_csv(path, self.tiles,
-                                self.result.seeds.centers_ras,
-                                self.result.seeds.axes_ras, rx_cgy=self.rx_cgy)
+            det_c, det_a = self._free_detected()
+            n = export_plan_csv(path, self.tiles, det_c, det_a,
+                                rx_cgy=self.rx_cgy)
         except Exception as exc:
             self._update_status("save failed: %s" % exc)
             return None
@@ -1533,10 +1713,11 @@ class _PlannerApp:
 
 
 def run_planner(result: PipelineResult, rx_cgy: float = 6000.0,
-                suggest: bool = False):
+                suggest: bool = False, prior=None):
     """Open the interactive planner window (blocking).  ``suggest`` starts
-    with the auto-inferred tile configuration on the board."""
-    app = _PlannerApp(result, rx_cgy=rx_cgy, off_screen=False)
+    with the inferred tile configuration on the board; ``prior`` is an
+    :class:`gtcore.tiles.auto.ImplantPrior` (OR counts, all optional)."""
+    app = _PlannerApp(result, rx_cgy=rx_cgy, off_screen=False, prior=prior)
     if suggest:
         app.suggest_tiles()
     app.show()
@@ -1544,7 +1725,7 @@ def run_planner(result: PipelineResult, rx_cgy: float = 6000.0,
 
 
 def snapshot_planner(result: PipelineResult, actions: Sequence, path: str,
-                     rx_cgy: float = 6000.0):
+                     rx_cgy: float = 6000.0, prior=None):
     """Drive the planner programmatically and render to a PNG (off-screen).
 
     ``actions`` items may be:
@@ -1557,7 +1738,7 @@ def snapshot_planner(result: PipelineResult, actions: Sequence, path: str,
     - ``"interference"`` or ``{"interference": True|False}``: toggle or set
       inter-seed attenuation for subsequent updates.
     """
-    app = _PlannerApp(result, rx_cgy=rx_cgy, off_screen=True)
+    app = _PlannerApp(result, rx_cgy=rx_cgy, off_screen=True, prior=prior)
     try:
         for act in actions:
             if isinstance(act, str):

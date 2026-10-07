@@ -62,10 +62,49 @@ near-square junk quads never inflate n (tests).
 every case the marginal gain sits far above λ = 3.5 up to the true n and
 then drops to zero (no disjoint candidate) or below λ.
 
+## Cover pass: explain every seed (2026-09-02, Jacob's request)
+
+Pressing `T` on the PostOp CT gave 3-4 tiles for a 27-seed cluster and
+said nothing about the other seeds.  The count-free search above is
+conservative *by construction* (thin-cut gates, penalty 3.5) and on a 2 mm
+gappy export real tiles fail the gates or score below the penalty; a tile
+with one seed missed by detection was not modelled at all.  Rules agreed
+with Jacob: when the OR count is unknown assume **0 half tiles**; **1- and
+3-seed tiles do not exist** (a triplet is a 4-seed tile with a detection
+miss); explain every seed as well as the geometry allows and *say* what
+is left.
+
+| Piece | Where | What |
+|---|---|---|
+| `ImplantPrior` | `tiles/auto.py`, `gt plan --tiles/--half/--seeds` | OR counts as optional trusted inputs; the planner status line always shows the assumption in force. `fit_tiles_prior` = count-constrained fit when known (cover pass only for the shortfall), auto otherwise. |
+| spacing tolerance | `spacing_tolerance(spacing)` | `tol` = max voxel dimension in mm (>= 1). The *supported* selection keeps its thin-cut calibration; only the cover-pass gates scale. Above 1.2 mm the seed PCA axes are degenerate (single-slice pancakes), so the cover pass neither gates nor fits on axes. |
+| relaxed quads | `_cover_pass` | loose tier re-run on the leftovers inside the implant region (25 mm of a supported tile) with rms <= 1.2·tol, E <= 0.20, similarity <= 3·tol, penalty `LAMBDA_COVER = 1.0`. |
+| triplet completion | `_enumerate_triplets` | L-shaped triplets (arms 6-12.5 mm ± (tol-1), corner 65-115°) completed by the parallelogram rule, then the 4th corner re-placed where the bent-tile model fitted to the 3 real seeds predicts it (3 fixed-point rounds); rms <= 1.0·tol; score handicap 1.5 vs a quad; skipped when a detected candidate already occupies the corner (that quad was judged upstream). |
+| reporting | `AutoFitResult` | `tentative_tiles` (confidence `"tentative"`, `inferred_seed_ras`), `unassigned_indices` (in-implant leftovers), `clutter_indices` (far), `capped`. `tiles` / `n_selected` unchanged. No supported tile -> no implant region -> nothing tentative (clutter-only scans stay at 0). |
+| planner | `planner.py` | orange thin outline = tentative, hollow orange sphere = inferred seed, magenta = unassigned detected seed; status: `suggested 6 tile(s): 4 supported + 2 tentative`. |
+| pipeline | `reconstruct(n_seeds_expected=)` | with `--seeds K` on a coarse scan: HU floor lowered 1000 -> 900 -> 800 while the in-implant count rises toward K without flooding (<= K+8, <= 60); logged in `vol.meta["seed_search"]`. |
+
+Results: synthetic phantom (0.8 mm, 3 tiles, rng 2) with any one of the 12
+seeds deleted -> 2 supported + 1 tentative tile, inferred seed within
+0.3-2.1 mm of the truth seed, every seed explained.  Phantom thick-sliced
+to 1.4 mm (rng 1): calibrated selection 2 of 3 tiles, cover pass recovers
+the third (axis-free), nothing unassigned; at 2.1 mm one seed is lost by
+detection and the tile comes back by triplet completion.  Real PostOp CT:
+see `docs/data-notes.md`.
+
 ## Known limits / next
 
-- 3-of-4-seed tiles (one seed missed by detection) are not modelled; a
-  triplet tier with an L-shaped rigid fit would recover them.
+- The inferred seed of a triplet is a model prediction (bent tile fitted
+  to three seeds), good to ~1-2 mm on a conformed tile; it is drawn hollow
+  and never enters the supported set.
+- A triplet's bent-tile residual is not discriminative (three points
+  against a pose + scale + two-curvature model fit to ~0.05 mm on the
+  PostOp case); the arm-length / corner-angle windows and the occupied-
+  corner rule carry the rejection, which is why the tier is tentative.
+- Split-blob duplicates on coarse scans (two candidates ~3 mm apart from
+  one seed, PostOp seeds 34/35 and 4/37) stay unassigned rather than being
+  merged; a coarse-scan merge step (candidates closer than a seed length
+  that no tile can use) is the next detection improvement.
 - Half tiles in auto mode need either the OR's confirmation
   (`n_half_tiles` non-zero / `--half 1`) or, with a cavity mesh, a surface
   verdict on the reported `half_candidates` (not yet wired).

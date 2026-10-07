@@ -1,9 +1,12 @@
 """Tile-configuration inference: seed candidates -> GammaTile poses."""
 from .auto import (
     AutoFitResult,
+    ImplantPrior,
     ScorePoint,
     deformable_score,
     fit_tiles_auto,
+    fit_tiles_prior,
+    spacing_tolerance,
     to_placed_tiles,
 )
 from .deform import (
@@ -20,8 +23,9 @@ from .model import RigidFit, RigidTile, TilePose6, fit_rigid
 from .surface import SurfaceFit, fit_on_surface
 
 __all__ = ["fit_tiles", "TilePose", "TileFitResult",
-           "fit_tiles_auto", "AutoFitResult", "ScorePoint", "deformable_score",
-           "to_placed_tiles",
+           "fit_tiles_auto", "fit_tiles_prior", "ImplantPrior",
+           "spacing_tolerance", "AutoFitResult", "ScorePoint",
+           "deformable_score", "to_placed_tiles",
            "RigidTile", "TilePose6", "RigidFit", "fit_rigid",
            "DeformParams", "DeformableFit", "fit_deformable",
            "deformed_points", "deformed_seed_points", "deformed_footprint",

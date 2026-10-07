@@ -16,7 +16,8 @@ From this folder (`gt.bat` wraps the project venv — no activation needed):
 .\gt view  <dicom-folder-or-file>   load a CT, run the pipeline, open the 3D viewer
 .\gt view  <scan> --tiles auto      ... and infer the tile configuration with NO implant count
 .\gt plan  <dicom-folder-or-file>   pipeline + interactive tile planner (drag/drop + isodoses)
-.\gt plan  <scan> --suggest         ... starting from the auto-inferred tiles (planner key 'g')
+.\gt plan  <scan> --suggest         ... starting from the inferred tiles (planner key 'T')
+.\gt plan  <scan> --tiles 6 --half 0 --seeds 24   ... telling it what the OR team knows (all optional)
 .\gt view                           either command, phantom mode (synthetic ground truth)
 .\gt demo                           full phantom demo -> output\ (NRRD, PLY meshes, figures, CSV)
 .\gt test                           run the test suite (424 tests)
@@ -28,8 +29,8 @@ Planner controls (the same legend is on screen; `?` collapses it):
 |---|---|---|
 | Place | hover the blue wall | white **ghost tile** previews the next drop (red = would overlap) |
 | | right-click or `P` | drop the tile there; `H` = next tile full / half |
-| | `T` | **suggest tiles**: infer the implant configuration from the detected seeds with no count (`gt plan --suggest` starts this way); suggestions are ordinary tiles afterwards |
-| Adjust | left-drag on a tile | grab it by its quad or seed capsules (no modifier) and slide it along the wall; hovered tile lights up |
+| | `T` | **suggest tiles**: infer the implant configuration from the detected seeds (`gt plan --suggest` starts this way). With `--tiles N` the OR count is a trusted input; without it the count is inferred, **no half tiles are assumed** and every tile has 4 seeds. Gold outline = supported by the calibrated fit; **orange outline = tentative** (cover pass / triplet completion: verify it); a hollow orange sphere is a seed detection missed, inferred from its 3 tile-mates; **magenta seeds** are detected seeds inside the implant no tile explains (place one by hand). Suggestions are ordinary tiles afterwards, and they **own** the detected seeds they were built from: those seeds move with the tile (they are not drawn separately) and are counted once in dose and export; deleting the tile releases them |
+| Adjust | left-drag on a tile | grab it by its quad or seed capsules (no modifier) and slide it along the wall; hovered tile lights up. On a scan with no cavity or shell mesh (e.g. a degraded export) tiles move rigidly in free space instead |
 | | Ctrl + left-drag on the wall | slide the *selected* tile from anywhere (forgiving mode); a press that grabs nothing says so in the status bar |
 | | gold outline | tile fitted **from the scan** (the implant); green = placed by hand. Backspace clears only hand-placed tiles |
 | | `Tab`, arrows, `[` `]` | select next tile, nudge 2 mm, rotate 10 deg |
@@ -69,9 +70,17 @@ Planner controls (the same legend is on screen; `?` collapses it):
    (`tiles.deform`), count-free model selection with a per-tile penalty
    and a score-saturation curve (`tiles.auto`), and a stick-to-surface
    cross-check when a cavity mesh exists (`tiles.surface`: footprint on
-   the wall, attached / detached verdict). Geometry constants are cited in
-   `gtcore.geometry` (seed plane 3.0 mm from the tissue face). Notes:
-   `docs/autogen-notes.md`.
+   the wall, attached / detached verdict). **Cover pass:** the calibrated
+   selection is conservative (thin-cut gates, 3.5 penalty), so on coarse or
+   gappy exports a second, explicitly *tentative* tier runs on the seeds it
+   leaves inside the implant region: relaxed quads with spacing-scaled
+   gates, then **triplet completion** (3 seeds forming an L of the tile
+   square are completed to a full tile, the 4th seed inferred and flagged;
+   1- and 3-seed tiles do not exist). What remains is reported as
+   unassigned, never dropped silently. `ImplantPrior` carries the OR's
+   counts when known (`fit_tiles_prior`); unknown means 0 half tiles.
+   Geometry constants are cited in `gtcore.geometry` (seed plane 3.0 mm
+   from the tissue face). Notes: `docs/autogen-notes.md`.
 6. **`gtcore.dose`** — TG-43U1 line-source engine for IsoRay Proxcelan CS-1
    Rev2 (`engine.TG43Engine`, vectorized `compute_dose_grid` /
    `dose_at_points`, sub-voxel `isodose_surfaces`). The five physics defects
@@ -123,9 +132,9 @@ every stage.
 | Inter-seed attenuation (12 seeds, capsules only) | mean -0.27% (flat grid) / -0.65% (conformed) at >=25% rx; worst voxel 0.84; +14-20% runtime |
 | Tile shadowing flag (prescription depth, 5 mm) | coplanar tiles <0.1%, conformed phantom implant 0.56% (both quiet); a tile stacked 4 mm behind another 5.7% (flagged) |
 | Tile-carrier term (unmeasured density) | swings +19% to 0% over rho 0.15->1.00 g/cm^3 — **off by default**; figure `output/validation_interference.png` |
-| Real post-op CT (degraded export: 2 mm + gaps) | 4 complete tiles recovered, grid residuals 0.28–0.94 mm |
+| Real post-op CT (degraded export: 2 mm + gaps) | 4 complete tiles recovered, grid residuals 0.28–0.94 mm; cover pass adds 2 tentative tiles by triplet completion (1 seed each inferred) and reports 5 in-implant seeds unassigned (split-blob duplicates + singles), 26 far candidates as clutter |
 | Physical 8-tile printed phantom (157 slices, 1 mm, O-MAR) | **32/32 seeds, 8/8 tiles**, residuals 0.32–1.38 mm; one physically crumpled tile recovered via the count constraint and flagged degraded |
-| **Automatic tile creation, no count** (`scripts/validation_autogen.py`) | synthetic 54/60 exact (30/30 at 0.8 mm; the 6 misses at 1.2 mm are seed-detection misses the counted fit shares), centre 0.12 mm mean, normal 2.4°; printed phantom **8/8 incl. the crumpled tile** (0.46 mm rms, 288° fold, no count fallback); post-op cluster n = 4 by score saturation |
+| **Automatic tile creation, no count** (`scripts/validation_autogen.py`) | synthetic 54/60 exact (30/30 at 0.8 mm; the 6 misses at 1.2 mm are seed-detection misses the counted fit shares), centre 0.12 mm mean, normal 2.4°; printed phantom **8/8 incl. the crumpled tile** (0.46 mm rms, 288° fold, no count fallback); post-op cluster n = 4 by score saturation; **cover pass** (tentative tier, `tests/test_tiles_cover.py`): any single missed seed on the phantom is completed to a full tile (inferred seed 0.3–2.1 mm from truth), 1.4 mm thick-slice phantom 3/3 tiles (2 supported + 1 tentative), printed phantom unchanged at 8/8 with 0 tentative |
 
 Per-dataset findings and data-quality caveats: `docs/data-notes.md`.
 

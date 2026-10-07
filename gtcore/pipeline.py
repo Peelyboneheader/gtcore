@@ -176,11 +176,35 @@ def seed_detection_params(spacing):
                 min_elong=0.0, max_elong=float("inf"))
 
 
+# coarse-scan threshold search when the implanted seed count is known:
+# each step re-detects at a lower HU floor and is kept only while it moves
+# the in-implant count toward the expected one without flooding
+SEED_SEARCH_THRESHOLDS_HU = (1000.0, 900.0, 800.0)
+SEED_SEARCH_MAX_CANDIDATES = 60     # C(N,4) quad enumeration stays tractable
+SEED_SEARCH_RADIUS_MM = 30.0        # "near the implant": around the first cluster
+
+
+def _count_near(centers, ref, radius_mm):
+    if ref is None or not len(centers):
+        return 0
+    d = np.linalg.norm(np.asarray(centers, float) - ref[None, :], axis=1)
+    return int((d <= radius_mm).sum())
+
+
 def reconstruct(vol: Volume, verbose: bool = True,
                 n_full_tiles: Optional[Union[int, str]] = None,
                 n_half_tiles: int = 0,
-                complete_degraded: bool = True) -> PipelineResult:
+                complete_degraded: bool = True,
+                n_seeds_expected: Optional[int] = None) -> PipelineResult:
     """Run the full reconstruction pipeline on one CT volume.
+
+    ``n_seeds_expected`` (the implanted seed count, when the OR team knows
+    it) is a consistency check on detection: on coarse scans (> 1.2 mm
+    slices) where partial volume hides faint seeds, detection is repeated
+    at lower HU floors (``SEED_SEARCH_THRESHOLDS_HU``) while that raises the
+    number of in-vault candidates near the implant toward the expected
+    count without flooding (``SEED_SEARCH_MAX_CANDIDATES``).  Each step is
+    logged in ``vol.meta["seed_search"]``.
 
     When ``n_full_tiles`` is given (the OR team's implant count; ``None``
     skips tile fitting entirely), the shape-filtered seed candidates are
@@ -259,6 +283,55 @@ def reconstruct(vol: Volume, verbose: bool = True,
         if verbose:
             print("  vault filter: %d seeds inside the cranial interior" % len(seeds))
     vol.meta["vault_filter"] = vault_info
+
+    # count-driven threshold search (coarse scans only; see docstring)
+    search_log = []
+    dz = float(np.max(vol.spacing))
+    if (n_seeds_expected is not None and int(n_seeds_expected) > 0
+            and vault_info["applied"] and dz > 1.2):
+        expected = int(n_seeds_expected)
+        ref = np.median(seeds.centers_ras, axis=0) if len(seeds) else None
+        have = _count_near(seeds.centers_ras, ref, SEED_SEARCH_RADIUS_MM)
+        search_log.append(dict(hu=params["hu_threshold"], near=have,
+                               total=int(len(seeds)), kept=True))
+        interior = ndimage.binary_dilation(masks["cranial_interior"], iterations=2)
+        for thr in SEED_SEARCH_THRESHOLDS_HU:
+            if have >= expected or thr >= params["hu_threshold"]:
+                break
+            raw2 = detect_seed_candidates(vol, hu_threshold=thr,
+                                          min_mm3=params["min_mm3"],
+                                          max_mm3=params["max_mm3"])
+            s2 = filter_seed_shaped(raw2, min_mm3=params["min_mm3"],
+                                    max_mm3=params["max_mm3"],
+                                    min_elong=params["min_elong"],
+                                    max_elong=params["max_elong"])
+            if len(s2):
+                ijk = np.atleast_2d(vol.ras_to_index(s2.centers_ras))
+                kji = np.clip(np.round(ijk[:, ::-1]).astype(int), 0,
+                              np.array(interior.shape) - 1)
+                inside = interior[kji[:, 0], kji[:, 1], kji[:, 2]]
+                s2 = SeedCandidates(
+                    mask=s2.mask, centers_ras=s2.centers_ras[inside],
+                    axes_ras=s2.axes_ras[inside],
+                    volumes_mm3=s2.volumes_mm3[inside],
+                    elongations=s2.elongations[inside])
+            near2 = _count_near(s2.centers_ras, ref, SEED_SEARCH_RADIUS_MM)
+            keep = (near2 > have and near2 <= max(expected + 8, have)
+                    and near2 <= SEED_SEARCH_MAX_CANDIDATES)
+            search_log.append(dict(hu=thr, near=near2, total=int(len(s2)),
+                                   kept=bool(keep)))
+            if verbose:
+                print("  seed search @ %.0f HU: %d near the implant (want %d)"
+                      " -> %s" % (thr, near2, expected,
+                                  "kept" if keep else "rejected"))
+            if not keep:
+                break
+            seeds, have = s2, near2
+        if verbose:
+            print("  seed count check: %d near the implant vs %d implanted"
+                  " (recall %.2f)" % (have, expected,
+                                      min(1.0, have / float(expected))))
+    vol.meta["seed_search"] = dict(expected=n_seeds_expected, steps=search_log)
 
     # Implant assessment uses only candidates AWAY from bone: dense inner-
     # table spots pass every filter and even form chance quads with tile-like

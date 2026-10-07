@@ -347,6 +347,40 @@ def rotate_on_wall(mesh, tile, angle_rad):
                         kind=tile.kind)
 
 
+def translate_free(tile, delta_ras):
+    """Move a tile rigidly with NO wall to conform to (a scan without a
+    segmented cavity or phantom shell): every point of the tile shifts by
+    ``delta``; normal, axis and seed axes are unchanged."""
+    d = np.asarray(delta_ras, dtype=float).reshape(3)
+    return PlacedTile(
+        kind=tile.kind, center_ras=tile.center_ras + d,
+        normal_ras=tile.normal_ras.copy(), axis_ras=tile.axis_ras.copy(),
+        seed_centers=tile.seed_centers + d, seed_axes=tile.seed_axes.copy(),
+        corners_ras=tile.corners_ras + d,
+        anchor_ras=None if tile.anchor_ras is None else tile.anchor_ras + d)
+
+
+def rotate_free(tile, angle_rad):
+    """Spin a tile rigidly about its own normal through its centre (no wall
+    to conform to)."""
+    n = tile.normal_ras
+    c = tile.center_ras
+    ang = float(angle_rad)
+
+    def rot_pts(p):
+        p = np.asarray(p, dtype=float)
+        return np.array([c + _rodrigues(q - c, n, ang) for q in p])
+
+    return PlacedTile(
+        kind=tile.kind, center_ras=c.copy(), normal_ras=n.copy(),
+        axis_ras=_rodrigues(tile.axis_ras, n, ang),
+        seed_centers=rot_pts(tile.seed_centers),
+        seed_axes=np.array([_rodrigues(a, n, ang) for a in tile.seed_axes]),
+        corners_ras=rot_pts(tile.corners_ras),
+        anchor_ras=None if tile.anchor_ras is None
+        else c + _rodrigues(tile.anchor_ras - c, n, ang))
+
+
 def tiles_to_seed_arrays(tiles):
     """Stack all placed tiles' seeds into ``(centers (M,3), axes (M,3))``."""
     if not tiles:

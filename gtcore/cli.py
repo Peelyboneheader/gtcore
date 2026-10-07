@@ -55,11 +55,14 @@ def cmd_view(args):
 def cmd_plan(args):
     from .pipeline import reconstruct
     from .planner import run_planner
+    from .tiles import ImplantPrior
 
     vol, title = _load(args.path, args.spacing)
     print("volume %s @ %s mm" % (vol.array.shape, tuple(round(s, 2) for s in vol.spacing)))
-    result = reconstruct(vol)
-    run_planner(result, rx_cgy=args.rx, suggest=bool(args.suggest))
+    prior = ImplantPrior(n_full=args.tiles, n_half=args.half, n_seeds=args.seeds)
+    print("implant prior:", prior.describe())
+    result = reconstruct(vol, n_seeds_expected=prior.n_seeds)
+    run_planner(result, rx_cgy=args.rx, suggest=bool(args.suggest), prior=prior)
     return 0
 
 
@@ -109,7 +112,18 @@ def main(argv=None):
                      help="prescription dose in cGy for the isodose levels")
     pln.add_argument("--suggest", action="store_true",
                      help="start with the tile configuration inferred from "
-                          "the detected seeds (same as pressing 'g')")
+                          "the detected seeds (same as pressing 'T')")
+    pln.add_argument("--tiles", type=int, default=None,
+                     help="implanted FULL tile count when the OR team knows "
+                          "it (trusted input for 'T'); omit if unknown")
+    pln.add_argument("--half", type=int, default=0,
+                     help="implanted HALF (2x1) tile count (default 0: with "
+                          "no OR confirmation, assume no half tiles)")
+    pln.add_argument("--seeds", type=int, default=None,
+                     help="implanted seed count (4 per full, 2 per half): "
+                          "detection is checked against it and, on coarse "
+                          "scans, the HU threshold is lowered stepwise "
+                          "until that many seeds are found near the implant")
     pln.set_defaults(fn=cmd_plan)
 
     d = sub.add_parser("demo", help="full phantom demo, writes output/ files")

@@ -74,3 +74,30 @@ shell-HU context, peak HU, elongation). Resolution: the verdict is EVIDENCE,
 not authority -- surgeon knows whether an implant exists; the principled
 discriminator (model-selection with deformable tile physics) is the
 feature/tile-autogen work.
+
+## PostOp CT — "T only gives 3 tiles" (2026-09-02)
+
+Jacob reported 3 suggested tiles for a cluster of many seeds.  Re-run of
+the exact planner path on the current folder (64 slices present, 89-slice
+2.0 mm grid, 52 interpolated; 1200 HU adaptive floor): 731 blobs -> 53
+in-vault candidates -> calibrated auto fit **n = 4** ("no further tile
+candidate", not the node cap; marginal gains 7.2 / 7.2 / 6.5 / 6.4 all
+far above the 3.5 penalty, no 5th disjoint candidate).  The 3 seen earlier
+is consistent with an older sync state of the folder (fewer slices -> a
+different grid and threshold branch); the search itself is exact.
+
+Why the 37 leftovers are not tiles: 26 are far from the implant (bone /
+streak clutter, now reported as `clutter`); of the 11 inside the cluster,
+two pairs are split-blob duplicates 3.0-3.4 mm apart (34/35, 4/37), the
+only two 4-candidate groups with tile-like chords have bent-tile residuals
+of 2.0-2.5 mm and incoherent axes, and several L-shaped triplets exist
+(arms 8-12 mm) — i.e. tiles with one seed lost to partial volume.
+
+With the cover pass (`docs/autogen-notes.md`): **4 supported + 2 tentative
+tiles** (both by triplet completion, inferred seeds flagged), **5 seeds
+unassigned** inside the implant (the two duplicates and two singles) and
+shown magenta in the planner; no half tiles assumed.  `--tiles 6` gives
+the same reading with an explicit shortfall message; `--tiles 4` keeps the
+4 and lists 11 unassigned.  Every remaining gap on this export is a
+detection limit of the 2 mm interpolated series, not a fitting one; the
+thin-cut export is still the real fix.
