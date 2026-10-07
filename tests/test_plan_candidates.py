@@ -300,6 +300,32 @@ def test_visible_faces_hollow_sphere_isolates_inner_wall(hollow):
     assert 0 < vis_out[outer].sum() < outer.sum()
 
 
+def test_visible_faces_chunked_is_bit_identical(hollow, flat):
+    # the angular broad phase equals the chunked trimesh cast, and neither
+    # depends on the chunk size (rays are independent)
+    ref = C.visible_faces_trimesh(hollow, [0.0, 0.0, 0.0], chunk=10 ** 9)
+    assert ref.sum() == 1280
+    for chunk in (1, 7, 400, 2000):
+        assert np.array_equal(C.visible_faces_trimesh(hollow, [0.0, 0.0, 0.0], chunk=chunk), ref)
+        assert np.array_equal(C.visible_faces(hollow, [0.0, 0.0, 0.0], chunk=chunk), ref)
+    off = [12.0, -5.0, 3.0]                       # off-centre: grazing hits differ per face
+    ref_off = C.visible_faces_trimesh(hollow, off, chunk=10 ** 9)
+    assert np.array_equal(C.visible_faces_trimesh(hollow, off, chunk=333), ref_off)
+    assert np.array_equal(C.visible_faces(hollow, off), ref_off)
+    # a 20 480-face icosphere seen from an off-centre interior point
+    big = trimesh.creation.icosphere(subdivisions=5, radius=30.0)
+    assert len(big.faces) == 20480
+    a = C.visible_faces(big, [10.0, 4.0, -6.0])            # default chunk (400)
+    b = C.visible_faces(big, [10.0, 4.0, -6.0], chunk=5000)
+    c = C.visible_faces_trimesh(big, [10.0, 4.0, -6.0], chunk=2000)
+    assert np.array_equal(a, b) and np.array_equal(a, c) and a.all()
+    # wide-cone triangles (the box's big side / bottom faces) take the brute path
+    mesh, _top = flat
+    assert np.array_equal(C.visible_faces(mesh, [3.0, -4.0, -20.0]),
+                          C.visible_faces_trimesh(mesh, [3.0, -4.0, -20.0]))
+    assert C.VISIBLE_RAY_CHUNK == 400
+
+
 def test_candidates_on_inner_wall_of_hollow_shell(hollow):
     vis = C.visible_faces(hollow, [0.0, 0.0, 0.0])
     cs = C.build_candidates(hollow, h_mm=8.0, n_spins=2, eligible_faces=vis)

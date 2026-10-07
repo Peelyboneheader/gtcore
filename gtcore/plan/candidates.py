@@ -86,6 +86,12 @@ VISIBLE_TOL_MM = 0.5
 # visible_faces: the first hit counts as the face itself when the hit point
 # is within this distance of the face centroid (grazing an edge).
 
+VISIBLE_RAY_CHUNK = 400
+# visible_faces rays per batch.  For the angular broad phase this only
+# bounds the (ray, wide-triangle) pair arrays; for the trimesh reference
+# cast it bounds the per-ray candidate arrays (~1.7 GB peak at 400 rays on
+# an 87k-face shell, 4.7 GiB unchunked on the 72k-face printed phantom).
+
 ELLIPSOID_P = 1.6075
 # Knud Thomsen approximation exponent for the ellipsoid surface area.
 
@@ -519,39 +525,194 @@ def build_candidates(mesh, h_mm: float = DEFAULT_H_MM, n_spins: Optional[int] = 
 
 
 # ---------------------------------------------------------- visible faces
-def visible_faces(mesh, center_ras) -> np.ndarray:
-    """``(F,)`` bool: faces whose centroid is the FIRST hit of a ray from
-    ``center_ras`` toward it (the hit triangle is the face itself, or the
-    hit point lies within ``VISIBLE_TOL_MM`` of the centroid).  O(F) rays.
-    """
-    _check_mesh(mesh, "visible_faces")
-    centre = np.asarray(center_ras, dtype=float).reshape(3)
-    cents = np.asarray(mesh.triangles_center, dtype=float)
-    n_faces = cents.shape[0]
-    dirs = cents - centre[None, :]
-    lengths = np.linalg.norm(dirs, axis=1)
-    good = lengths > 1e-9
-    out = np.zeros(n_faces, dtype=bool)
-    if not good.any():
-        return out
-    face_of_ray = np.flatnonzero(good)
-    origins = np.tile(centre, (face_of_ray.size, 1))
+def _first_hits_trimesh(mesh, centre: np.ndarray, dirs: np.ndarray):
+    """First hit of each ray ``centre + t * dirs[k]`` through
+    ``mesh.ray.intersects_location``: ``(hit_tri (K,), hit_loc (K, 3))``
+    with ``-1`` / NaN for misses.  One intersector call (memory grows with
+    the broad-phase candidates of every ray: chunk the caller)."""
+    k = dirs.shape[0]
+    hit_tri = np.full(k, -1, dtype=int)
+    hit_loc = np.full((k, 3), np.nan)
+    origins = np.tile(centre, (k, 1))
     locs, ray_idx, tri_idx = mesh.ray.intersects_location(
-        ray_origins=origins, ray_directions=dirs[good], multiple_hits=True)
+        ray_origins=origins, ray_directions=dirs, multiple_hits=True)
     locs = np.atleast_2d(np.asarray(locs, dtype=float)).reshape(-1, 3)
     ray_idx = np.asarray(ray_idx, dtype=int).reshape(-1)
     tri_idx = np.asarray(tri_idx, dtype=int).reshape(-1)
+    return _select_first(centre, k, locs, ray_idx, tri_idx, hit_tri, hit_loc)
+
+
+def _select_first(centre, k, locs, ray_idx, tri_idx, hit_tri, hit_loc):
+    """Keep the smallest-distance hit per ray (stable in the hit order)."""
     if ray_idx.size == 0:
-        return out
-    # first hit per ray = the smallest distance from the centre
+        return hit_tri, hit_loc
     t_hit = np.linalg.norm(locs - centre[None, :], axis=1)
     order = np.lexsort((t_hit, ray_idx))
     ray_sorted = ray_idx[order]
     first = order[np.concatenate([[True], ray_sorted[1:] != ray_sorted[:-1]])]
-    f = face_of_ray[ray_idx[first]]
-    self_hit = tri_idx[first] == f
-    near = np.linalg.norm(locs[first] - cents[f], axis=1) <= VISIBLE_TOL_MM
-    out[f[self_hit | near]] = True
+    hit_tri[ray_idx[first]] = tri_idx[first]
+    hit_loc[ray_idx[first]] = locs[first]
+    return hit_tri, hit_loc
+
+
+def _first_hits_angular(mesh, centre: np.ndarray, dirs: np.ndarray,
+                        chunk: int = VISIBLE_RAY_CHUNK):
+    """Same as :func:`_first_hits_trimesh` for rays from ONE origin, with an
+    angular broad phase instead of trimesh's ray-box one.
+
+    Seen from ``centre``, a triangle occupies a spherical triangle that lies
+    inside the cap of angular radius ``theta_t`` = max angle between its
+    centroid direction and its vertex directions (a cap of radius < pi/2 is
+    convex), so a ray can only hit it if the chord between the ray's unit
+    direction and the centroid direction is <= ``2 sin(theta_t / 2)``.  A
+    cKDTree on the unit centroid directions answers that for every ray in
+    one ball query (~10 candidates per ray on a 70k-face shell instead of
+    thousands); triangles with a wide cone (``theta_t`` > 3 x median, or
+    >= pi/2) are paired with every ray instead.  The narrow phase is
+    trimesh's own (``intersections.planes_lines`` + barycentric containment
+    at ``tol.zero`` + the forward test), so the hits are the planner's.
+    """
+    from scipy.spatial import cKDTree
+    from trimesh import intersections as _tm_int
+    from trimesh import triangles as _tm_tri
+    from trimesh.constants import tol as _tol
+
+    k = dirs.shape[0]
+    hit_tri = np.full(k, -1, dtype=int)
+    hit_loc = np.full((k, 3), np.nan)
+    if k == 0:
+        return hit_tri, hit_loc
+    tris = np.asarray(mesh.triangles, dtype=float)
+    face_n = np.asarray(mesh.face_normals, dtype=float)
+    rel_c = tris.mean(axis=1) - centre[None, :]
+    dist_c = np.linalg.norm(rel_c, axis=1)
+    rel_v = tris - centre[None, None, :]
+    dist_v = np.linalg.norm(rel_v, axis=2)
+    ok = (dist_c > 1e-9) & (dist_v > 1e-9).all(axis=1)
+    unit_c = np.zeros_like(rel_c)
+    unit_c[ok] = rel_c[ok] / dist_c[ok][:, None]
+    cosang = np.ones(tris.shape[0])
+    if ok.any():
+        unit_v = rel_v[ok] / dist_v[ok][:, :, None]
+        cosang[ok] = (unit_v * unit_c[ok][:, None, :]).sum(axis=2).min(axis=1)
+    theta = np.arccos(np.clip(cosang, -1.0, 1.0))
+    wide = ~ok | (theta >= np.pi / 2 - 1e-6)
+    theta_cut = 3.0 * float(np.median(theta[~wide])) if (~wide).any() else 0.0
+    wide |= theta > theta_cut
+    if wide.mean() > 0.05 and (~wide).any():            # not a few outliers
+        theta_cut = float(theta[~(~ok | (theta >= np.pi / 2 - 1e-6))].max())
+        wide = ~ok | (theta >= np.pi / 2 - 1e-6)
+    narrow_idx = np.flatnonzero(~wide)
+    wide_idx = np.flatnonzero(wide)
+    tree = cKDTree(unit_c[narrow_idx]) if narrow_idx.size else None
+    radius = 2.0 * np.sin(min(theta_cut, np.pi / 2) / 2.0) + 1e-9
+
+    unit_d = dirs / np.maximum(np.linalg.norm(dirs, axis=1), 1e-300)[:, None]
+    # chunk so the (ray, triangle) pair arrays stay small even with a wide set
+    chunk = max(1, int(chunk))
+    if wide_idx.size:
+        chunk = max(1, min(chunk, 200_000 // wide_idx.size))
+    for lo in range(0, k, chunk):
+        hi = min(k, lo + chunk)
+        m = hi - lo
+        ri_parts, ti_parts = [], []
+        if tree is not None:
+            lists = tree.query_ball_point(unit_d[lo:hi], radius, return_sorted=False)
+            lens = np.fromiter((len(l) for l in lists), dtype=int, count=m)
+            if lens.sum():
+                ri_parts.append(np.repeat(np.arange(m), lens))
+                ti_parts.append(narrow_idx[np.concatenate(
+                    [np.asarray(l, dtype=int) for l in lists if len(l)])])
+        if wide_idx.size:
+            ri_parts.append(np.repeat(np.arange(m), wide_idx.size))
+            ti_parts.append(np.tile(wide_idx, m))
+        if not ri_parts:
+            continue
+        ri = np.concatenate(ri_parts)
+        ti = np.concatenate(ti_parts)
+        d = dirs[lo + ri]
+        loc, valid = _tm_int.planes_lines(plane_origins=tris[ti, 0, :],
+                                          plane_normals=face_n[ti],
+                                          line_origins=np.tile(centre, (ri.size, 1)),
+                                          line_directions=d)
+        if not valid.any():
+            continue
+        ri = ri[valid]
+        ti = ti[valid]
+        d = d[valid]
+        bary = _tm_tri.points_to_barycentric(tris[ti], loc)
+        hit = (bary > -_tol.zero).all(axis=1) & (bary < 1.0 + _tol.zero).all(axis=1)
+        if not hit.any():
+            continue
+        ri, ti, loc, d = ri[hit], ti[hit], loc[hit], d[hit]
+        forward = ((loc - centre[None, :]) * d).sum(axis=1) > -1e-6
+        if not forward.any():
+            continue
+        sub_tri = np.full(m, -1, dtype=int)
+        sub_loc = np.full((m, 3), np.nan)
+        _select_first(centre, m, loc[forward], ri[forward], ti[forward], sub_tri, sub_loc)
+        hit_tri[lo:hi] = sub_tri
+        hit_loc[lo:hi] = sub_loc
+    return hit_tri, hit_loc
+
+
+def _visible_from_hits(cents, face_of_ray, hit_tri, hit_loc, n_faces):
+    out = np.zeros(n_faces, dtype=bool)
+    hit = hit_tri >= 0
+    if hit.any():
+        self_hit = hit_tri == face_of_ray
+        near = np.zeros(face_of_ray.size, dtype=bool)
+        near[hit] = np.linalg.norm(hit_loc[hit] - cents[face_of_ray[hit]], axis=1) <= VISIBLE_TOL_MM
+        out[face_of_ray[hit & (self_hit | near)]] = True
+    return out
+
+
+def _visible_setup(mesh, center_ras):
+    _check_mesh(mesh, "visible_faces")
+    centre = np.asarray(center_ras, dtype=float).reshape(3)
+    cents = np.asarray(mesh.triangles_center, dtype=float)
+    dirs = cents - centre[None, :]
+    good = np.linalg.norm(dirs, axis=1) > 1e-9
+    return centre, cents, dirs, np.flatnonzero(good)
+
+
+def visible_faces(mesh, center_ras, chunk: int = VISIBLE_RAY_CHUNK) -> np.ndarray:
+    """``(F,)`` bool: faces whose centroid is the FIRST hit of a ray from
+    ``center_ras`` toward it (the hit triangle is the face itself, or the
+    hit point lies within ``VISIBLE_TOL_MM`` of the centroid).
+
+    Rays share one origin, so the broad phase is angular
+    (:func:`_first_hits_angular`: one kd-tree ball query on unit directions,
+    ~10 candidate triangles per ray) and the narrow phase is trimesh's; the
+    result equals the chunked trimesh cast :func:`visible_faces_trimesh`
+    (tested bit-identical) at a small fraction of its time and memory
+    (87k-face shell: 11 s vs 596 s; peak traced 49 MB vs 1.7 GB).
+    O(F log F).
+    """
+    centre, cents, dirs, face_of_ray = _visible_setup(mesh, center_ras)
+    if face_of_ray.size == 0:
+        return np.zeros(cents.shape[0], dtype=bool)
+    hit_tri, hit_loc = _first_hits_angular(mesh, centre, dirs[face_of_ray], chunk=chunk)
+    return _visible_from_hits(cents, face_of_ray, hit_tri, hit_loc, cents.shape[0])
+
+
+def visible_faces_trimesh(mesh, center_ras, chunk: int = VISIBLE_RAY_CHUNK) -> np.ndarray:
+    """Reference :func:`visible_faces` through ``mesh.ray.intersects_location``,
+    ``chunk`` rays per call.  trimesh's pure-python broad phase keeps every
+    candidate triangle of every ray in one array (thousands per ray when
+    every ray crosses the whole shell), so the unchunked call on the printed
+    phantom's 72 396-face shell needed 4.7 GiB; 400 rays per call still
+    peak at ~1.7 GB on an 87k-face shell.  Rays are independent, so the
+    result does not depend on ``chunk``.
+    """
+    centre, cents, dirs, face_of_ray = _visible_setup(mesh, center_ras)
+    n_faces = cents.shape[0]
+    out = np.zeros(n_faces, dtype=bool)
+    chunk = max(1, int(chunk))
+    for lo in range(0, face_of_ray.size, chunk):
+        f = face_of_ray[lo:lo + chunk]
+        hit_tri, hit_loc = _first_hits_trimesh(mesh, centre, dirs[f])
+        out |= _visible_from_hits(cents, f, hit_tri, hit_loc, n_faces)
     return out
 
 
@@ -629,9 +790,10 @@ def recommend_tile_count(mesh, contraction_pct: float = 0.0, untreated_pct: floa
 
 
 __all__ = [
-    "FALLBACK_LATERAL_TOL_MM", "RAY_CHUNK", "VISIBLE_TOL_MM", "ELLIPSOID_P",
+    "FALLBACK_LATERAL_TOL_MM", "RAY_CHUNK", "VISIBLE_TOL_MM", "VISIBLE_RAY_CHUNK",
+    "ELLIPSOID_P",
     "tile_diagonal_mm", "sample_anchors", "spin_set", "count_ray_fallbacks",
     "count_ray_fallbacks_trimesh",
-    "grid_fallback_flags", "build_candidates", "visible_faces",
+    "grid_fallback_flags", "build_candidates", "visible_faces", "visible_faces_trimesh",
     "ellipsoid_area_mm2", "recommend_tile_count",
 ]
