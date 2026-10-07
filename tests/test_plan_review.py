@@ -50,7 +50,11 @@ from review_reference import (brute_force_best, greedy_forward_reference,
                               reference_conflict, reference_metrics,
                               shell_target, tiles_dose)
 
-RX_CGY = 6000.0          # clinical-style prescription for the phantom probes
+RX_CGY = 4000.0          # phantom probes: 6000 cGy at +5 mm needs ~10 tiles on
+                         # this 42 cm^2 cavity; at 4 tiles V100 would be ~0 and
+                         # the objective flat.  4000 cGy gives V100 ~ 0.5 at
+                         # N = 4 (V200 = 0), a discriminating regime.
+PHANTOM_N = 4            # tiles requested in the phantom probes
 P1_LAMBDA_HOT = 0.5      # §2 defaults, used to re-derive the P1 objective
 P1_V200_TOL = 0.10
 SOLVER_ROLES = {"greedy": "solve_greedy", "sa": "solve_sa", "milp": "solve_milp"}
@@ -527,7 +531,7 @@ def test_sa_seed_reproducible_and_no_worse_than_greedy(phantom_case,
                                                         phantom_objective):
     pts, w, rx = phantom_case["pts"], phantom_case["w"], RX_CGY
     obj, cset = phantom_objective
-    n = 4
+    n = PHANTOM_N
 
     def key(tiles):
         return tuple(sorted(tuple(np.round(t.anchor_ras, 6)) for t in tiles))
@@ -596,7 +600,7 @@ def test_greedy_result_metrics_rederived(phantom_case, phantom_objective):
     """Probe (e) on the greedy ``SolverResult.metrics``."""
     pts, w, rx = phantom_case["pts"], phantom_case["w"], RX_CGY
     obj, cset = phantom_objective
-    tiles, res = _solve("greedy", obj, cset, 4)
+    tiles, res = _solve("greedy", obj, cset, PHANTOM_N)
     mine = metrics_for_tiles(tiles, pts, w, rx)
     print("probe (e, greedy): reported %s | re-derived V100 %.4f D90 %.1f "
           "V150 %.4f V200 %.4f" % (
@@ -629,11 +633,12 @@ def optimized(phantom_case):
     import time
     optimize = _fn("optimize")
     t0 = time.time()
-    out = _try(optimize, phantom_case["mesh"], 4, rx_cgy=RX_CGY,
+    out = _try(optimize, phantom_case["mesh"], PHANTOM_N, rx_cgy=RX_CGY,
                solver="greedy", seed=0)
     dt = time.time() - t0
     tiles, report = out
-    print("optimize(greedy, N=4): %.1f s wall, %d tiles" % (dt, len(tiles)))
+    print("optimize(greedy, N=%d, rx=%.0f): %.1f s wall, %d tiles"
+          % (PHANTOM_N, RX_CGY, dt, len(tiles)))
     return tiles, report, dt
 
 
@@ -663,7 +668,7 @@ def test_reported_metrics_rederived_on_full_shell(phantom_case, optimized):
 # ============================================ (f) planner consistency
 def test_optimizer_output_never_flagged_by_planner(optimized):
     tiles, report, _ = optimized
-    assert len(tiles) == 4
+    assert len(tiles) == PHANTOM_N
     assert all(isinstance(t, PlacedTile) for t in tiles)
     assert find_overlapping_tiles(tiles) == []
     assert list(report.overlaps) == []
@@ -671,6 +676,6 @@ def test_optimizer_output_never_flagged_by_planner(optimized):
 
 def test_greedy_output_never_flagged_by_planner(phantom_objective):
     obj, cset = phantom_objective
-    tiles, res = _solve("greedy", obj, cset, 6)
+    tiles, res = _solve("greedy", obj, cset, PHANTOM_N)
     assert res.feasible
     assert find_overlapping_tiles(tiles) == []
