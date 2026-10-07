@@ -88,7 +88,18 @@ def _spread_tiles(mesh, n, avoid=(), kind="full", n_probe=40):
     return out
 
 
-def _install_fakes(monkeypatch, calls, n_recommended=12):
+def _install_fakes(monkeypatch, calls, n_recommended=12, capacity=10):
+    from gtcore.plan import api as plan_api
+
+    def packing_capacity(mesh, rx_cgy=6000.0, target=None, kind="full", h_mm=2.5,
+                         n_spins=None, eligible_faces=None, fixed_tiles=(), n_max=40,
+                         candidates=None):
+        calls.append(("capacity", len(list(fixed_tiles or ())), h_mm, n_spins))
+        return capacity, {"seconds": 0.4, "candidates_s": 0.0, "n_candidates": 300,
+                          "status": "infeasible", "at_least": False, "n_fixed": 0}
+
+    monkeypatch.setattr(plan_api, "packing_capacity", packing_capacity)
+
     def optimize(mesh, n_full, n_half=0, **kw):
         calls.append(("optimize", n_full, n_half, dict(kw)))
         fixed = list(kw.get("fixed_tiles", ()) or ())
@@ -155,9 +166,66 @@ def test_o_key_opens_the_prompt_with_the_recommendation(app, fakes):
     _key(app, "o")
     assert app._prompt is not None
     s = app._last_status
-    assert "OPTIMIZE" in s and "recommended 12" in s and "Enter = run" in s
-    assert "[12_]" in s, "the full-tile field is pre-filled with the recommendation"
+    assert "OPTIMIZE" in s and "recommended 12 (4 cm^2 rule)" in s and "Enter = run" in s
+    assert "fits at this grid: 10" in s and "capacity greedy 0.4 s" in s
+    assert "[10_]" in s, "pre-filled with min(recommendation, capacity)"
+    assert app._prompt.prefill == 10 and app._prompt.value("full") == 10
     assert fakes[0][0] == "recommend" and fakes[0][1] is True  # all faces: real cavity
+    cap = [c for c in fakes if c[0] == "capacity"][0]
+    assert cap[1] == 0 and cap[2] == 4.0 and cap[3] == 3, "planner grid, no fixed tiles"
+    _key(app, "Escape")
+
+
+def test_prompt_prefills_the_recommendation_when_it_is_smaller(app, monkeypatch):
+    calls = []
+    _install_fakes(monkeypatch, calls, n_recommended=3, capacity=10)
+    _key(app, "o")
+    assert "[3_]" in app._last_status and app._prompt.prefill == 3
+    _key(app, "Escape")
+    # capacity is computed against the fixed tiles of the current mode
+    app.drop_at(_wall_point(app))
+    app._opt_mode = "add"
+    _key(app, "o")
+    assert [c for c in calls if c[0] == "capacity"][-1][1] == 1
+    _key(app, "Escape")
+
+
+def test_infeasible_run_reopens_the_prompt_with_the_count_that_fits(app, monkeypatch):
+    from gtcore.plan import api as plan_api
+
+    calls = []
+    _install_fakes(monkeypatch, calls, n_recommended=12, capacity=10)
+    real_optimize = plan.optimize
+
+    def infeasible(mesh, n_full, n_half=0, **kw):
+        calls.append(("optimize", n_full, n_half, dict(kw)))
+        raise plan_api.InfeasibleError(
+            "greedy solver placed 4 of %d tiles: 4 fit at this grid" % n_full,
+            n_full, 4, "greedy")
+
+    monkeypatch.setattr(plan, "optimize", infeasible)
+    _key(app, "o")
+    _key(app, "Return")            # runs with the pre-filled 10
+    assert [c for c in calls if c[0] == "optimize"][0][1] == 10
+    assert len(app.tiles) == 0 and not app._history
+    s = app._last_status
+    assert "optimize failed" in s and "only 4 tiles fit at this grid" in s
+    assert "prompt reopened with 4" in s
+    assert app._prompt is not None and app._prompt.text["full"] == "4"
+    assert "[4_]" in s
+    # Enter now runs with 4 (fake restored); Esc would cancel
+    monkeypatch.setattr(plan, "optimize", real_optimize)
+    _key(app, "Return")
+    assert len(app.tiles) == 4 and app._prompt is None
+    assert [c for c in calls if c[0] == "optimize"][-1][1] == 4
+
+    # a zero-capacity failure does not loop the prompt
+    def nothing_fits(mesh, n_full, n_half=0, **kw):
+        raise plan_api.InfeasibleError("greedy solver placed 0 of 3 tiles", 3, 0, "greedy")
+
+    monkeypatch.setattr(plan, "optimize", nothing_fits)
+    app.run_optimize(3)
+    assert app._prompt is None and "optimize failed" in app._last_status
 
 
 def test_prompt_state_machine_and_no_key_leakage(app, fakes):
@@ -447,7 +515,9 @@ def test_phantom_shell_fallback_uses_visible_faces(result, monkeypatch, fakes):
         assert np.allclose(seen["center"], expect)
         assert planner._eligible_faces() is mask, "cached"
         planner.optimize_placement()
-        assert fakes[-1][0] == "recommend" and fakes[-1][1] is False
+        rec = [c for c in fakes if c[0] == "recommend"][-1]
+        assert rec[1] is False, "the recommendation is restricted to the eligible faces"
+        assert fakes[-1][0] == "capacity"
         assert "shell faces eligible" in planner._eligible_note()
     finally:
         planner.close()
@@ -481,6 +551,7 @@ def test_cli_optimize_runs_on_the_phantom(result, monkeypatch, tmp_path, capsys)
     assert rc == 0
     text = capsys.readouterr().out
     assert "Recommended tiles: 2" in text
+    assert "fits at this grid" in text
     assert "using the recommended count, 2" in text
     assert "2 tiles" in text and "wall: cavity wall" in text
     call = [c for c in calls if c[0] == "optimize"][0]
@@ -508,6 +579,26 @@ def test_cli_optimize_runs_on_the_phantom(result, monkeypatch, tmp_path, capsys)
     assert "phantom shell" in text and "eligible faces" in text
     call = [c for c in calls if c[0] == "optimize"][-1]
     assert call[1] == 1 and call[3]["eligible_faces"] is not None
+
+
+def test_cli_uses_the_capacity_when_it_is_below_the_recommendation(result, monkeypatch,
+                                                                     tmp_path, capsys):
+    import gtcore.pipeline as pipeline_mod
+    from gtcore.cli import main
+
+    calls = []
+    _install_fakes(monkeypatch, calls, n_recommended=2, capacity=1)
+    monkeypatch.setattr(pipeline_mod, "reconstruct", lambda vol, **kw: result)
+    out = tmp_path / "cap"
+    rc = main(["optimize", "--spacing", "1.0", "--out", str(out), "--no-report",
+               "--h", "4", "--spins", "3"])
+    assert rc == 0
+    text = capsys.readouterr().out
+    assert "recommended 2 (4 cm^2 rule) / fits at this grid (h 4 mm, 3 spins): 1" in text
+    assert "using the packing capacity, 1" in text
+    assert [c for c in calls if c[0] == "optimize"][0][1] == 1
+    cap = [c for c in calls if c[0] == "capacity"][0]
+    assert cap[2] == 4.0 and cap[3] == 3
 
 
 def test_cli_min_n_sweeps_without_forwarding_the_budget(result, monkeypatch, tmp_path, capsys):

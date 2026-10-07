@@ -328,8 +328,9 @@ def test_optimize_fails_loudly_on_short_or_infeasible_results(fakes, toy, monkey
         return res
 
     monkeypatch.setattr(plan, "solve_greedy", short)
-    with pytest.raises(RuntimeError, match="returned 2 tiles, 3 requested"):
+    with pytest.raises(api.InfeasibleError, match="placed 2 of 3 tiles: 2 fit") as exc:
         plan.optimize(mesh, 3, report=False)
+    assert exc.value.n_placed == 2 and exc.value.n_requested == 3
 
     def infeasible(objective, n_tiles, fixed=(), kinds_required=None, **kw):
         return SolverResult(selection=[], status="infeasible", reason="wall is full",
@@ -346,9 +347,34 @@ def test_optimize_fails_loudly_on_short_or_infeasible_results(fakes, toy, monkey
     with pytest.raises(RuntimeError, match="violates a conflict"):
         plan.optimize(mesh, 2, report=False)
     # more tiles than the toy wall holds: the fake greedy reports infeasible
+    # with the partial selection, which becomes the capacity on the error
     monkeypatch.setattr(plan, "solve_greedy", real)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(api.InfeasibleError) as exc:
         plan.optimize(mesh, 36, report=False)
+    assert 0 < exc.value.n_placed < 36 and exc.value.n_requested == 36
+    cap, _info = api.packing_capacity(mesh)
+    assert exc.value.n_placed == cap
+
+
+def test_packing_capacity_with_fakes(fakes, toy):
+    mesh, cand = toy["mesh"], toy["candidates"]
+    cap, info = api.packing_capacity(mesh)
+    assert 0 < cap < len(cand) and info["status"] == "infeasible"
+    assert not info["at_least"] and info["n_candidates"] == len(cand)
+    for key in ("seconds", "candidates_s", "influence_conflicts_s", "greedy_s",
+                "h_mm", "n_spins"):
+        assert key in info, key
+    # the greedy really places that many
+    tiles, _rep = plan.optimize(mesh, cap, report=False)
+    assert len(tiles) == cap
+    # a fixed tile takes room away; the fixed tile itself is not counted
+    cap_fixed, info_fixed = api.packing_capacity(mesh, fixed_tiles=[cand.tiles[0]])
+    assert cap_fixed <= cap and info_fixed["n_fixed"] == 1
+    # a small n_max is reported as a lower bound
+    cap2, info2 = api.packing_capacity(mesh, n_max=2)
+    assert cap2 == 2 and info2["at_least"]
+    # caches: nothing was rebuilt for any of this
+    assert fakes["build_candidates"] == 1 and fakes["build_conflicts"] == 1
 
 
 def test_optimize_with_fixed_tiles_keeps_them_as_obstacles(fakes, toy):

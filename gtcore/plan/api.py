@@ -440,14 +440,38 @@ def _augment_with_fixed(candidates: CandidateSet, influence: InfluenceMatrix,
 
 
 # ---------------------------------------------------------------- optimize
+class InfeasibleError(RuntimeError):
+    """The solver could not place the requested count.
+
+    Attributes: ``n_requested`` (new tiles asked for), ``n_placed`` (new
+    tiles the solver did place before running out of compatible candidates
+    -- the packing capacity at this grid, which the planner offers as the
+    next prompt value) and ``solver``.
+    """
+
+    def __init__(self, message: str, n_requested: int, n_placed: int, solver: str):
+        super().__init__(message)
+        self.n_requested = int(n_requested)
+        self.n_placed = int(n_placed)
+        self.solver = str(solver)
+
+
 def _check_result(res: SolverResult, n_total: int, candidates: CandidateSet,
                   conflicts: ConflictGraph, kinds_required: Dict[str, int],
-                  solver: str) -> np.ndarray:
-    """Raise ``RuntimeError`` unless ``res`` is a feasible, complete selection."""
+                  solver: str, n_fixed: int = 0) -> np.ndarray:
+    """Raise ``RuntimeError`` (:class:`InfeasibleError` when the count is
+    what failed) unless ``res`` is a feasible, complete selection."""
     reason = (" (" + res.reason + ")") if res.reason else ""
+    sel = np.asarray(res.selection, dtype=int).reshape(-1)
+    n_new = int(n_total) - int(n_fixed)
+    placed = max(0, int(sel.size) - int(n_fixed))
+    if res.status == "infeasible" or (res.status in ("ok", "optimal", "time_limit")
+                                      and sel.size < int(n_total)):
+        raise InfeasibleError(
+            "%s solver placed %d of %d tiles: %d fit at this grid%s"
+            % (solver, placed, n_new, placed, reason), n_new, placed, solver)
     if res.status not in ("ok", "optimal", "time_limit"):
         raise RuntimeError("%s solver failed: status %s%s" % (solver, res.status, reason))
-    sel = np.asarray(res.selection, dtype=int).reshape(-1)
     if not res.feasible:
         raise RuntimeError("%s solver reported an infeasible selection%s" % (solver, reason))
     if sel.size != int(n_total):
@@ -554,11 +578,6 @@ def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
                          % (solver, len(fixed)))
     continuous = solver == "continuous"
     solve_continuous = getattr(_plan, "solve_continuous", None)
-    if solve_continuous is None:  # A3 ships it in plan.solvers without a package re-export
-        try:
-            from .solvers import solve_continuous
-        except ImportError:
-            solve_continuous = None
     if continuous and solve_continuous is None:
         raise NotImplementedError("solve_continuous: implemented on branch plan/solvers "
                                   "(not merged into this checkout yet)")
@@ -636,7 +655,8 @@ def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
         new_ids = np.zeros(0, dtype=int)
         tiles = cont_tiles
     else:
-        sel = _check_result(res, n_total, cand_s, conf_s, kinds_required, solver)
+        sel = _check_result(res, n_total, cand_s, conf_s, kinds_required, solver,
+                            n_fixed=len(fixed))
         new_ids = sel[sel < c_free]
         tiles = cand.tiles_of(new_ids)
 
@@ -792,6 +812,59 @@ def suggest_next(mesh, placed_tiles: Sequence[PlacedTile], rx_cgy: float = DEFAU
     return tile, info
 
 
+# ------------------------------------------------------ packing capacity
+CAPACITY_N_MAX = 40
+# Upper bound asked of the capacity greedy: more tiles than any cavity takes
+# (the manufacturer rule tops out around 30 on the largest printed shell).
+
+
+def packing_capacity(mesh, rx_cgy: float = DEFAULT_RX_CGY, target: Optional[TargetSet] = None,
+                     kind: str = "full", h_mm: float = DEFAULT_H_MM,
+                     n_spins: Optional[int] = None, eligible_faces=None,
+                     fixed_tiles: Sequence[PlacedTile] = (), n_max: int = CAPACITY_N_MAX,
+                     candidates: Optional[CandidateSet] = None) -> Tuple[int, Dict[str, Any]]:
+    """How many ``kind`` tiles the greedy solver can place on this wall at
+    this grid, next to ``fixed_tiles``.
+
+    The manufacturer rule (area / 4 cm^2) has no packing loss, so it can
+    recommend more tiles than fit at the planner's discretization.  This
+    runs the feasibility-aware greedy with a large ``n_max`` on the cached
+    candidates / influence / robust conflicts and returns the number it
+    placed (``n_max`` itself when it never ran out).  Returns ``(capacity,
+    info)`` with ``info`` = seconds per stage, candidate count, status.
+    """
+    t0 = time.perf_counter()
+    if target is None:
+        target = default_target(mesh, eligible_faces)
+    fixed = list(fixed_tiles or ())
+    t1 = time.perf_counter()
+    cand = candidates if candidates is not None else cached_candidates(
+        mesh, h_mm=h_mm, n_spins=n_spins, kinds=(kind,), eligible_faces=eligible_faces)
+    t_cand = time.perf_counter() - t1
+    if len(cand) == 0:
+        return 0, {"seconds": time.perf_counter() - t0, "candidates_s": t_cand,
+                   "n_candidates": 0, "status": "no candidates"}
+    t1 = time.perf_counter()
+    infl = cached_influence(cand, target, rx_cgy=float(rx_cgy))
+    conf = cached_conflicts(cand)
+    t_graph = time.perf_counter() - t1
+    cand_s, infl_s, conf_s, fixed_ids = _augment_with_fixed(cand, infl, conf, fixed)
+    objective = _plan.make_objective(infl_s, conf_s, rx_cgy=float(rx_cgy))
+    objective.candidates = cand_s
+    t1 = time.perf_counter()
+    res = _plan.solve_greedy(objective, int(n_max) + len(fixed),
+                             fixed=list(int(i) for i in fixed_ids), candidates=cand_s)
+    t_greedy = time.perf_counter() - t1
+    sel = np.asarray(res.selection, dtype=int).reshape(-1)
+    capacity = max(0, int(sel.size) - len(fixed))
+    info = {"seconds": time.perf_counter() - t0, "candidates_s": t_cand,
+            "influence_conflicts_s": t_graph, "greedy_s": t_greedy,
+            "n_candidates": int(len(cand)), "n_fixed": len(fixed), "n_max": int(n_max),
+            "status": res.status, "at_least": bool(capacity >= int(n_max)),
+            "h_mm": float(cand.h_mm), "n_spins": int(cand.n_spins)}
+    return capacity, info
+
+
 # ------------------------------------------------------- recommendation
 def recommended_count(mesh, eligible_faces=None, **kw
                       ) -> Tuple[TileCountRecommendation, str]:
@@ -809,5 +882,5 @@ __all__ = [
     "weighted_quantile", "target_metrics", "tiles_dose", "default_target", "evaluate_tiles",
     "compatible_with_placed", "candidate_key", "cached_candidates",
     "cached_influence", "cached_conflicts", "clear_cache", "optimize", "suggest_next",
-    "recommended_count",
+    "recommended_count", "packing_capacity", "InfeasibleError", "CAPACITY_N_MAX",
 ]
