@@ -280,7 +280,7 @@ class _PlannerApp:
 
     def __init__(self, result: PipelineResult, rx_cgy: float = 6000.0,
                  off_screen: bool = False, title: str = "GammaTile planner",
-                 prior=None, solver: str = "greedy"):
+                 prior=None, solver: str = "sa"):
         import pyvista as pv
 
         self.pv = pv
@@ -294,7 +294,7 @@ class _PlannerApp:
         self.cavity, self._surface_label = wall_mesh_for(result)
 
         # opt-in placement optimizer (O / N keys; gtcore.plan, loaded lazily)
-        self._opt_solver = solver if solver in OPTIMIZER_SOLVERS else "greedy"
+        self._opt_solver = solver if solver in OPTIMIZER_SOLVERS else "sa"
         self._opt_mode = OPTIMIZE_MODES[0]
         self._optimized_ids = set()      # tile ids tinted violet until touched
         self._prompt: Optional[_CountPrompt] = None
@@ -2188,7 +2188,7 @@ class _PlannerApp:
 
 
 def run_planner(result: PipelineResult, rx_cgy: float = 6000.0,
-                suggest: bool = False, prior=None, solver: str = "greedy"):
+                suggest: bool = False, prior=None, solver: str = "sa"):
     """Open the interactive planner window (blocking).  ``suggest`` starts
     with the inferred tile configuration on the board; ``prior`` is an
     :class:`gtcore.tiles.auto.ImplantPrior` (OR counts, all optional);

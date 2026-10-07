@@ -251,7 +251,7 @@ def main(argv=None):
                           "detection is checked against it and, on coarse "
                           "scans, the HU threshold is lowered stepwise "
                           "until that many seeds are found near the implant")
-    pln.add_argument("--optimizer", choices=("greedy", "sa", "continuous"), default="greedy",
+    pln.add_argument("--optimizer", choices=("greedy", "sa", "continuous"), default="sa",
                      help="placement optimizer solver for the planner's 'O' key "
                           "(Shift+O cycles it in the window)")
     pln.set_defaults(fn=cmd_plan)
@@ -267,7 +267,7 @@ def main(argv=None):
     o.add_argument("--min-n", action="store_true", dest="min_n",
                    help="sweep N = 1..--tiles and place the smallest N with D90 >= rx")
     o.add_argument("--solver", choices=("greedy", "local", "sa", "milp", "continuous"),
-                   default="greedy")
+                   default="sa")
     o.add_argument("--budget", type=float, default=60.0,
                    help="wall-time budget in s for --solver continuous (default 60)")
     o.add_argument("--seed", type=int, default=0, help="RNG seed (stochastic solvers)")

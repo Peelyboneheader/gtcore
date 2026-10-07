@@ -312,8 +312,11 @@ def test_optimize_validates_inputs(fakes, toy):
         plan.optimize(mesh, 0)
     with pytest.raises(ValueError, match="unknown solver"):
         plan.optimize(mesh, 2, solver="magic")
-    with pytest.raises(ValueError, match="greedy solver only"):
-        plan.optimize(mesh, 2, solver="sa", fixed_tiles=[toy["candidates"].tiles[0]])
+    # fixed tiles are honoured by greedy only: other solvers degrade to greedy
+    # with a note (SA is the default solver after V2, so this must not raise)
+    _tiles, rep = plan.optimize(mesh, 2, solver="sa", report=False,
+                                fixed_tiles=[toy["candidates"].tiles[0]])
+    assert any("greedy used" in n for n in rep.notes)
     with pytest.raises(ValueError, match="integers"):
         plan.optimize(mesh, None)
 
@@ -442,8 +445,9 @@ def test_optimize_continuous_uses_greedy_start_and_coarse_grid(fakes, toy, monke
     # explicit grid values are kept
     plan.optimize(mesh, 2, solver="continuous", report=False, h_mm=3.0, n_spins=2)
     assert seen["h_mm"] == 3.0 and seen["n_spins"] == 2
-    with pytest.raises(ValueError, match="greedy solver only"):
-        plan.optimize(mesh, 2, solver="continuous", fixed_tiles=[cand.tiles[0]])
+    _tiles, rep = plan.optimize(mesh, 2, solver="continuous", report=False,
+                                fixed_tiles=[cand.tiles[0]])
+    assert any("greedy used" in n for n in rep.notes)   # degraded, not refused
 
 
 def test_optimize_continuous_is_a_stub_until_a3_lands(fakes, toy, monkeypatch):

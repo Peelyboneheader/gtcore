@@ -1852,3 +1852,25 @@ Greedy reaches neither D90 ≥ rx nor V100 ≥ 0.90 by N = 8 on the eligible-wal
 minimum at N = 10 (both criteria). The whole-mesh shell rows (0/5/10 mm) are
 not meaningful on the body-shell fallback (they score the outer surface);
 only the "shell target" row is.
+
+### Decision (coordinator, after V2/V3): simulated annealing is the default solver
+
+V2 paired differences on the +5 mm shell (conflict rule = planner ∪ proxy,
+h 4 mm / 6 spins, commit 93696e2; full tables in V2 below): SA − greedy
++3.9 pp [1.9, 6.0] at N 4 (n 18, Wilcoxon p 7e-4), +4.6 [2.7, 6.5] at N 6,
++7.0 [4.2, 9.9] at N 8, +12.8 [6.4, 19.3] at N 10; SA − uniform +22.8 pp
+[19.3, 26.4] at the primary endpoint (n 15, p 6e-5; the uniform heuristic
+never reached D90 ≥ rx, so N* fell back to the largest N both arms placed,
+flagged on all 15 rows); greedy+local − greedy +1.2 to +6.9 pp; SA − random
++17 to +24 pp. V3: SA equals the enumeration optimum on 9 of 12 solved
+reduced instances (gap 0) and is within −5.7 % / −18.7 % / −5.3 % on the
+other three; N = 8 at h 6 / 2 spins is provably unpackable on 3 of 6
+cavities. The continuous solver at a fixed 60 s budget is BELOW SA by
+−1.6 [−2.9, −0.3] (N 4), −6.2 [−8.5, −3.9] (N 6) and −5.0 [−8.6, −1.5] pp
+(N 8): the §7.4 scout's promotion criterion (beat discrete + E5 at equal
+wall time) was met against greedy + E5, not against SA, so the continuous
+solver stays available but is not the default. SA costs 1–4 s per run at
+h 4 mm on these cavities. Rule from §4 ("if SA does not beat greedy, greedy
+is the default") → SA beats greedy → `gtcore.plan.optimize`, `gt optimize`,
+`gt plan --optimizer` and the planner's O key default to `sa` (commit after
+395dd7e); fixed/adopted tiles still force greedy, with a note in the report.

@@ -258,7 +258,7 @@ def test_prompt_state_machine_and_no_key_leakage(app, fakes):
     _key(app, "m")
     assert app._opt_mode == "replace"
     _key(app, "s")
-    assert app._opt_solver == "sa" and "solver (sa)" in app._last_status
+    assert app._opt_solver == "continuous" and "solver (continuous)" in app._last_status
     app._opt_solver = "greedy"
     _key(app, "Escape")
     assert app._prompt is None and "cancelled" in app._last_status
@@ -280,7 +280,7 @@ def test_enter_runs_the_optimizer_and_tiles_land_as_ordinary_tiles(app, fakes):
     call = [c for c in fakes if c[0] == "optimize"][0]
     assert call[1] == 3 and call[2] == 0
     kw = call[3]
-    assert kw["solver"] == "greedy" and kw["rx_cgy"] == app.rx_cgy
+    assert kw["solver"] == "sa" and kw["rx_cgy"] == app.rx_cgy   # SA is the V2 default
     assert kw["fixed_tiles"] == [] and kw["eligible_faces"] is None
     assert kw["report"] is False
     from gtcore.planner import PLANNER_H_MM, PLANNER_N_SPINS
@@ -291,7 +291,7 @@ def test_enter_runs_the_optimizer_and_tiles_land_as_ordinary_tiles(app, fakes):
     assert len(app._history) == n_hist + 1, "one undo step for the whole run"
     assert app.selected == 2
     s = app._last_status
-    assert "optimized: 3 tiles placed by greedy in" in s
+    assert "optimized: 3 tiles placed by sa in" in s
     assert "V100" in s and "->" in s and "D90" in s and "+5 mm shell" in s
     assert "1 hand-placed tile replaced" in s
     assert "3 optimizer tiles untouched" in s
@@ -423,14 +423,14 @@ def test_fixed_tiles_force_greedy_and_status_names_solver_and_time(app, fakes):
 
 
 def test_shift_o_cycles_the_solver(app, fakes):
-    assert app._opt_solver == "greedy"
+    assert app._opt_solver == "sa"            # SA is the default after V2
     _key(app, "O", shift=1)
-    assert app._opt_solver == "sa" and app._prompt is None
-    assert "optimizer solver: sa" in app._last_status
-    _key(app, "O", shift=1)
-    assert app._opt_solver == "continuous"
+    assert app._opt_solver == "continuous" and app._prompt is None
+    assert "optimizer solver: continuous" in app._last_status
     _key(app, "O", shift=1)
     assert app._opt_solver == "greedy"
+    _key(app, "O", shift=1)
+    assert app._opt_solver == "sa"
     assert tuple(OPTIMIZER_SOLVERS) == ("greedy", "sa", "continuous")
     # plain O (caps lock) still opens the prompt
     _key(app, "O", shift=0)
@@ -697,7 +697,7 @@ def test_e2e_o_key_runs_the_real_optimizer(result):
             assert "optimize failed" not in s, s
         assert len(app.tiles) == n, s
         assert set(app._tile_ids) == app._optimized_ids
-        assert "optimized: %d tiles placed by greedy in" % n in s
+        assert "optimized: %d tiles placed by sa in" % n in s
         assert "V100" in s and "->" in s and "D90" in s
         app._refresh_overlaps()
         assert app._overlap_pairs == [] and "CAUTION" not in s

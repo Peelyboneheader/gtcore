@@ -518,7 +518,7 @@ def _check_tiles(res: SolverResult, tiles: List[PlacedTile], n_total: int,
 
 
 def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
-             target: Optional[TargetSet] = None, solver: str = "greedy", seed: int = 0,
+             target: Optional[TargetSet] = None, solver: str = "sa", seed: int = 0,
              h_mm: float = DEFAULT_H_MM, n_spins: Optional[int] = None,
              eligible_faces=None, oars: Optional[Dict[str, TargetSet]] = None,
              oar_limits: Optional[Dict[str, float]] = None, refine: bool = False,
@@ -571,11 +571,15 @@ def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
     if solver not in SOLVERS:
         raise ValueError("unknown solver %r (choose from %s)" % (solver, ", ".join(SOLVERS)))
     fixed = list(fixed_tiles or ())
+    solver_fallback_note = None
     if fixed and solver != "greedy":
-        raise ValueError("fixed_tiles are honoured by the greedy solver only "
-                         "(solve_local / solve_sa / solve_milp / solve_continuous take "
-                         "no fixed set); got solver=%r with %d fixed tiles"
-                         % (solver, len(fixed)))
+        # only greedy honours a fixed set (solve_local / solve_sa / solve_milp /
+        # solve_continuous take none): degrade to greedy and say so in the
+        # report rather than refusing, since SA is the default solver (V2)
+        solver_fallback_note = ("solver %r requested with %d fixed tile(s): greedy "
+                                "used, the only solver that honours a fixed set"
+                                % (solver, len(fixed)))
+        solver = "greedy"
     continuous = solver == "continuous"
     solve_continuous = getattr(_plan, "solve_continuous", None)
     if continuous and solve_continuous is None:
@@ -632,6 +636,11 @@ def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
     t0 = time.perf_counter()
     res = _plan.solve_greedy(objective, n_total, fixed=list(int(i) for i in fixed_ids),
                              kinds_required=kinds_required)
+    if solver != "greedy" and (res.status == "infeasible"
+                               or len(np.asarray(res.selection).reshape(-1)) < n_total):
+        # the warm start could not pack N: fail loudly with greedy's reason
+        # (the other solvers cannot place more than the packing allows)
+        _check_result(res, n_total, cand_s, conf_s, kinds_required, "greedy")
     if solver == "local":
         res = _plan.solve_local(objective, n_total, start=res.selection,
                                 candidates=cand_s)
@@ -746,6 +755,8 @@ def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
         rep.notes.append("%d fixed tile(s) kept as obstacles; report.tiles and "
                          "its metrics include them, the returned list does not"
                          % len(fixed))
+    if solver_fallback_note:
+        rep.notes.append(solver_fallback_note)
     say("done: %d tiles in %.1f s" % (len(tiles), rep.wall_clock_s))
     return list(tiles), rep
 

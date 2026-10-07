@@ -1161,7 +1161,7 @@ def refine_continuous(mesh, candidates: CandidateSet, selection, target: TargetS
 
 
 def sweep_n(mesh, target: TargetSet, n_max: int, rx_cgy: float = DEFAULT_RX_CGY,
-            solver: str = "greedy", seed: int = 0,
+            solver: str = "sa", seed: int = 0,
             candidates: Optional[CandidateSet] = None,
             influence: Optional[InfluenceMatrix] = None,
             conflicts: Optional[ConflictGraph] = None, **kw) -> SweepResult:
@@ -1208,7 +1208,7 @@ def recommend_tile_count(mesh, contraction_pct: float = 0.0, untreated_pct: floa
 
 
 def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
-             target: Optional[TargetSet] = None, solver: str = "greedy", seed: int = 0,
+             target: Optional[TargetSet] = None, solver: str = "sa", seed: int = 0,
              h_mm: float = DEFAULT_H_MM, n_spins: Optional[int] = None,
              eligible_faces=None, oars: Optional[Dict[str, TargetSet]] = None,
              oar_limits: Optional[Dict[str, float]] = None, refine: bool = False,
