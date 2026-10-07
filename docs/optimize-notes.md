@@ -134,6 +134,67 @@ agents.
    memory and strings in JSON (`"5.0"`); CSV keys are dotted
    (`metrics_grid.5.0.D90`).
 
+A6 integration (`plan/ui`, 2026-10-07; `gtcore/plan/api.py`, `gt optimize`,
+planner keys `O` / `N`).
+
+10. **Tile-count prompt is an in-scene numeric entry, not a dialog.**
+    PyVista/VTK has no text-input widget, and a console `input()` would
+    block the render loop and hide behind the window. Chosen: the status
+    line becomes the prompt (`_CountPrompt`): digits / numpad digits edit the
+    highlighted field, BackSpace deletes, `H` switches to the half-tile
+    count, `M` flips replace/add, `S` cycles the solver, Enter runs, Esc
+    cancels; the recommendation is pre-filled. Every other key binding is a
+    no-op while the prompt is open (`_guarded`), so typing "8" cannot place,
+    delete or undo anything; BackSpace is routed to the prompt before the
+    delete-all binding. Alternative: a Tk dialog (extra dependency and a
+    second event loop). Rejected.
+11. **Replace vs add.** Two modes, `M` in the prompt. Default **replace**:
+    this session's hand-placed (green) proposals are removed (one undo
+    step) and the tiles fitted FROM THE SCAN (gold, `_adopted_ids`) stay as
+    fixed obstacles — the implant is physically there. **add**: everything
+    on the board stays fixed and N tiles are added. Alternative: always
+    clear the board. Rejected: that silently discards the recovered implant.
+12. **Fixed tiles go through the greedy solver only.** Each fixed tile
+    becomes one extra pre-selected pseudo-candidate (its own influence row
+    from `dose_at_points(exact=False)`, its own conflict row from the
+    planner's `find_overlapping_tiles` rule, no conflicts between fixed
+    tiles) and the augmented instance is passed to `solve_greedy(fixed=…)`.
+    `solve_local` / `solve_sa` / `solve_milp` / `solve_continuous` have no
+    fixed-set parameter, so `optimize(fixed_tiles=…, solver≠"greedy")` is a
+    `ValueError`; the planner falls back to greedy and says so in the status
+    line. Alternative: an `Objective` subclass carrying a base dose — would
+    depend on A2's internals (whether `hard()` goes through `dose_of()`).
+    Rejected for now; revisit after A2/A3 merge if the planner needs SA with
+    a fixed implant.
+13. **Planner status metrics are influence-style estimates.** The `O` / `N`
+    keys call `optimize(report=False)` and score the board before/after
+    with `api.evaluate_tiles` (tabulated-kernel dose at ≤ `M_OPT_MAX` points
+    of the +5 mm shell) so a run stays interactive; when a report with
+    dose-grid shell metrics is present the status line uses those and says
+    "dose grid". `gt optimize` runs the full `final_report` unless
+    `--no-report`.
+14. **Candidate / influence caches** (`api.cached_candidates`,
+    `api.cached_influence`): 4-entry LRUs keyed on `(id(mesh), faces.shape,
+    h, n_spins, kinds, sha1(eligible mask), rng_seed)` and on `(id(candidates),
+    target signature, rx)`; entries hold the mesh / candidate object so a
+    recycled `id()` can never alias a new object. Candidate sampling uses
+    `rng_seed=0` regardless of the solver seed so the cache is shared across
+    seeds. `api.clear_cache()` drops both.
+15. **`solver="continuous"`** (coordinator note): `solve_continuous` is
+    looked up with `getattr` and raises `NotImplementedError` until A3 merges;
+    it starts from the discrete greedy selection on a coarser default grid
+    (`CONTINUOUS_H_MM` = 4 mm, `CONTINUOUS_N_SPINS` = 3, used only when the
+    caller left `h_mm` / `n_spins` at the frozen defaults), takes
+    `time_budget_s` (`--budget`, default 60 s), returns poses rather than
+    ids (so `refine` is skipped and the output is re-verified with
+    `find_overlapping_tiles`). "greedy" stays the planner default until V2.
+16. **Kind counts for non-greedy solvers** are enforced only through the
+    greedy warm start (`solve_local` / `solve_sa` take no `kinds_required`);
+    `optimize` re-checks the counts, the selection size, duplicates and
+    conflicts after every solver and raises `RuntimeError` on any mismatch
+    (never fewer tiles as success, plan §4 V8). `status="time_limit"` (MILP)
+    is accepted when the incumbent is feasible and complete.
+
 ---
 
 ## Reviewer report (A7)
@@ -156,3 +217,4 @@ _To be pasted unedited._
 | date | command | seed(s) | commit | output | note |
 |---|---|---|---|---|---|
 | 2026-10-07 | `python -m pytest -q tests/test_plan_interface.py` | — | (Phase 0 commit) | 34 passed (full suite 470 passed, 205 s) | interface freeze |
+| 2026-10-07 | `python -m pytest -q -p no:cacheprovider` (plan/ui) | 0 | (A6 commit) | 509 passed, 303 s (+20 `test_plan_api.py`, +20 `test_planner_optimize.py`; A1–A5 functions monkeypatched with toy fakes) | A6 integration; off-screen VTK tests crash with 0x8007000e when several suites share the GPU — rerun alone |

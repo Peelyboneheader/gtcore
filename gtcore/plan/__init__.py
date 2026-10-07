@@ -1134,7 +1134,7 @@ def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
              h_mm: float = DEFAULT_H_MM, n_spins: Optional[int] = None,
              eligible_faces=None, oars: Optional[Dict[str, TargetSet]] = None,
              oar_limits: Optional[Dict[str, float]] = None, refine: bool = False,
-             report: bool = True, verbose: bool = False
+             report: bool = True, verbose: bool = False, **kw
              ) -> Tuple[List[PlacedTile], OptimizeReport]:
     """Entry point (section 3 H): candidates -> influence -> conflicts ->
     ``solver`` (``"greedy"`` / ``"local"`` / ``"sa"`` / ``"milp"``) for
@@ -1143,20 +1143,32 @@ def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
     shell.  Returns ordinary :class:`PlacedTile` objects for the planner.
     Fails loudly (``ValueError`` with a reason) rather than returning a worse
     plan silently (section 4 V8).
+
+    Implemented in :mod:`gtcore.plan.api` (branch plan/ui); extra keywords
+    (``fixed_tiles``, ``candidates``, ``log``) are forwarded there.
     """
-    raise _stub("optimize", "ui")
+    from .api import optimize as _impl
+    return _impl(mesh, n_full, n_half=n_half, rx_cgy=rx_cgy, target=target,
+                 solver=solver, seed=seed, h_mm=h_mm, n_spins=n_spins,
+                 eligible_faces=eligible_faces, oars=oars, oar_limits=oar_limits,
+                 refine=refine, report=report, verbose=verbose, **kw)
 
 
 def suggest_next(mesh, placed_tiles: Sequence[PlacedTile], rx_cgy: float = DEFAULT_RX_CGY,
                  target: Optional[TargetSet] = None, kind: str = "full",
                  h_mm: float = DEFAULT_H_MM, n_spins: Optional[int] = None,
-                 eligible_faces=None, candidates: Optional[CandidateSet] = None
-                 ) -> Tuple[PlacedTile, Dict[str, Any]]:
+                 eligible_faces=None, candidates: Optional[CandidateSet] = None,
+                 **kw) -> Tuple[PlacedTile, Dict[str, Any]]:
     """One greedy step: the ``kind`` candidate compatible with ``placed_tiles``
     that most increases the hard objective.  Returns the tile and a dict with
     the objective before / after and the candidate id.  O(C * M).
+
+    Implemented in :mod:`gtcore.plan.api` (branch plan/ui).
     """
-    raise _stub("suggest_next", "ui")
+    from .api import suggest_next as _impl
+    return _impl(mesh, placed_tiles, rx_cgy=rx_cgy, target=target, kind=kind,
+                 h_mm=h_mm, n_spins=n_spins, eligible_faces=eligible_faces,
+                 candidates=candidates, **kw)
 
 
 __all__ = [
