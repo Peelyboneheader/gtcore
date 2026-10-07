@@ -1,0 +1,19 @@
+cavity,volume_ml,N,h_mm,n_spins,m_opt,status,reason,V100_sa_influence,sa_start,V100_milp_influence,milp_status,milp_bound,mip_gap,reference,gap,V100_sa_grid,V100_milp_grid,sa_s,milp_s,milp_method,V100_continuous_grid,continuous_s,continuous_budget_s,gap_continuous_grid,continuous_reason
+s1_x1.00,24.382,4,6,2,300,ok,,0.276667,greedy,0.276667,optimal,0.276667,0,0.276667,0,0.248049,0.248049,0.937416,0.916059,enum_bb,0.235371,28.1588,60,-0.051114,
+s1_x1.00,24.382,6,6,2,300,ok,,0.606667,greedy,0.643333,optimal,0.643333,0,0.643333,-0.0569948,0.543726,0.601918,0.724556,1.65173,enum_bb,0.485208,43.2835,60,-0.193897,
+s1_x1.00,24.382,8,6,2,300,failed,FAILED (n_placed=6): sa status infeasible: greedy start failed: no compatible candidate left after placing 6 of 8 tiles; FAILED (n_placed=0): milp status infeasible: no 8-candidate selection satisfies the conflict / OAR rows (77608 nodes searched),,,,,,,,,,,,,,,,,,
+s2_x1.00,27.605,4,6,2,300,ok,,0.21,greedy,0.21,optimal,0.21,0,0.21,0,0.172475,0.172475,0.736171,1.50474,enum_bb,0.0938338,32.1591,60,-0.455959,
+s2_x1.00,27.605,6,6,2,300,ok,,0.563333,greedy,0.563333,optimal,0.563333,0,0.563333,0,0.538278,0.538278,0.883601,4.49156,enum_bb,0.411081,41.0694,60,-0.236303,
+s2_x1.00,27.605,8,6,2,300,ok,,0.976667,milp,0.976667,optimal,0.976667,0,0.976667,0,0.976616,0.976616,0.756337,2.29182,enum_bb,,,,,FAILED (n_placed=0): continuous status infeasible: no feasible 8-tile start found among 128 candidates
+s3_x1.00,26.582,4,6,2,300,ok,,0.306667,greedy,0.306667,optimal,0.306667,0,0.306667,0,0.249541,0.249541,0.660354,0.958965,enum_bb,0.150643,32.2714,60,-0.396319,
+s3_x1.00,26.582,6,6,2,300,ok,,0.573333,greedy,0.573333,optimal,0.573333,0,0.573333,0,0.533221,0.533221,0.741493,4.95833,enum_bb,0.484844,36.6582,60,-0.0907264,
+s3_x1.00,26.582,8,6,2,300,ok,,0.936667,milp,0.936667,optimal,0.936667,0,0.936667,0,0.939988,0.939988,0.500372,2.46496,enum_bb,,,,,FAILED (n_placed=0): continuous status infeasible: no feasible 8-tile start found among 123 candidates
+s4_x1.00,28.474,4,6,2,300,ok,,0.203333,greedy,0.25,optimal,0.25,0,0.25,-0.186667,0.213431,0.23708,0.742798,1.85611,enum_bb,0.122482,28.2077,60,-0.483374,
+s4_x1.00,28.474,6,6,2,300,ok,,0.506667,greedy,0.506667,optimal,0.506667,0,0.506667,0,0.46146,0.46146,0.853746,9.50746,enum_bb,0.405839,39.6048,60,-0.120531,
+s4_x1.00,28.474,8,6,2,300,ok,,0.893333,greedy,0.943333,optimal,0.943333,0,0.943333,-0.0530035,0.885109,0.946131,0.628501,5.03594,enum_bb,0.873431,54.4151,60,-0.07684,
+s5_x1.00,26.393,4,6,2,300,ok,,0.24,greedy,0.24,optimal,0.24,0,0.24,0,0.201663,0.232451,0.687716,0.892888,enum_bb,0.134236,27.5961,60,-0.422517,
+s5_x1.00,26.393,6,6,2,300,ok,,0.58,greedy,0.58,optimal,0.58,0,0.58,0,0.533713,0.533713,0.760837,2.54333,enum_bb,0.505388,41.9263,60,-0.0530718,
+s5_x1.00,26.393,8,6,2,300,failed,FAILED (n_placed=6): sa status infeasible: greedy start failed: no compatible candidate left after placing 6 of 8 tiles; FAILED (n_placed=0): milp status infeasible: no 8-candidate selection satisfies the conflict / OAR rows (143730 nodes searched),,,,,,,,,,,,,,,,,,
+s6_x1.00,26.292,4,6,2,300,ok,,0.26,greedy,0.26,optimal,0.26,0,0.26,0,0.240364,0.240364,0.690317,1.17324,enum_bb,0.11733,30.9388,60,-0.511867,
+s6_x1.00,26.292,6,6,2,300,ok,,0.573333,greedy,0.573333,optimal,0.573333,0,0.573333,0,0.564292,0.564292,0.781486,3.9453,enum_bb,0.454055,36.9129,60,-0.195355,
+s6_x1.00,26.292,8,6,2,300,failed,FAILED (n_placed=6): sa status infeasible: greedy start failed: no compatible candidate left after placing 6 of 8 tiles; FAILED (n_placed=0): milp status infeasible: no 8-candidate selection satisfies the conflict / OAR rows (191642 nodes searched),,,,,,,,,,,,,,,,,,

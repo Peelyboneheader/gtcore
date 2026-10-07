@@ -1,0 +1,29 @@
+{
+  "wall": "body",
+  "mesh_area_mm2": 53863.15223943652,
+  "mesh_volume_ml": 473.9077333053057,
+  "n_faces": 72396,
+  "n_seeds": 32,
+  "n_tiles_fitted": 8,
+  "visible_faces_source": "cached mask (C:\\Users\\jacob\\OneDrive\\Desktop\\gt-worktrees\\plan-validation\\output\\validation_optimize\\cache\\printed_visible_72396.npy)",
+  "visible_area_mm2": 4650.811568827385,
+  "eligible_area_mm2": 4650.811568827385,
+  "eligible_faces": 7347,
+  "seed_radius_mm": 35.0,
+  "reconstruct_s": 43.397486900008516,
+  "has_cavity_mask": false,
+  "recommended_tiles": 12,
+  "recommended_source": "plan.recommend_tile_count",
+  "recommended_ellipsoid": 29,
+  "target_points": 4210,
+  "target_area_mm2": 15538.818194203652,
+  "mean_seed_wall_mm": 0.8422117343154732,
+  "conformer_delta_V100_pp": 1.7498876859161627,
+  "conformer_delta_D90_cgy": -5.71044921875,
+  "conformer_seed_shift_mm": 3.943753066126251,
+  "min_n": {
+    "D90>=rx": 10,
+    "V100>=0.90": 10
+  },
+  "clinical": "clinical case 2 is not on this machine: not run"
+}

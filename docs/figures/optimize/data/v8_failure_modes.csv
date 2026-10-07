@@ -1,0 +1,13 @@
+case,function,outcome,verdict,message,s
+"N larger than any packing (sphere r=12 mm, N=12)",optimize,raised ValueError,PASS,"build_candidates: every candidate was rejected before conforming (1014 enumerated; rejections {'ineligible': 0, 'hanging': 1014, 'detached': 0, 'conform_error':",0.681275
+"N larger than any packing (sphere r=12 mm, N=12)",build_candidates+solve_greedy,raised ValueError,PASS,"build_candidates: every candidate was rejected before conforming (354 enumerated; rejections {'ineligible': 0, 'hanging': 354, 'detached': 0, 'conform_error': 0",0.253861
+tile wider than the wall patch (12 mm wall mesh),build_candidates,raised ValueError,PASS,"build_candidates: every candidate was rejected before conforming (231 enumerated; rejections {'ineligible': 0, 'hanging': 231, 'detached': 0, 'conform_error': 0",0.0889647
+tile wider than the wall patch (12 mm wall mesh),optimize,raised ValueError,PASS,"build_candidates: every candidate was rejected before conforming (1200 enumerated; rejections {'ineligible': 0, 'hanging': 1200, 'detached': 0, 'conform_error':",0.43552
+eligibility disc (10 mm) smaller than a tile on a 60 mm wall,optimize,returned,PASS (valid plan; not a failure mode),1 tiles; planner rule: 0 overlaps; geometric proxy: 0 overlaps; anchors on eligible faces: True,0.674895
+"eligibility disc (10 mm) smaller than a tile, N=2 (cannot fit)",optimize,raised RuntimeError,PASS,greedy solver failed: status infeasible (no compatible candidate of the required kinds left after placing 1 of 2 tiles),0.0029107
+"eligibility mask excluding > 95 % of the wall (sphere cap, N=4)",optimize,raised RuntimeError,PASS,greedy solver failed: status infeasible (no compatible candidate of the required kinds left after placing 1 of 4 tiles),1.33416
+degenerate mesh (3 vertices),build_candidates,raised ValueError,PASS,build_candidates: degenerate mesh (1 faces < 4),1.63e-05
+degenerate mesh (3 vertices),optimize,raised ValueError,PASS,build_candidates: degenerate mesh (1 faces < 4),0.000599
+empty mesh,build_candidates,raised ValueError,PASS,build_candidates: degenerate mesh (empty: no faces),6.79999e-06
+empty mesh,optimize,raised ValueError,PASS,build_candidates: degenerate mesh (empty: no faces),0.0010852
+empty mesh,final_report,raised ValueError,PASS,final_report: mesh is empty or None,1.04e-05

@@ -1,0 +1,8 @@
+{
+  "platform": "Windows-11-10.0.26200-SP0",
+  "processor": "AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD",
+  "machine": "AMD64",
+  "cores": 12,
+  "python": "3.12.10",
+  "numpy": "2.5.2"
+}

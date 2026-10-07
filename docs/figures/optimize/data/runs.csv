@@ -1,0 +1,34 @@
+date,section,command,seeds,commit,wall_s,note
+2026-10-07 03:03,v8,python scripts/validation_optimize.py --quick --section v8,"[1, 2]",cd73082,0.0,quick
+2026-10-07 03:04,v2,python scripts/validation_optimize.py --quick,"[1, 2]",cd73082,15.1,quick
+2026-10-07 03:04,v3,python scripts/validation_optimize.py --quick,"[1, 2]",cd73082,0.1,quick
+2026-10-07 03:04,v4,python scripts/validation_optimize.py --quick,"[1, 2]",cd73082,0.0,quick
+2026-10-07 03:05,v5,python scripts/validation_optimize.py --quick,"[1, 2]",cd73082,64.7,quick
+2026-10-07 03:20,v6,python scripts/validation_optimize.py --quick,"[1, 2]",cd73082,876.7,quick
+2026-10-07 03:20,v7,python scripts/validation_optimize.py --quick,"[1, 2]",cd73082,21.1,quick
+2026-10-07 03:20,v8,python scripts/validation_optimize.py --quick,"[1, 2]",cd73082,0.0,quick
+2026-10-07 03:23,v2,"python scripts/validation_optimize.py --quick --section v2,v7,v8","[1, 2]",cd73082,10.6,quick
+2026-10-07 03:23,v7,"python scripts/validation_optimize.py --quick --section v2,v7,v8","[1, 2]",cd73082,24.0,quick
+2026-10-07 03:23,v8,"python scripts/validation_optimize.py --quick --section v2,v7,v8","[1, 2]",cd73082,0.0,quick
+2026-10-07 03:31,v6,python scripts/validation_optimize.py --quick --section v6,"[1, 2]",cd73082,517.1,quick
+2026-10-07 04:05,v2,"python scripts/validation_optimize.py --quick --section v2,v3,v8 --seeds 1 --n-random 3",[1],d42d6c4,51.7,quick
+2026-10-07 04:05,v3,"python scripts/validation_optimize.py --quick --section v2,v3,v8 --seeds 1 --n-random 3",[1],d42d6c4,0.9,quick
+2026-10-07 04:05,v8,"python scripts/validation_optimize.py --quick --section v2,v3,v8 --seeds 1 --n-random 3",[1],d42d6c4,3.4,quick
+2026-10-07 04:15,v2,python scripts/validation_optimize.py --quick,"[1, 2]",d42d6c4,328.0,quick
+2026-10-07 04:15,v3,python scripts/validation_optimize.py --quick,"[1, 2]",d42d6c4,12.8,quick
+2026-10-07 04:27,v2,python scripts/validation_optimize.py --quick,"[1, 2]",d42d6c4,169.8,quick
+2026-10-07 04:27,v3,python scripts/validation_optimize.py --quick,"[1, 2]",d42d6c4,18.7,quick
+2026-10-07 04:52,v4,python scripts/validation_optimize.py --quick,"[1, 2]",d42d6c4,1461.7,quick
+2026-10-07 04:55,v5,python scripts/validation_optimize.py --quick,"[1, 2]",d42d6c4,179.0,quick
+2026-10-07 04:57,v6,python scripts/validation_optimize.py --quick,"[1, 2]",d42d6c4,137.3,quick
+2026-10-07 04:58,v7,python scripts/validation_optimize.py --quick,"[1, 2]",d42d6c4,41.9,quick
+2026-10-07 04:58,v8,python scripts/validation_optimize.py --quick,"[1, 2]",d42d6c4,4.2,quick
+2026-10-07 05:03,v8,python scripts/validation_optimize.py --quick --section v8,"[1, 2]",483a355,3.5,quick
+2026-10-07 05:10,v2,python scripts/validation_optimize.py --quick --section v2 --seeds 2 --n-list 8 --n-random 2,[2],93696e2,149.8,quick
+2026-10-07 07:26,v2,python scripts/validation_optimize.py,"[1, 2, 3, 4, 5, 6]",93696e2,8093.5,
+2026-10-07 07:36,v3,python scripts/validation_optimize.py,"[1, 2, 3, 4, 5, 6]",93696e2,588.9,
+2026-10-07 07:48,v4,python scripts/validation_optimize.py,"[1, 2, 3, 4, 5, 6]",93696e2,745.1,
+2026-10-07 07:53,v5,python scripts/validation_optimize.py,"[1, 2, 3, 4, 5, 6]",93696e2,302.7,
+2026-10-07 07:56,v6,python scripts/validation_optimize.py,"[1, 2, 3, 4, 5, 6]",93696e2,190.6,
+2026-10-07 08:06,v7,python scripts/validation_optimize.py,"[1, 2, 3, 4, 5, 6]",93696e2,617.6,
+2026-10-07 08:07,v8,python scripts/validation_optimize.py,"[1, 2, 3, 4, 5, 6]",93696e2,3.5,
