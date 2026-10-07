@@ -652,26 +652,60 @@ def optimized(phantom_case):
 
 
 def test_reported_metrics_rederived_on_full_shell(phantom_case, optimized):
-    """Probe (e): builders' reported V100/D90 vs my reference on the shell."""
+    """Probe (e): builders' grid-reported V100/D90 vs my reference, like
+    with like.
+
+    ``report.metrics_grid`` carries two conventions for the +5 mm shell:
+
+    * ``metrics_grid["target"]`` -- the §2 definition: AREA-WEIGHTED
+      metrics over the target set (shell-face vertex areas), sampled from
+      the final dose grid.  Compared against the shell-weighted reference
+      (exact point doses, same weights).
+    * ``metrics_grid[5.0]`` -- the planner's ``shell_report`` entry:
+      UNWEIGHTED ``dvh_stats`` over the shell vertices (each vertex counts
+      once).  Compared against the reference with unit weights.
+
+    Tolerances 0.5 pp on V100 and 1 % of rx on D90 for both; the residual is
+    grid (1 mm trilinear) vs exact point dose.
+    """
     tiles, report, _ = optimized
     mesh = phantom_case["mesh"]
-    mine = rederive_metrics(tiles, mesh)
-    mine_wall = rederive_metrics(tiles, mesh, weights_from="wall")
-    grid = _shell_entry(report.metrics_grid)
-    v100_grid = float(grid["V100"])
-    d90_grid = float(grid["D90"])
+    pts, w_shell = shell_target(mesh, 5.0)
+    mine_w = metrics_for_tiles(tiles, pts, w_shell, RX_CGY)
+    mine_u = metrics_for_tiles(tiles, pts, np.ones(pts.shape[0]), RX_CGY)
     infl = report.metrics_influence or {}
-    print("probe (e): reported grid V100 %.4f D90 %.1f | influence-time %s | "
-          "re-derived (shell weights) V100 %.4f D90 %.1f | (wall weights) "
-          "V100 %.4f D90 %.1f" % (v100_grid, d90_grid,
-                                  {k: round(float(v), 4) for k, v in infl.items()
-                                   if isinstance(v, (int, float, np.floating))},
-                                  mine["V100"], mine["D90"],
-                                  mine_wall["V100"], mine_wall["D90"]))
-    assert abs(v100_grid - mine["V100"]) <= 0.005, (
-        "V100 reported %.4f vs re-derived %.4f" % (v100_grid, mine["V100"]))
-    assert abs(d90_grid - mine["D90"]) <= 0.01 * RX_CGY, (
-        "D90 reported %.1f vs re-derived %.1f" % (d90_grid, mine["D90"]))
+    print("probe (e): influence-time estimate %s"
+          % {k: round(float(v), 4) for k, v in infl.items()
+             if isinstance(v, (int, float, np.floating))})
+
+    # --- weighted (§2) entry
+    grid_w = report.metrics_grid.get("target") if isinstance(
+        report.metrics_grid, dict) else None
+    if grid_w is None:
+        pytest.fail("metrics_grid has no weighted 'target' entry (keys %r)"
+                    % list(report.metrics_grid))
+    v100_w, d90_w = float(grid_w["V100"]), float(grid_w["D90"])
+    print("probe (e, weighted): grid metrics_grid['target'] V100 %.4f D90 "
+          "%.1f | reference (shell-area weights, exact points) V100 %.4f D90 "
+          "%.1f" % (v100_w, d90_w, mine_w["V100"], mine_w["D90"]))
+    assert abs(v100_w - mine_w["V100"]) <= 0.005, (
+        "weighted V100 reported %.4f vs re-derived %.4f"
+        % (v100_w, mine_w["V100"]))
+    assert abs(d90_w - mine_w["D90"]) <= 0.01 * RX_CGY, (
+        "weighted D90 reported %.1f vs re-derived %.1f" % (d90_w, mine_w["D90"]))
+
+    # --- unweighted planner entry
+    grid_u = _shell_entry(report.metrics_grid)
+    v100_u, d90_u = float(grid_u["V100"]), float(grid_u["D90"])
+    print("probe (e, unweighted): grid metrics_grid[5.0] V100 %.4f D90 %.1f "
+          "| reference (unit weights, exact points) V100 %.4f D90 %.1f"
+          % (v100_u, d90_u, mine_u["V100"], mine_u["D90"]))
+    assert abs(v100_u - mine_u["V100"]) <= 0.005, (
+        "unweighted V100 reported %.4f vs re-derived %.4f"
+        % (v100_u, mine_u["V100"]))
+    assert abs(d90_u - mine_u["D90"]) <= 0.01 * RX_CGY, (
+        "unweighted D90 reported %.1f vs re-derived %.1f"
+        % (d90_u, mine_u["D90"]))
 
 
 # ============================================ (f) planner consistency

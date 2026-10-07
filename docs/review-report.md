@@ -44,10 +44,9 @@ behave as §2 requires?
 
 ## Probes and numbers
 
-Run against main `5f0105a` (all six builder branches merged), plan/review
-merge commit; `tests/test_plan_review.py`: **14 passed, 2 errors** (both
-errors are the shared `optimized` fixture of the end-to-end `optimize`
-probe, finding 0; pytest reports a failing fixture as an error); builders'
+Final run against main `d42d6c4` (all six builder branches merged plus
+the `optimize` fix `c74d8e4`, finding 0): `tests/test_plan_review.py`
+**16 passed, 0 failed, 0 skipped** (72 s). Builders'
 `tests/test_plan_interface.py`: 19 passed, 13 skipped.
 
 (a) **Greedy provably suboptimal (N = 2) -- FIRED.** Flat wall; full tiles
@@ -95,17 +94,28 @@ on identical rows, selection [0, 5, 10, 15]: builders V100 0.4445, V150
 2309.4 (weighted-quantile conventions agree to < 0.1 cGy). `solve_greedy`
 result metrics: V100 0.4993, V150 0.0019, V200 0.0, D90 2029.64 vs
 re-derived 0.4993 / 0.0019 / 0.0000 / 2029.6; `objective` 0.4993 = P1
-re-derived. `optimize(greedy, N = 4)` grid-reported +5 mm V100/D90 vs the
-reference on the full shell: NOT OBTAINABLE -- `optimize` raises (finding
-0), so the grid-vs-exact and weighted-vs-unweighted comparison is open.
+re-derived. `optimize(mesh, 4, rx_cgy=4000, solver="greedy", seed=0, h_mm=4)`
+(66.8 s wall, 4 tiles) compared like with like, conventions stated:
+`metrics_grid["target"]` = AREA-WEIGHTED §2 metrics over the +5 mm shell
+sampled from the final 1 mm dose grid: V100 0.5580, D90 1806.0 cGy vs the
+reference with shell-face vertex-area weights on exact point doses: V100
+0.5571, D90 1805.3 (0.09 pp, 0.7 cGy). `metrics_grid[5.0]` = the planner's
+UNWEIGHTED `dvh_stats` (each vertex counts once): V100 0.5465, D90 1838.7
+vs the reference with unit weights: 0.5457, 1837.7 (0.08 pp, 1.0 cGy).
+Influence-time (subsampled, tabulated) estimate: V100 0.5583, D90 1814.9.
+The two conventions differ by 1.15 pp V100 and 33 cGy D90 on this
+configuration, so reports must say which one they quote; the residual
+grid-vs-exact difference is < 0.1 pp / ~1 cGy.
 
-(f) **Planner consistency.** `solve_greedy` output (N = 4, reference
-candidates): `find_overlapping_tiles` == [] and `feasible` True. `optimize`
-output: NOT OBTAINABLE (finding 0).
+(f) **Planner consistency -- pass.** `solve_greedy` output (N = 4,
+reference candidates): `find_overlapping_tiles` == [] and `feasible` True.
+`optimize` output: 4 `PlacedTile`s, `find_overlapping_tiles` == [],
+`report.overlaps` == [].
 
 ## Findings
 
-0. **DEFECT -- `optimize()` is unusable end-to-end.** Every call fails:
+0. **DEFECT (found, then fixed on main `c74d8e4`) -- `optimize()` was
+   unusable end-to-end.** At main `5f0105a` every call failed:
    `optimize(mesh, 4, rx_cgy=4000, solver=<greedy|sa|milp>, seed=0, h_mm=8)`
    and `n_half=1` all raise
    `ValueError: kinds_required needs candidate kinds: pass candidates= or
@@ -121,9 +131,11 @@ output: NOT OBTAINABLE (finding 0).
    kinds_required=..., candidates=cset)` -> `TypeError: unexpected keyword
    argument 'candidates'`. At the default h = 2.5 mm the call spends ~300 s
    building ~2250 candidates and the influence matrix before failing. The
-   two review errors are `test_reported_metrics_rederived_on_full_shell`
+   two review probes `test_reported_metrics_rederived_on_full_shell`
    and `test_optimizer_output_never_flagged_by_planner` (fixture
-   `optimized`, exact message above). Not fixed here, per the brief.
+   `optimized`) errored with that message. Not fixed by the reviewer; the
+   coordinator's fix (`api.optimize` attaches the CandidateSet to the
+   objective and passes `candidates=` to greedy) makes both pass.
 
 
 1. **Target-weight convention.** `TargetSet.from_shell` weights are one
@@ -144,28 +156,29 @@ output: NOT OBTAINABLE (finding 0).
 
 ## Verdict
 
-Solvers, influence, conflicts/cliques and metric conventions pass every
-independent probe: the greedy-suboptimal construction fires against the
-builders' greedy exactly as designed (0.40 vs 0.84) and SA / MILP recover
-the brute-force optimum; the clique over-constraint probe does not fire
-(the builders' cliques are true cliques of the pairwise graph and the
-pairwise graph equals `find_overlapping_tiles`); influence rows match the
-exact engine to 0.05 cGy (0.001 % of rx) with the tabulated kernel; weighted
-V100/V150/V200/D90 match the reference to < 0.1 cGy; SA is reproducible from
-its seed and, on the phantom instance, seed-insensitive and 3.3 pp better
-than greedy. One real defect: the integration entry point `optimize()`
-raises for every solver (finding 0), so the end-to-end probes (e)/(f) on the
-grid-reported metrics and on the planner-facing output could not run.
-Final counts for `tests/test_plan_review.py`: 14 passed, 2 errors (one
-fixture, finding 0), 0 skipped. Max influence deviation: 0.05 cGy (tabulated), 0.00 cGy (exact).
+Every independent probe passes against the merged builders' code: the
+greedy-suboptimal construction fires against the builders' greedy exactly
+as designed (0.40 vs brute force 0.84) and SA / MILP recover the optimum;
+the clique over-constraint probe does not fire (the builders' cliques are
+true cliques of the pairwise graph and the pairwise graph equals
+`find_overlapping_tiles`); influence rows match the exact engine to
+0.05 cGy (0.001 % of rx, tabulated kernel) and exactly with the exact
+kernel; weighted V100/V150/V200/D90 conventions match the reference to
+< 0.1 cGy; SA is reproducible from its seed and, on the phantom instance,
+seed-insensitive and 3.3 pp better than greedy; the end-to-end `optimize`
+output is planner-clean and its grid-reported metrics agree with the
+exact-point reference to < 0.1 pp V100 and ~1 cGy D90 under both the
+weighted (§2) and the unweighted (planner) convention. One real defect was
+found and has since been fixed on main (finding 0). Final counts for
+`tests/test_plan_review.py`: 16 passed, 0 failed, 0 skipped. Max influence
+deviation: 0.05 cGy (tabulated), 0.00 cGy (exact).
 
 ## Not checked
 
-`optimize` end-to-end (finding 0): grid-reported +5 mm metrics vs the
-weighted exact-point reference (and the unweighted `dvh_stats` vs weighted
-§2 definition question), `report.overlaps`, and `optimize` wall time at the
-default h = 2.5 mm (~300 s before the failure; the probe uses h = 4 mm).
-OAR terms, half tiles, `refine_continuous`, `sweep_n`, `suggest_next` and
-`recommend_tile_count` were outside the brief. The pytest traceback of the
-failing probe printed `gtcore/plan/solvers.py` source for `solve_greedy`;
-the reviewer did not otherwise read builders' code.
+`optimize` wall time at the default h = 2.5 mm (~300 s on this cavity in
+the pre-fix run; the probe uses h = 4 mm, 67 s). OAR terms, half tiles,
+`refine_continuous`, `sweep_n`, `suggest_next`, `recommend_tile_count` and
+`final_report` with the interference model were outside the brief. The
+pytest traceback of the pre-fix failure printed `gtcore/plan/solvers.py`
+source for `solve_greedy`; the reviewer did not otherwise read builders'
+code.
