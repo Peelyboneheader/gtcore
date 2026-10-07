@@ -51,8 +51,8 @@ reference: single-tile V100 = 0.30 / 0.30 / 0.40 / 0.00, so any forward
 greedy picks C first; every feasible pair containing C has V100 <= 0.40;
 brute-force optimum {A, B} V100 = 0.84 (V200 = 0 everywhere, so P1 = V100).
 Reference greedy: [C, D], V100 = 0.40.
-Builders' greedy: PENDING. SA: PENDING. MILP: PENDING.
-MILP with `cliques=[]` (pairs only): PENDING.
+Builders' greedy: not run (implementation absent at review time). SA: not run (implementation absent at review time). MILP: not run (implementation absent at review time).
+MILP with `cliques=[]` (pairs only): not run (implementation absent at review time).
 
 (b) **Clique over-constraint.** §2: "no two tiles conflict (hard)" -- the
 hard constraint is PAIRWISE; a clique inequality is a valid tightening only
@@ -60,23 +60,23 @@ when every pair in the clique conflicts under `find_overlapping_tiles`.
 Triple P (0, 0), Q (23, 0), R (11.5, 23): pairwise feasible (3 mm edge
 gaps), anchor distances 23.0 / 25.7 / 25.7 mm < one tile diagonal 28.3 mm;
 all three is the unique brute-force optimum at N = 3.
-`build_conflicts` on the triple: PENDING. Solvers on the builders' graph at
-N = 3: PENDING. Dense 5 x 5 grid (11.5 mm pitch): pairs vs
-`find_overlapping_tiles` and every clique a true clique: PENDING.
+`build_conflicts` on the triple: not run (implementation absent at review time). Solvers on the builders' graph at
+N = 3: not run (implementation absent at review time). Dense 5 x 5 grid (11.5 mm pitch): pairs vs
+`find_overlapping_tiles` and every clique a true clique: not run (implementation absent at review time).
 
 (c) **Influence rows.** 6 reference candidates on the phantom, full +5 mm
 shell (`m_opt` = M, no subsampling), points >= 2.5 mm from every seed,
-tolerance 1 % of rx. Tabulated kernel: PENDING. Exact kernel: PENDING.
+tolerance 1 % of rx. Tabulated kernel: not run (implementation absent at review time). Exact kernel: not run (implementation absent at review time).
 
 (d) **SA seed sensitivity.** 24 reference candidates, N = 4, rx 4000.
-PENDING.
+Not run (implementation absent at review time).
 
 (e) **Re-derived metrics.** `Objective.metrics` vs reference on identical
-rows: PENDING. `solve_greedy` result metrics: PENDING. `optimize(greedy,
-N = 4)` grid-reported +5 mm V100/D90 vs reference on the full shell: PENDING.
+rows: not run (implementation absent at review time). `solve_greedy` result metrics: not run (implementation absent at review time). `optimize(greedy,
+N = 4)` grid-reported +5 mm V100/D90 vs reference on the full shell: not run (implementation absent at review time).
 
 (f) **Planner consistency.** `optimize` output and greedy output under
-`find_overlapping_tiles`: PENDING.
+`find_overlapping_tiles`: not run (implementation absent at review time).
 
 ## Findings so far (independent of the builders' code)
 
@@ -98,8 +98,31 @@ N = 4)` grid-reported +5 mm V100/D90 vs reference on the full shell: PENDING.
 
 ## Verdict
 
-PENDING.
+At the time this report was written (plan/review at the merge of main
+`cd73082`, the Phase-0 interface freeze) no builder branch had merged, so
+every builder-dependent probe skips: **2 passed, 14 skipped, 0 failed** in
+`tests/test_plan_review.py`; `tests/test_interact.py` + the builders'
+`tests/test_plan_interface.py` 41 passed; full suite green. The two
+constructions are certified by the reference alone: the greedy trap fires
+(reference forward greedy 0.40 vs brute force 0.84) and the clique triple is
+pairwise-feasible with all anchors inside one tile diagonal, so the probes
+are armed. The maximum influence deviation could not be measured (no
+`build_influence`). The probes are written against the frozen signatures
+(`solve_*(objective, n_tiles, ...)`, `build_influence(CandidateSet,
+TargetSet, ...)`, `build_conflicts(CandidateSet)`, `optimize(mesh, n_full,
+...) -> (tiles, OptimizeReport)`), so they become real on the first merge
+with no edits: re-run `python -m pytest tests/test_plan_review.py -q -rs -s`
+after each merge and paste the printed "probe (x): ..." lines here.
 
-## Not checked
+## Not checked (implementation had not landed)
 
-PENDING.
+Builders' greedy/SA/MILP on the trap (a); `build_conflicts` pairs and
+cliques on the triple and on the 5 x 5 grid, and solver behaviour on the
+builders' graph (b); influence rows for either kernel (c); SA seed
+reproducibility and SA-vs-greedy objective (d); `Objective.metrics`,
+`SolverResult.metrics` and `optimize` grid-reported metrics against the
+reference (e); planner flag on optimizer output (f). Also unmeasured:
+`optimize` wall time at h = 2.5 mm on the phantom (the (e)/(f) fixture
+prints it), and whether `metrics_grid` (unweighted `dvh_stats` on grid-
+sampled vertices) stays within 0.5 pp of the weighted exact-point V100 --
+the (e) probe prints both weightings so that difference is attributable.
