@@ -1874,3 +1874,461 @@ h 4 mm on these cavities. Rule from §4 ("if SA does not beat greedy, greedy
 is the default") → SA beats greedy → `gtcore.plan.optimize`, `gt optimize`,
 `gt plan --optimizer` and the planner's O key default to `sa` (commit after
 395dd7e); fixed/adopted tiles still force greedy, with a note in the report.
+
+
+# Full validation campaign (2026-10-07 05:11-08:07, commit 93696e2, one process, machine otherwise quiet except the coordinator suite runs)
+
+Pasted unedited from the script's `notes_block_20261007_080701.md`; CSVs and figures under `docs/figures/optimize/` (`data/` holds every table). Decisions drawn from it: SA is the default solver (see the decision block above); the continuous solver is retained but not default; the §7.7 reframing does NOT apply (the optimizer gain over the uniform heuristic is +22.8 pp, far above 2 pp).
+
+## validation_optimize run 2026-10-07 05:11 — commit 93696e2 — `python scripts/validation_optimize.py `
+
+Seeds (1, 2, 3, 4, 5, 6) × scales (0.8, 1.0, 1.25); N (4, 6, 8, 10, 12); n_random 20; rx 6000 cGy; grid 1 mm; report margin 15 mm; h 4 mm; 6 spins; M_opt 1000; MILP reduced h 6 mm / 2 spins / M 300 / 300 s, N in (4, 6, 8).
+
+### V2 cavity grid
+
+| cavity | seed | scale | radii_mm | volume_mL | area_mm2 | truth_tiles | rule_tiles |
+|---|---|---|---|---|---|---|---|
+| s1_x0.80 | 1 | 0.800 | 16.0/14.4/13.6 | 12.4 | 2678 | 8 | 7 |
+| s2_x0.80 | 2 | 0.800 | 16.0/14.4/13.6 | 14.0 | 2914 | 8 | 8 |
+| s3_x0.80 | 3 | 0.800 | 16.0/14.4/13.6 | 13.5 | 2851 | 8 | 8 |
+| s4_x0.80 | 4 | 0.800 | 16.0/14.4/13.6 | 14.5 | 2965 | 8 | 8 |
+| s5_x0.80 | 5 | 0.800 | 16.0/14.4/13.6 | 13.4 | 2820 | 8 | 8 |
+| s6_x0.80 | 6 | 0.800 | 16.0/14.4/13.6 | 13.4 | 2810 | 8 | 8 |
+| s1_x1.00 | 1 | 1.000 | 20.0/18.0/17.0 | 24.4 | 4178 | 8 | 11 |
+| s2_x1.00 | 2 | 1.000 | 20.0/18.0/17.0 | 27.6 | 4561 | 8 | 12 |
+| s3_x1.00 | 3 | 1.000 | 20.0/18.0/17.0 | 26.6 | 4444 | 8 | 12 |
+| s4_x1.00 | 4 | 1.000 | 20.0/18.0/17.0 | 28.5 | 4636 | 8 | 12 |
+| s5_x1.00 | 5 | 1.000 | 20.0/18.0/17.0 | 26.4 | 4419 | 8 | 12 |
+| s6_x1.00 | 6 | 1.000 | 20.0/18.0/17.0 | 26.3 | 4392 | 8 | 11 |
+| s1_x1.25 | 1 | 1.250 | 25.0/22.5/21.2 | 47.8 | 6527 | 8 | 17 |
+| s2_x1.25 | 2 | 1.250 | 25.0/22.5/21.2 | 54.2 | 7123 | 8 | 18 |
+| s3_x1.25 | 3 | 1.250 | 25.0/22.5/21.2 | 52.2 | 6958 | 8 | 18 |
+| s4_x1.25 | 4 | 1.250 | 25.0/22.5/21.2 | 55.8 | 7246 | 8 | 19 |
+| s5_x1.25 | 5 | 1.250 | 25.0/22.5/21.2 | 51.7 | 6894 | 8 | 18 |
+| s6_x1.25 | 6 | 1.250 | 25.0/22.5/21.2 | 51.6 | 6867 | 8 | 18 |
+
+### V2 results (mean ± SD across cavities; +5 mm shell, grid based) (conflict rule = planner ∪ geometric proxy; n_pairs_added recorded per instance)
+
+Wall time per arm (`solve s`) is listed per row so SA (1.5-4 s) and the continuous arm (fixed 60 s budget) stand side by side.
+
+| N | arm | n_cav | V100 | D90 [cGy] | V150 | V200 | solve s |
+|---|---|---|---|---|---|---|---|
+| 4 | random | 18 | 0.097 ± 0.142 | 2376 ± 1019 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.0 |
+| 4 | uniform | 15 | 0.061 ± 0.122 | 2131 ± 870 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.0 |
+| 4 | greedy | 18 | 0.233 ± 0.107 | 1736 ± 1129 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.1 |
+| 4 | greedy+local | 18 | 0.245 ± 0.117 | 1694 ± 1086 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.1 |
+| 4 | sa | 18 | 0.272 ± 0.134 | 1555 ± 956 | 0.000 ± 0.000 | 0.000 ± 0.000 | 1.3 |
+| 4 | milp | 15 | 0.206 ± 0.090 | 1389 ± 920 | 0.000 ± 0.000 | 0.000 ± 0.000 | 8.8 |
+| 4 | continuous | 6 | 0.227 ± 0.014 | 1299 ± 69 | 0.000 ± 0.000 | 0.000 ± 0.000 | 35.9 |
+| 6 | random | 12 | 0.202 ± 0.201 | 3295 ± 897 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.0 |
+| 6 | uniform | 11 | 0.162 ± 0.178 | 3565 ± 904 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.0 |
+| 6 | greedy | 13 | 0.438 ± 0.191 | 2288 ± 1445 | 0.007 ± 0.011 | 0.000 ± 0.000 | 0.1 |
+| 6 | greedy+local | 13 | 0.452 ± 0.192 | 2386 ± 1468 | 0.002 ± 0.006 | 0.000 ± 0.000 | 0.2 |
+| 6 | sa | 13 | 0.484 ± 0.210 | 2442 ± 1617 | 0.001 ± 0.005 | 0.000 ± 0.000 | 1.9 |
+| 6 | milp | 12 | 0.411 ± 0.138 | 2074 ± 916 | 0.000 ± 0.000 | 0.000 ± 0.000 | 152.7 |
+| 6 | continuous | 6 | 0.519 ± 0.040 | 2723 ± 347 | 0.005 ± 0.008 | 0.000 ± 0.000 | 55.0 |
+| 8 | random | 9 | 0.483 ± 0.314 | 4492 ± 1132 | 0.007 ± 0.012 | 0.000 ± 0.000 | 0.0 |
+| 8 | uniform | 4 | 0.273 ± 0.048 | 3539 ± 109 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.0 |
+| 8 | greedy | 12 | 0.690 ± 0.236 | 4063 ± 2095 | 0.050 ± 0.054 | 0.000 ± 0.000 | 0.2 |
+| 8 | greedy+local | 12 | 0.731 ± 0.251 | 4288 ± 2218 | 0.019 ± 0.032 | 0.000 ± 0.000 | 0.3 |
+| 8 | sa | 12 | 0.761 ± 0.250 | 4381 ± 2390 | 0.004 ± 0.009 | 0.000 ± 0.000 | 2.2 |
+| 8 | milp | 9 | 0.631 ± 0.246 | 3689 ± 2008 | 0.001 ± 0.002 | 0.000 ± 0.000 | 201.3 |
+| 8 | continuous | 6 | 0.949 ± 0.034 | 6344 ± 295 | 0.045 ± 0.038 | 0.000 ± 0.000 | 60.0 |
+| 8 | truth | 18 | 0.648 ± 0.188 | 3757 ± 1650 | 0.344 ± 0.253 | 0.144 ± 0.179 | 0.0 |
+| 8 | truth_raw | 18 | 0.638 ± 0.181 | 3681 ± 1590 | 0.341 ± 0.245 | 0.153 ± 0.177 | 0.0 |
+| 10 | random | 6 | 0.719 ± 0.069 | 5200 ± 275 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.0 |
+| 10 | greedy | 6 | 0.703 ± 0.031 | 3789 ± 489 | 0.012 ± 0.019 | 0.000 ± 0.000 | 0.3 |
+| 10 | greedy+local | 6 | 0.772 ± 0.060 | 4982 ± 711 | 0.000 ± 0.001 | 0.000 ± 0.000 | 0.3 |
+| 10 | sa | 6 | 0.832 ± 0.081 | 5334 ± 717 | 0.000 ± 0.000 | 0.000 ± 0.000 | 3.1 |
+| 12 | greedy | 5 | 0.971 ± 0.018 | 6584 ± 183 | 0.084 ± 0.046 | 0.000 ± 0.000 | 0.3 |
+| 12 | greedy+local | 5 | 0.992 ± 0.009 | 6692 ± 155 | 0.062 ± 0.053 | 0.000 ± 0.000 | 0.4 |
+| 12 | sa | 5 | 1.000 ± 0.001 | 6763 ± 132 | 0.046 ± 0.042 | 0.000 ± 0.000 | 3.0 |
+
+Paired differences in V100 (pp), t-based 95 % CI, Wilcoxon signed-rank:
+
+| N | comparison | mean_pp | ci_lo_pp | ci_hi_pp | n | wilcoxon_p |
+|---|---|---|---|---|---|---|
+| 4 | sa - greedy | 3.94 | 1.87 | 6.01 | 18 | 0.001 |
+| 4 | sa - uniform | 17.62 | 14.36 | 20.88 | 15 | 0.000 |
+| 4 | greedy - uniform | 14.75 | 10.89 | 18.60 | 15 | 0.000 |
+| 4 | greedy+local - greedy | 1.21 | -0.06 | 2.47 | 18 | 0.018 |
+| 4 | sa - random | 17.50 | 14.61 | 20.39 | 18 | 0.000 |
+| 4 | continuous - sa | -1.59 | -2.92 | -0.26 | 6 | 0.062 |
+| 4 | continuous - uniform | 22.23 | 20.02 | 24.45 | 6 | 0.031 |
+| 6 | sa - greedy | 4.61 | 2.74 | 6.49 | 13 | 0.000 |
+| 6 | sa - uniform | 26.87 | 23.83 | 29.91 | 11 | 0.001 |
+| 6 | greedy - uniform | 22.56 | 17.94 | 27.18 | 11 | 0.001 |
+| 6 | greedy+local - greedy | 1.45 | 0.40 | 2.50 | 13 | 0.014 |
+| 6 | sa - random | 23.86 | 20.28 | 27.43 | 12 | 0.000 |
+| 6 | continuous - sa | -6.18 | -8.48 | -3.89 | 6 | 0.031 |
+| 6 | continuous - uniform | 18.17 | 9.07 | 27.26 | 5 | 0.062 |
+| 8 | sa - greedy | 7.04 | 4.18 | 9.89 | 12 | 0.000 |
+| 8 | sa - uniform | 23.51 | 18.78 | 28.23 | 4 | 0.125 |
+| 8 | greedy - uniform | 17.98 | 10.58 | 25.37 | 4 | 0.125 |
+| 8 | greedy+local - greedy | 4.11 | 1.56 | 6.65 | 12 | 0.002 |
+| 8 | sa - random | 19.76 | 14.02 | 25.51 | 9 | 0.004 |
+| 8 | continuous - sa | -5.03 | -8.59 | -1.47 | 6 | 0.031 |
+| 8 | continuous - uniform | — | — | — | 0 | 1.000 |
+| 10 | sa - greedy | 12.85 | 6.38 | 19.32 | 6 | 0.031 |
+| 10 | greedy+local - greedy | 6.91 | 2.67 | 11.15 | 6 | 0.031 |
+| 10 | sa - random | 11.28 | 9.40 | 13.17 | 6 | 0.031 |
+| 12 | sa - greedy | 2.91 | 0.63 | 5.19 | 5 | 0.062 |
+| 12 | greedy+local - greedy | 2.17 | 0.44 | 3.90 | 5 | 0.062 |
+
+**Primary endpoint** (SA - uniform, V100 at N*): 22.84 pp [19.33, 26.35], n = 15, Wilcoxon p = 0.000; 15 cavities where uniform never reached D90 >= rx (N* := max N); 0 cavities used the largest N with both arms OK instead of N* (packing-limited arms); 0 cavities with no N where both arms succeeded.
+
+| cavity | N_star | N_used | fallback | uniform_never_reached_rx | V100_uniform | V100_sa | diff_pp |
+|---|---|---|---|---|---|---|---|
+| s1_x0.80 | 4 | 4 | False | True | 0.317 | 0.408 | 9.19 |
+| s3_x0.80 | 4 | 4 | False | True | 0.316 | 0.442 | 12.60 |
+| s6_x0.80 | 4 | 4 | False | True | 0.254 | 0.468 | 21.46 |
+| s1_x1.00 | 6 | 6 | False | True | 0.424 | 0.625 | 20.09 |
+| s2_x1.00 | 6 | 6 | False | True | 0.374 | 0.564 | 18.98 |
+| s3_x1.00 | 6 | 6 | False | True | 0.360 | 0.579 | 21.89 |
+| s4_x1.00 | 4 | 4 | False | True | 0.000 | 0.243 | 24.28 |
+| s5_x1.00 | 6 | 6 | False | True | 0.284 | 0.575 | 29.05 |
+| s6_x1.00 | 6 | 6 | False | True | 0.269 | 0.595 | 32.59 |
+| s1_x1.25 | 6 | 6 | False | True | 0.044 | 0.334 | 29.01 |
+| s2_x1.25 | 8 | 8 | False | True | 0.264 | 0.508 | 24.46 |
+| s3_x1.25 | 8 | 8 | False | True | 0.264 | 0.516 | 25.18 |
+| s4_x1.25 | 8 | 8 | False | True | 0.225 | 0.478 | 25.29 |
+| s5_x1.25 | 8 | 8 | False | True | 0.339 | 0.530 | 19.09 |
+| s6_x1.25 | 6 | 6 | False | True | 0.000 | 0.295 | 29.45 |
+
+FAILED arm rows (fewer than N tiles / conflict / bad status; excluded from all statistics):
+
+| cavity | N | arm | n_placed | reason |
+|---|---|---|---|---|
+| s1_x0.80 | 4 | milp | 0 | FAILED (n_placed=0): milp status infeasible: no 4-candidate selection satisfies the conflict / OAR rows (65 nodes searched) |
+| s1_x0.80 | 6 | greedy | 3 | FAILED (n_placed=3): greedy status infeasible: no compatible candidate left after placing 3 of 6 tiles |
+| s1_x0.80 | 6 | greedy+local | 3 | FAILED (n_placed=3): greedy infeasible: no compatible candidate left after placing 3 of 6 tiles |
+| s1_x0.80 | 6 | sa | 3 | FAILED (n_placed=3): sa status infeasible: greedy start failed: no compatible candidate left after placing 3 of 6 tiles |
+| s1_x0.80 | 6 | milp | 0 | FAILED (n_placed=0): milp status infeasible: no 6-candidate selection satisfies the conflict / OAR rows (54 nodes searched) |
+| s1_x0.80 | 8 | greedy | 3 | FAILED (n_placed=3): greedy status infeasible: no compatible candidate left after placing 3 of 8 tiles |
+| s1_x0.80 | 8 | greedy+local | 3 | FAILED (n_placed=3): greedy infeasible: no compatible candidate left after placing 3 of 8 tiles |
+| s1_x0.80 | 8 | sa | 3 | FAILED (n_placed=3): sa status infeasible: greedy start failed: no compatible candidate left after placing 3 of 8 tiles |
+| s1_x0.80 | 8 | milp | 0 | FAILED (n_placed=0): milp status infeasible: no 8-candidate selection satisfies the conflict / OAR rows (16 nodes searched) |
+| s1_x0.80 | 10 | greedy | 3 | FAILED (n_placed=3): greedy status infeasible: no compatible candidate left after placing 3 of 10 tiles |
+| s1_x0.80 | 10 | greedy+local | 3 | FAILED (n_placed=3): greedy infeasible: no compatible candidate left after placing 3 of 10 tiles |
+| s1_x0.80 | 10 | sa | 3 | FAILED (n_placed=3): sa status infeasible: greedy start failed: no compatible candidate left after placing 3 of 10 tiles |
+| s1_x0.80 | 12 | greedy | 3 | FAILED (n_placed=3): greedy status infeasible: no compatible candidate left after placing 3 of 12 tiles |
+| s1_x0.80 | 12 | greedy+local | 3 | FAILED (n_placed=3): greedy infeasible: no compatible candidate left after placing 3 of 12 tiles |
+| s1_x0.80 | 12 | sa | 3 | FAILED (n_placed=3): sa status infeasible: greedy start failed: no compatible candidate left after placing 3 of 12 tiles |
+| s2_x0.80 | 4 | milp | 0 | FAILED (n_placed=0): milp status infeasible: no 4-candidate selection satisfies the conflict / OAR rows (256 nodes searched) |
+| s2_x0.80 | 6 | greedy | 4 | FAILED (n_placed=4): greedy status infeasible: no compatible candidate left after placing 4 of 6 tiles |
+| s2_x0.80 | 6 | greedy+local | 4 | FAILED (n_placed=4): greedy infeasible: no compatible candidate left after placing 4 of 6 tiles |
+| s2_x0.80 | 6 | sa | 4 | FAILED (n_placed=4): sa status infeasible: greedy start failed: no compatible candidate left after placing 4 of 6 tiles |
+| s2_x0.80 | 6 | milp | 0 | FAILED (n_placed=0): milp status infeasible: no 6-candidate selection satisfies the conflict / OAR rows (215 nodes searched) |
+| s2_x0.80 | 8 | greedy | 4 | FAILED (n_placed=4): greedy status infeasible: no compatible candidate left after placing 4 of 8 tiles |
+| s2_x0.80 | 8 | greedy+local | 4 | FAILED (n_placed=4): greedy infeasible: no compatible candidate left after placing 4 of 8 tiles |
+| s2_x0.80 | 8 | sa | 4 | FAILED (n_placed=4): sa status infeasible: greedy start failed: no compatible candidate left after placing 4 of 8 tiles |
+| s2_x0.80 | 8 | milp | 0 | FAILED (n_placed=0): milp status infeasible: no 8-candidate selection satisfies the conflict / OAR rows (191 nodes searched) |
+| s2_x0.80 | 10 | greedy | 4 | FAILED (n_placed=4): greedy status infeasible: no compatible candidate left after placing 4 of 10 tiles |
+| s2_x0.80 | 10 | greedy+local | 4 | FAILED (n_placed=4): greedy infeasible: no compatible candidate left after placing 4 of 10 tiles |
+| s2_x0.80 | 10 | sa | 4 | FAILED (n_placed=4): sa status infeasible: greedy start failed: no compatible candidate left after placing 4 of 10 tiles |
+| s2_x0.80 | 12 | greedy | 4 | FAILED (n_placed=4): greedy status infeasible: no compatible candidate left after placing 4 of 12 tiles |
+| s2_x0.80 | 12 | greedy+local | 4 | FAILED (n_placed=4): greedy infeasible: no compatible candidate left after placing 4 of 12 tiles |
+| s2_x0.80 | 12 | sa | 4 | FAILED (n_placed=4): sa status infeasible: greedy start failed: no compatible candidate left after placing 4 of 12 tiles |
+| s3_x0.80 | 6 | greedy | 5 | FAILED (n_placed=5): greedy status infeasible: no compatible candidate left after placing 5 of 6 tiles |
+| s3_x0.80 | 6 | greedy+local | 5 | FAILED (n_placed=5): greedy infeasible: no compatible candidate left after placing 5 of 6 tiles |
+| s3_x0.80 | 6 | sa | 5 | FAILED (n_placed=5): sa status infeasible: greedy start failed: no compatible candidate left after placing 5 of 6 tiles |
+| s3_x0.80 | 6 | milp | 0 | FAILED (n_placed=0): milp status infeasible: no 6-candidate selection satisfies the conflict / OAR rows (261 nodes searched) |
+| s3_x0.80 | 8 | greedy | 5 | FAILED (n_placed=5): greedy status infeasible: no compatible candidate left after placing 5 of 8 tiles |
+| s3_x0.80 | 8 | greedy+local | 5 | FAILED (n_placed=5): greedy infeasible: no compatible candidate left after placing 5 of 8 tiles |
+| s3_x0.80 | 8 | sa | 5 | FAILED (n_placed=5): sa status infeasible: greedy start failed: no compatible candidate left after placing 5 of 8 tiles |
+| s3_x0.80 | 8 | milp | 0 | FAILED (n_placed=0): milp status infeasible: no 8-candidate selection satisfies the conflict / OAR rows (230 nodes searched) |
+| s3_x0.80 | 10 | greedy | 5 | FAILED (n_placed=5): greedy status infeasible: no compatible candidate left after placing 5 of 10 tiles |
+| s3_x0.80 | 10 | greedy+local | 5 | FAILED (n_placed=5): greedy infeasible: no compatible candidate left after placing 5 of 10 tiles |
+| s3_x0.80 | 10 | sa | 5 | FAILED (n_placed=5): sa status infeasible: greedy start failed: no compatible candidate left after placing 5 of 10 tiles |
+| s3_x0.80 | 12 | greedy | 5 | FAILED (n_placed=5): greedy status infeasible: no compatible candidate left after placing 5 of 12 tiles |
+| s3_x0.80 | 12 | greedy+local | 5 | FAILED (n_placed=5): greedy infeasible: no compatible candidate left after placing 5 of 12 tiles |
+| s3_x0.80 | 12 | sa | 5 | FAILED (n_placed=5): sa status infeasible: greedy start failed: no compatible candidate left after placing 5 of 12 tiles |
+| s4_x0.80 | 6 | milp | 0 | FAILED (n_placed=0): milp status infeasible: no 6-candidate selection satisfies the conflict / OAR rows (587 nodes searched) |
+| s4_x0.80 | 8 | greedy | 5 | FAILED (n_placed=5): greedy status infeasible: no compatible candidate left after placing 5 of 8 tiles |
+| s4_x0.80 | 8 | greedy+local | 5 | FAILED (n_placed=5): greedy infeasible: no compatible candidate left after placing 5 of 8 tiles |
+| s4_x0.80 | 8 | sa | 5 | FAILED (n_placed=5): sa status infeasible: greedy start failed: no compatible candidate left after placing 5 of 8 tiles |
+| s4_x0.80 | 8 | milp | 0 | FAILED (n_placed=0): milp status infeasible: no 8-candidate selection satisfies the conflict / OAR rows (472 nodes searched) |
+| s4_x0.80 | 10 | greedy | 5 | FAILED (n_placed=5): greedy status infeasible: no compatible candidate left after placing 5 of 10 tiles |
+| s4_x0.80 | 10 | greedy+local | 5 | FAILED (n_placed=5): greedy infeasible: no compatible candidate left after placing 5 of 10 tiles |
+| s4_x0.80 | 10 | sa | 5 | FAILED (n_placed=5): sa status infeasible: greedy start failed: no compatible candidate left after placing 5 of 10 tiles |
+| s4_x0.80 | 12 | greedy | 5 | FAILED (n_placed=5): greedy status infeasible: no compatible candidate left after placing 5 of 12 tiles |
+| s4_x0.80 | 12 | greedy+local | 5 | FAILED (n_placed=5): greedy infeasible: no compatible candidate left after placing 5 of 12 tiles |
+| s4_x0.80 | 12 | sa | 5 | FAILED (n_placed=5): sa status infeasible: greedy start failed: no compatible candidate left after placing 5 of 12 tiles |
+| s5_x0.80 | 6 | greedy | 4 | FAILED (n_placed=4): greedy status infeasible: no compatible candidate left after placing 4 of 6 tiles |
+| s5_x0.80 | 6 | greedy+local | 4 | FAILED (n_placed=4): greedy infeasible: no compatible candidate left after placing 4 of 6 tiles |
+| s5_x0.80 | 6 | sa | 4 | FAILED (n_placed=4): sa status infeasible: greedy start failed: no compatible candidate left after placing 4 of 6 tiles |
+| s5_x0.80 | 6 | milp | 0 | FAILED (n_placed=0): milp status infeasible: no 6-candidate selection satisfies the conflict / OAR rows (227 nodes searched) |
+| s5_x0.80 | 8 | greedy | 4 | FAILED (n_placed=4): greedy status infeasible: no compatible candidate left after placing 4 of 8 tiles |
+| s5_x0.80 | 8 | greedy+local | 4 | FAILED (n_placed=4): greedy infeasible: no compatible candidate left after placing 4 of 8 tiles |
+| s5_x0.80 | 8 | sa | 4 | FAILED (n_placed=4): sa status infeasible: greedy start failed: no compatible candidate left after placing 4 of 8 tiles |
+| s5_x0.80 | 8 | milp | 0 | FAILED (n_placed=0): milp status infeasible: no 8-candidate selection satisfies the conflict / OAR rows (213 nodes searched) |
+| s5_x0.80 | 10 | greedy | 4 | FAILED (n_placed=4): greedy status infeasible: no compatible candidate left after placing 4 of 10 tiles |
+| s5_x0.80 | 10 | greedy+local | 4 | FAILED (n_placed=4): greedy infeasible: no compatible candidate left after placing 4 of 10 tiles |
+| s5_x0.80 | 10 | sa | 4 | FAILED (n_placed=4): sa status infeasible: greedy start failed: no compatible candidate left after placing 4 of 10 tiles |
+| s5_x0.80 | 12 | greedy | 4 | FAILED (n_placed=4): greedy status infeasible: no compatible candidate left after placing 4 of 12 tiles |
+| s5_x0.80 | 12 | greedy+local | 4 | FAILED (n_placed=4): greedy infeasible: no compatible candidate left after placing 4 of 12 tiles |
+| s5_x0.80 | 12 | sa | 4 | FAILED (n_placed=4): sa status infeasible: greedy start failed: no compatible candidate left after placing 4 of 12 tiles |
+| s6_x0.80 | 4 | milp | 0 | FAILED (n_placed=0): milp status infeasible: no 4-candidate selection satisfies the conflict / OAR rows (231 nodes searched) |
+| s6_x0.80 | 6 | greedy | 3 | FAILED (n_placed=3): greedy status infeasible: no compatible candidate left after placing 3 of 6 tiles |
+| s6_x0.80 | 6 | greedy+local | 3 | FAILED (n_placed=3): greedy infeasible: no compatible candidate left after placing 3 of 6 tiles |
+| s6_x0.80 | 6 | sa | 3 | FAILED (n_placed=3): sa status infeasible: greedy start failed: no compatible candidate left after placing 3 of 6 tiles |
+| s6_x0.80 | 6 | milp | 0 | FAILED (n_placed=0): milp status infeasible: no 6-candidate selection satisfies the conflict / OAR rows (207 nodes searched) |
+| s6_x0.80 | 8 | greedy | 3 | FAILED (n_placed=3): greedy status infeasible: no compatible candidate left after placing 3 of 8 tiles |
+| s6_x0.80 | 8 | greedy+local | 3 | FAILED (n_placed=3): greedy infeasible: no compatible candidate left after placing 3 of 8 tiles |
+| s6_x0.80 | 8 | sa | 3 | FAILED (n_placed=3): sa status infeasible: greedy start failed: no compatible candidate left after placing 3 of 8 tiles |
+| s6_x0.80 | 8 | milp | 0 | FAILED (n_placed=0): milp status infeasible: no 8-candidate selection satisfies the conflict / OAR rows (167 nodes searched) |
+| s6_x0.80 | 10 | greedy | 3 | FAILED (n_placed=3): greedy status infeasible: no compatible candidate left after placing 3 of 10 tiles |
+| s6_x0.80 | 10 | greedy+local | 3 | FAILED (n_placed=3): greedy infeasible: no compatible candidate left after placing 3 of 10 tiles |
+| s6_x0.80 | 10 | sa | 3 | FAILED (n_placed=3): sa status infeasible: greedy start failed: no compatible candidate left after placing 3 of 10 tiles |
+| s6_x0.80 | 12 | greedy | 3 | FAILED (n_placed=3): greedy status infeasible: no compatible candidate left after placing 3 of 12 tiles |
+| s6_x0.80 | 12 | greedy+local | 3 | FAILED (n_placed=3): greedy infeasible: no compatible candidate left after placing 3 of 12 tiles |
+| s6_x0.80 | 12 | sa | 3 | FAILED (n_placed=3): sa status infeasible: greedy start failed: no compatible candidate left after placing 3 of 12 tiles |
+| s1_x1.00 | 8 | milp | 0 | FAILED (n_placed=0): milp status infeasible: no 8-candidate selection satisfies the conflict / OAR rows (77608 nodes searched) |
+| s1_x1.00 | 10 | greedy | 7 | FAILED (n_placed=7): greedy status infeasible: no compatible candidate left after placing 7 of 10 tiles |
+| s1_x1.00 | 10 | greedy+local | 7 | FAILED (n_placed=7): greedy infeasible: no compatible candidate left after placing 7 of 10 tiles |
+| s1_x1.00 | 10 | sa | 7 | FAILED (n_placed=7): sa status infeasible: greedy start failed: no compatible candidate left after placing 7 of 10 tiles |
+| s1_x1.00 | 10 | continuous | 0 | FAILED (n_placed=0): continuous status infeasible: no feasible 10-tile start found among 869 candidates |
+| s1_x1.00 | 12 | greedy | 7 | FAILED (n_placed=7): greedy status infeasible: no compatible candidate left after placing 7 of 12 tiles |
+| s1_x1.00 | 12 | greedy+local | 7 | FAILED (n_placed=7): greedy infeasible: no compatible candidate left after placing 7 of 12 tiles |
+| s1_x1.00 | 12 | sa | 7 | FAILED (n_placed=7): sa status infeasible: greedy start failed: no compatible candidate left after placing 7 of 12 tiles |
+| s1_x1.00 | 12 | continuous | 0 | FAILED (n_placed=0): continuous status infeasible: no feasible 12-tile start found among 869 candidates |
+| s2_x1.00 | 10 | greedy | 7 | FAILED (n_placed=7): greedy status infeasible: no compatible candidate left after placing 7 of 10 tiles |
+| s2_x1.00 | 10 | greedy+local | 7 | FAILED (n_placed=7): greedy infeasible: no compatible candidate left after placing 7 of 10 tiles |
+| s2_x1.00 | 10 | sa | 7 | FAILED (n_placed=7): sa status infeasible: greedy start failed: no compatible candidate left after placing 7 of 10 tiles |
+| s2_x1.00 | 10 | continuous | 0 | FAILED (n_placed=0): continuous status infeasible: no feasible 10-tile start found among 965 candidates |
+| s2_x1.00 | 12 | greedy | 7 | FAILED (n_placed=7): greedy status infeasible: no compatible candidate left after placing 7 of 12 tiles |
+| s2_x1.00 | 12 | greedy+local | 7 | FAILED (n_placed=7): greedy infeasible: no compatible candidate left after placing 7 of 12 tiles |
+| s2_x1.00 | 12 | sa | 7 | FAILED (n_placed=7): sa status infeasible: greedy start failed: no compatible candidate left after placing 7 of 12 tiles |
+| s2_x1.00 | 12 | continuous | 0 | FAILED (n_placed=0): continuous status infeasible: no feasible 12-tile start found among 965 candidates |
+| s3_x1.00 | 10 | greedy | 7 | FAILED (n_placed=7): greedy status infeasible: no compatible candidate left after placing 7 of 10 tiles |
+| s3_x1.00 | 10 | greedy+local | 7 | FAILED (n_placed=7): greedy infeasible: no compatible candidate left after placing 7 of 10 tiles |
+| s3_x1.00 | 10 | sa | 7 | FAILED (n_placed=7): sa status infeasible: greedy start failed: no compatible candidate left after placing 7 of 10 tiles |
+| s3_x1.00 | 10 | continuous | 0 | FAILED (n_placed=0): continuous status infeasible: no feasible 10-tile start found among 919 candidates |
+| s3_x1.00 | 12 | greedy | 7 | FAILED (n_placed=7): greedy status infeasible: no compatible candidate left after placing 7 of 12 tiles |
+| s3_x1.00 | 12 | greedy+local | 7 | FAILED (n_placed=7): greedy infeasible: no compatible candidate left after placing 7 of 12 tiles |
+| s3_x1.00 | 12 | sa | 7 | FAILED (n_placed=7): sa status infeasible: greedy start failed: no compatible candidate left after placing 7 of 12 tiles |
+| s3_x1.00 | 12 | continuous | 0 | FAILED (n_placed=0): continuous status infeasible: no feasible 12-tile start found among 919 candidates |
+| s4_x1.00 | 10 | greedy | 8 | FAILED (n_placed=8): greedy status infeasible: no compatible candidate left after placing 8 of 10 tiles |
+| s4_x1.00 | 10 | greedy+local | 8 | FAILED (n_placed=8): greedy infeasible: no compatible candidate left after placing 8 of 10 tiles |
+| s4_x1.00 | 10 | sa | 8 | FAILED (n_placed=8): sa status infeasible: greedy start failed: no compatible candidate left after placing 8 of 10 tiles |
+| s4_x1.00 | 10 | continuous | 0 | FAILED (n_placed=0): continuous status infeasible: no feasible 10-tile start found among 997 candidates |
+| s4_x1.00 | 12 | greedy | 8 | FAILED (n_placed=8): greedy status infeasible: no compatible candidate left after placing 8 of 12 tiles |
+| s4_x1.00 | 12 | greedy+local | 8 | FAILED (n_placed=8): greedy infeasible: no compatible candidate left after placing 8 of 12 tiles |
+| s4_x1.00 | 12 | sa | 8 | FAILED (n_placed=8): sa status infeasible: greedy start failed: no compatible candidate left after placing 8 of 12 tiles |
+| s4_x1.00 | 12 | continuous | 0 | FAILED (n_placed=0): continuous status infeasible: no feasible 12-tile start found among 997 candidates |
+| s5_x1.00 | 8 | milp | 0 | FAILED (n_placed=0): milp status infeasible: no 8-candidate selection satisfies the conflict / OAR rows (143730 nodes searched) |
+| s5_x1.00 | 10 | greedy | 8 | FAILED (n_placed=8): greedy status infeasible: no compatible candidate left after placing 8 of 10 tiles |
+| s5_x1.00 | 10 | greedy+local | 8 | FAILED (n_placed=8): greedy infeasible: no compatible candidate left after placing 8 of 10 tiles |
+| s5_x1.00 | 10 | sa | 8 | FAILED (n_placed=8): sa status infeasible: greedy start failed: no compatible candidate left after placing 8 of 10 tiles |
+| s5_x1.00 | 10 | continuous | 0 | FAILED (n_placed=0): continuous status infeasible: no feasible 10-tile start found among 903 candidates |
+| s5_x1.00 | 12 | greedy | 8 | FAILED (n_placed=8): greedy status infeasible: no compatible candidate left after placing 8 of 12 tiles |
+| s5_x1.00 | 12 | greedy+local | 8 | FAILED (n_placed=8): greedy infeasible: no compatible candidate left after placing 8 of 12 tiles |
+| s5_x1.00 | 12 | sa | 8 | FAILED (n_placed=8): sa status infeasible: greedy start failed: no compatible candidate left after placing 8 of 12 tiles |
+| s5_x1.00 | 12 | continuous | 0 | FAILED (n_placed=0): continuous status infeasible: no feasible 12-tile start found among 903 candidates |
+| s6_x1.00 | 8 | milp | 0 | FAILED (n_placed=0): milp status infeasible: no 8-candidate selection satisfies the conflict / OAR rows (191642 nodes searched) |
+| s6_x1.00 | 10 | greedy | 8 | FAILED (n_placed=8): greedy status infeasible: no compatible candidate left after placing 8 of 10 tiles |
+| s6_x1.00 | 10 | greedy+local | 8 | FAILED (n_placed=8): greedy infeasible: no compatible candidate left after placing 8 of 10 tiles |
+| s6_x1.00 | 10 | sa | 8 | FAILED (n_placed=8): sa status infeasible: greedy start failed: no compatible candidate left after placing 8 of 10 tiles |
+| s6_x1.00 | 10 | continuous | 0 | FAILED (n_placed=0): continuous status infeasible: no feasible 10-tile start found among 935 candidates |
+| s6_x1.00 | 12 | greedy | 8 | FAILED (n_placed=8): greedy status infeasible: no compatible candidate left after placing 8 of 12 tiles |
+| s6_x1.00 | 12 | greedy+local | 8 | FAILED (n_placed=8): greedy infeasible: no compatible candidate left after placing 8 of 12 tiles |
+| s6_x1.00 | 12 | sa | 8 | FAILED (n_placed=8): sa status infeasible: greedy start failed: no compatible candidate left after placing 8 of 12 tiles |
+| s6_x1.00 | 12 | continuous | 0 | FAILED (n_placed=0): continuous status infeasible: no feasible 12-tile start found among 935 candidates |
+| s1_x1.25 | 12 | greedy | 11 | FAILED (n_placed=11): greedy status infeasible: no compatible candidate left after placing 11 of 12 tiles |
+| s1_x1.25 | 12 | greedy+local | 11 | FAILED (n_placed=11): greedy infeasible: no compatible candidate left after placing 11 of 12 tiles |
+| s1_x1.25 | 12 | sa | 11 | FAILED (n_placed=11): sa status infeasible: greedy start failed: no compatible candidate left after placing 11 of 12 tiles |
+
+Skipped arms:
+
+| arm | reason |
+|---|---|
+| continuous | skipped: continuous arm runs on scales (1.0,) only (budget) |
+| milp | skipped: milp arm restricted to N in (4, 6, 8) |
+| random | skipped: random: no feasible 10-tile draw in 500 tries |
+| random | skipped: random: no feasible 12-tile draw in 500 tries |
+| random | skipped: random: no feasible 6-tile draw in 500 tries |
+| random | skipped: random: no feasible 8-tile draw in 500 tries |
+| uniform | skipped: uniform: only 3 of 10 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 3 of 12 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 3 of 4 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 3 of 6 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 3 of 8 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 4 of 10 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 4 of 12 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 4 of 6 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 4 of 8 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 5 of 10 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 5 of 12 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 5 of 6 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 5 of 8 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 6 of 10 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 6 of 12 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 6 of 8 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 7 of 10 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 7 of 12 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 7 of 8 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 8 of 10 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 8 of 12 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 9 of 10 non-conflicting anchors (spin fallback included) |
+| uniform | skipped: uniform: only 9 of 12 non-conflicting anchors (spin fallback included) |
+
+_v2: 8094 s wall; process RSS 976 MB, peak 1261 MB._
+
+### V3 optimality gap (conflict rule = planner ∪ geometric proxy; n_pairs_added recorded per instance)
+
+Reference = MILP incumbent V100 (influence matrix, coverage only), or the MILP bound when the time limit (300 s) was hit. Gap over 15 instances: mean -1.98 %, min -18.67 %, max 0.00 %, time-limit hits: 0.
+
+| cavity | N | sa_start | V100_sa_influence | V100_milp_influence | milp_status | milp_method | milp_bound | mip_gap | gap | V100_sa_grid | V100_milp_grid | V100_continuous_grid | gap_continuous_grid | milp_s | continuous_s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| s1_x1.00 | 4 | greedy | 0.277 | 0.277 | optimal | enum_bb | 0.277 | 0.000 | 0.0000 | 0.248 | 0.248 | 0.235 | -0.0511 | 0.9 | 28.2 |
+| s1_x1.00 | 6 | greedy | 0.607 | 0.643 | optimal | enum_bb | 0.643 | 0.000 | -0.0570 | 0.544 | 0.602 | 0.485 | -0.1939 | 1.7 | 43.3 |
+| s2_x1.00 | 4 | greedy | 0.210 | 0.210 | optimal | enum_bb | 0.210 | 0.000 | 0.0000 | 0.172 | 0.172 | 0.094 | -0.4560 | 1.5 | 32.2 |
+| s2_x1.00 | 6 | greedy | 0.563 | 0.563 | optimal | enum_bb | 0.563 | 0.000 | 0.0000 | 0.538 | 0.538 | 0.411 | -0.2363 | 4.5 | 41.1 |
+| s2_x1.00 | 8 | milp | 0.977 | 0.977 | optimal | enum_bb | 0.977 | 0.000 | 0.0000 | 0.977 | 0.977 |  |  | 2.3 |  |
+| s3_x1.00 | 4 | greedy | 0.307 | 0.307 | optimal | enum_bb | 0.307 | 0.000 | 0.0000 | 0.250 | 0.250 | 0.151 | -0.3963 | 1.0 | 32.3 |
+| s3_x1.00 | 6 | greedy | 0.573 | 0.573 | optimal | enum_bb | 0.573 | 0.000 | 0.0000 | 0.533 | 0.533 | 0.485 | -0.0907 | 5.0 | 36.7 |
+| s3_x1.00 | 8 | milp | 0.937 | 0.937 | optimal | enum_bb | 0.937 | 0.000 | 0.0000 | 0.940 | 0.940 |  |  | 2.5 |  |
+| s4_x1.00 | 4 | greedy | 0.203 | 0.250 | optimal | enum_bb | 0.250 | 0.000 | -0.1867 | 0.213 | 0.237 | 0.122 | -0.4834 | 1.9 | 28.2 |
+| s4_x1.00 | 6 | greedy | 0.507 | 0.507 | optimal | enum_bb | 0.507 | 0.000 | 0.0000 | 0.461 | 0.461 | 0.406 | -0.1205 | 9.5 | 39.6 |
+| s4_x1.00 | 8 | greedy | 0.893 | 0.943 | optimal | enum_bb | 0.943 | 0.000 | -0.0530 | 0.885 | 0.946 | 0.873 | -0.0768 | 5.0 | 54.4 |
+| s5_x1.00 | 4 | greedy | 0.240 | 0.240 | optimal | enum_bb | 0.240 | 0.000 | 0.0000 | 0.202 | 0.232 | 0.134 | -0.4225 | 0.9 | 27.6 |
+| s5_x1.00 | 6 | greedy | 0.580 | 0.580 | optimal | enum_bb | 0.580 | 0.000 | 0.0000 | 0.534 | 0.534 | 0.505 | -0.0531 | 2.5 | 41.9 |
+| s6_x1.00 | 4 | greedy | 0.260 | 0.260 | optimal | enum_bb | 0.260 | 0.000 | 0.0000 | 0.240 | 0.240 | 0.117 | -0.5119 | 1.2 | 30.9 |
+| s6_x1.00 | 6 | greedy | 0.573 | 0.573 | optimal | enum_bb | 0.573 | 0.000 | 0.0000 | 0.564 | 0.564 | 0.454 | -0.1954 | 3.9 | 36.9 |
+
+`gap_continuous_grid` compares grid V100 of the continuous solver against the MILP incumbent's grid V100 (the continuous solver has no influence-matrix objective; it may exceed the discrete MILP because it is not restricted to the candidate grid).
+
+V3 rows not evaluated (FAILED / skipped, never dropped):
+
+| cavity | N | status | milp_status | reason |
+|---|---|---|---|---|
+| s1_x1.00 | 8 | failed | — | FAILED (n_placed=6): sa status infeasible: greedy start failed: no compatible candidate left after placing 6 of 8 tiles; FAILED (n_placed=0): milp status infeasible: no 8-candidate selection satisfies the conflict / OAR rows (77608 nodes searched) |
+| s5_x1.00 | 8 | failed | — | FAILED (n_placed=6): sa status infeasible: greedy start failed: no compatible candidate left after placing 6 of 8 tiles; FAILED (n_placed=0): milp status infeasible: no 8-candidate selection satisfies the conflict / OAR rows (143730 nodes searched) |
+| s6_x1.00 | 8 | failed | — | FAILED (n_placed=6): sa status infeasible: greedy start failed: no compatible candidate left after placing 6 of 8 tiles; FAILED (n_placed=0): milp status infeasible: no 8-candidate selection satisfies the conflict / OAR rows (191642 nodes searched) |
+
+_v3: 589 s wall; process RSS 956 MB, peak 1288 MB._
+
+### V4 discretization (N = 8, M = 1000) (conflict rule = planner ∪ geometric proxy; n_pairs_added recorded per instance)
+
+| cavity | h_mm | n_spins | n_candidates | t_candidates | t_influence | greedy_V100 | greedy_s | sa_V100 | sa_s | e5_V100 | e5_gain_pp | continuous_V100 | continuous_s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| s1_x1.00 | 4.000 | 3 | 433 | 5.2 | 0.3 |  |  |  |  |  |  |  |  |
+| s1_x1.00 | 4.000 | 6 | 869 | 9.2 | 0.4 | 0.999 | 0.1 | 1.000 | 1.3 | 1.000 | 0.00 | 1.000 | 46.1 |
+| s1_x1.00 | 4.000 | 12 | 1737 | 17.7 | 0.7 | 0.903 | 0.2 | 0.999 | 2.0 | 0.999 | 0.00 | 1.000 | 44.1 |
+| s1_x1.00 | 3.000 | 3 | 773 | 8.3 | 0.3 | 0.984 | 0.1 | 1.000 | 1.2 | 1.000 | 0.00 | 1.000 | 48.0 |
+| s1_x1.00 | 3.000 | 6 | 1544 | 16.2 | 0.6 | 0.958 | 0.2 | 1.000 | 1.7 | 1.000 | 0.00 | 1.000 | 51.2 |
+| s1_x1.00 | 2.500 | 3 | 1154 | 12.5 | 0.5 | 1.000 | 0.1 | 1.000 | 1.7 | 1.000 | -0.02 | 1.000 | 45.5 |
+
+_v4: 745 s wall; process RSS 956 MB, peak 1302 MB._
+
+### V5 sensitivity (N = 8; V100 of +5 mm shell) (conflict rule = planner ∪ geometric proxy; n_pairs_added recorded per instance)
+
+| arm | spread_pp_mean | spread_pp_sd | n_cav |
+|---|---|---|---|
+| greedy | 9.77 | 4.50 | 3 |
+| sa | 1.24 | 0.88 | 3 |
+| truth | 4.67 | 0.29 | 3 |
+
+| cavity | perturbation | truth | uniform | greedy | sa |
+|---|---|---|---|---|---|
+| s1_x1.00 | interference_on | 0.639 |  | 0.980 | 0.998 |
+| s1_x1.00 | m_opt_4000 |  |  | 0.999 | 1.000 |
+| s1_x1.00 | nominal | 0.658 |  | 0.999 | 1.000 |
+| s1_x1.00 | seed_plane_2.25mm | 0.652 |  | 0.991 | 0.999 |
+| s1_x1.00 | seed_plane_3.75mm | 0.662 |  | 1.000 | 1.000 |
+| s1_x1.00 | sk_+5% | 0.681 |  | 1.000 | 1.000 |
+| s1_x1.00 | sk_-5% | 0.631 |  | 0.938 | 0.989 |
+| s2_x1.00 | interference_on | 0.618 |  | 0.840 | 0.996 |
+| s2_x1.00 | m_opt_4000 |  |  | 0.877 | 1.000 |
+| s2_x1.00 | nominal | 0.634 |  | 0.864 | 1.000 |
+| s2_x1.00 | seed_plane_2.25mm | 0.633 |  | 0.860 | 1.000 |
+| s2_x1.00 | seed_plane_3.75mm | 0.633 |  | 0.859 | 1.000 |
+| s2_x1.00 | sk_+5% | 0.657 |  | 0.914 | 1.000 |
+| s2_x1.00 | sk_-5% | 0.612 |  | 0.766 | 0.978 |
+| s3_x1.00 | interference_on | 0.562 |  | 0.943 | 0.999 |
+| s3_x1.00 | m_opt_4000 |  |  | 0.897 | 1.000 |
+| s3_x1.00 | nominal | 0.580 |  | 0.952 | 1.000 |
+| s3_x1.00 | seed_plane_2.25mm | 0.580 |  | 0.948 | 1.000 |
+| s3_x1.00 | seed_plane_3.75mm | 0.579 |  | 0.956 | 1.000 |
+| s3_x1.00 | sk_+5% | 0.602 |  | 0.980 | 1.000 |
+| s3_x1.00 | sk_-5% | 0.557 |  | 0.917 | 0.996 |
+
+Arm-ranking stability (Kendall tau vs nominal):
+
+| cavity | perturbation | arms | kendall_tau |
+|---|---|---|---|
+| s1_x1.00 | seed_plane_2.25mm | greedy,sa,truth | 1.00 |
+| s1_x1.00 | seed_plane_3.75mm | greedy,sa,truth | 1.00 |
+| s1_x1.00 | sk_-5% | greedy,sa,truth | 1.00 |
+| s1_x1.00 | sk_+5% | greedy,sa,truth | 0.82 |
+| s1_x1.00 | interference_on | greedy,sa,truth | 1.00 |
+| s1_x1.00 | m_opt_4000 | greedy,sa | 1.00 |
+| s2_x1.00 | seed_plane_2.25mm | greedy,sa,truth | 1.00 |
+| s2_x1.00 | seed_plane_3.75mm | greedy,sa,truth | 1.00 |
+| s2_x1.00 | sk_-5% | greedy,sa,truth | 1.00 |
+| s2_x1.00 | sk_+5% | greedy,sa,truth | 1.00 |
+| s2_x1.00 | interference_on | greedy,sa,truth | 1.00 |
+| s2_x1.00 | m_opt_4000 | greedy,sa | 1.00 |
+| s3_x1.00 | seed_plane_2.25mm | greedy,sa,truth | 1.00 |
+| s3_x1.00 | seed_plane_3.75mm | greedy,sa,truth | 1.00 |
+| s3_x1.00 | sk_-5% | greedy,sa,truth | 1.00 |
+| s3_x1.00 | sk_+5% | greedy,sa,truth | 1.00 |
+| s3_x1.00 | interference_on | greedy,sa,truth | 1.00 |
+| s3_x1.00 | m_opt_4000 | greedy,sa | 1.00 |
+
+_v5: 303 s wall; process RSS 1068 MB, peak 1478 MB._
+
+### V6 printed phantom (conflict rule = planner ∪ geometric proxy; n_pairs_added recorded per instance)
+
+Endpoints below are the WEIGHTED stats of the eligible +5 mm target (the mesh's own shell vertices include the outer surface of the printed shell; those are kept as `*_shellverts` in `v6_phantom.csv`).
+
+Wall = `meshes["body"]` (53863 mm², 473.9 mL enclosed, 72396 faces); eligible = faces visible from the implant centroid (cached mask (C:\Users\jacob\OneDrive\Desktop\gt-worktrees\plan-validation\output\validation_optimize\cache\printed_visible_72396.npy)) AND within 35 mm of a detected seed: 4651 mm² (7347 faces); target = +5 mm shell of the eligible faces (4210 points, 15539 mm²). 32 localized seeds, 8 fitted tiles. Recommended tiles: 12 (plan.recommend_tile_count).
+
+Conformer substitution alone: localized seeds sit 0.84 mm off this mesh on average, the conformer puts them at 3 mm (mean seed shift 3.94 mm): V100 +1.75 pp, D90 -6 cGy.
+
+| arm | N | n_placed | status | V100 | D90 | V150 | V200 | V100w | n_overlaps | solve_s | reason |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| as_implanted | 8 |  | ok | 0.654 | 2349 | 0.552 | 0.418 | 0.654 | 3 |  |  |
+| as_implanted_conformed | 8 |  | ok | 0.671 | 2344 | 0.555 | 0.423 | 0.671 | 6 |  |  |
+| uniform | 8 | 8 | ok | 0.712 | 4459 | 0.357 | 0.198 | 0.712 | 0 | 0.0 |  |
+| greedy | 8 | 8 | ok | 0.805 | 4563 | 0.502 | 0.239 | 0.805 | 0 | 0.0 |  |
+| sa | 8 | 8 | ok | 0.849 | 5116 | 0.432 | 0.151 | 0.849 | 0 | 2.1 |  |
+| milp | 8 | 8 | ok | 0.770 | 3961 | 0.403 | 0.177 | 0.770 | 0 | 0.3 |  |
+| continuous | 8 | 8 | ok | 0.820 | 4970 | 0.511 | 0.244 | 0.820 | 0 | 60.0 |  |
+
+Minimum N (P2): {"D90>=rx": 10, "V100>=0.90": 10}
+
+Clinical case: clinical case 2 is not on this machine: not run
+
+_v6: 191 s wall; process RSS 1071 MB, peak 1478 MB._
+
+### V7 runtime (s; N = 8, h = 4 mm, 6 spins, M = 4000) (conflict rule = planner ∪ geometric proxy; n_pairs_added recorded per instance)
+
+Hardware: Windows-11-10.0.26200-SP0; AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD; 12 cores; Python 3.12.10; numpy 2.5.2
+
+| cavity | volume_ml | n_candidates | t_candidates | t_conflicts | t_influence | t_greedy | t_greedy+local | t_sa | t_milp | t_continuous | t_final_report_15mm | t_final_report_full_50mm |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| s1_x0.80 | 12.399 | 131 | 2.1 | 0.8 | 0.2 | — | — | — | — | — | 1.5 | 14.7 |
+| s1_x1.00 | 24.382 | 869 | 11.0 | 34.5 | 1.0 | 0.4 | 0.7 | 2.3 | — | 55.2 | 2.2 | 17.0 |
+| s1_x1.25 | 47.835 | 1380 | 24.1 | 49.3 | 1.6 | 0.9 | 1.1 | 4.9 | 300.0 | 60.0 | 2.8 | 19.9 |
+
+_v7: 618 s wall; process RSS 1072 MB, peak 1619 MB._
+
+### V8 failure modes (conflict rule = planner ∪ geometric proxy; n_pairs_added recorded per instance)
+
+| case | function | outcome | verdict | message |
+|---|---|---|---|---|
+| N larger than any packing (sphere r=12 mm, N=12) | optimize | raised ValueError | PASS | build_candidates: every candidate was rejected before conforming (1014 enumerated; rejections {'ineligible': 0, 'hanging': 1014, 'detached': 0, 'conform_error': |
+| N larger than any packing (sphere r=12 mm, N=12) | build_candidates+solve_greedy | raised ValueError | PASS | build_candidates: every candidate was rejected before conforming (354 enumerated; rejections {'ineligible': 0, 'hanging': 354, 'detached': 0, 'conform_error': 0 |
+| tile wider than the wall patch (12 mm wall mesh) | build_candidates | raised ValueError | PASS | build_candidates: every candidate was rejected before conforming (231 enumerated; rejections {'ineligible': 0, 'hanging': 231, 'detached': 0, 'conform_error': 0 |
+| tile wider than the wall patch (12 mm wall mesh) | optimize | raised ValueError | PASS | build_candidates: every candidate was rejected before conforming (1200 enumerated; rejections {'ineligible': 0, 'hanging': 1200, 'detached': 0, 'conform_error': |
+| eligibility disc (10 mm) smaller than a tile on a 60 mm wall | optimize | returned | PASS (valid plan; not a failure mode) | 1 tiles; planner rule: 0 overlaps; geometric proxy: 0 overlaps; anchors on eligible faces: True |
+| eligibility disc (10 mm) smaller than a tile, N=2 (cannot fit) | optimize | raised RuntimeError | PASS | greedy solver failed: status infeasible (no compatible candidate of the required kinds left after placing 1 of 2 tiles) |
+| eligibility mask excluding > 95 % of the wall (sphere cap, N=4) | optimize | raised RuntimeError | PASS | greedy solver failed: status infeasible (no compatible candidate of the required kinds left after placing 1 of 4 tiles) |
+| degenerate mesh (3 vertices) | build_candidates | raised ValueError | PASS | build_candidates: degenerate mesh (1 faces < 4) |
+| degenerate mesh (3 vertices) | optimize | raised ValueError | PASS | build_candidates: degenerate mesh (1 faces < 4) |
+| empty mesh | build_candidates | raised ValueError | PASS | build_candidates: degenerate mesh (empty: no faces) |
+| empty mesh | optimize | raised ValueError | PASS | build_candidates: degenerate mesh (empty: no faces) |
+| empty mesh | final_report | raised ValueError | PASS | final_report: mesh is empty or None |
+
+_v8: 3 s wall; process RSS 1110 MB, peak 1619 MB._
