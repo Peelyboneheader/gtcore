@@ -44,41 +44,87 @@ behave as §2 requires?
 
 ## Probes and numbers
 
-(a) **Greedy provably suboptimal (N = 2).** Flat wall; full tiles A (x = -15),
-B (+15), C (0), decoy D (+45); A-B feasible, C conflicts with both; target
-rows above A/C/B weighted 0.3/0.4/0.3, rx = 3000 cGy. Certified by the
-reference: single-tile V100 = 0.30 / 0.30 / 0.40 / 0.00, so any forward
-greedy picks C first; every feasible pair containing C has V100 <= 0.40;
-brute-force optimum {A, B} V100 = 0.84 (V200 = 0 everywhere, so P1 = V100).
-Reference greedy: [C, D], V100 = 0.40.
-Builders' greedy: not run (implementation absent at review time). SA: not run (implementation absent at review time). MILP: not run (implementation absent at review time).
-MILP with `cliques=[]` (pairs only): not run (implementation absent at review time).
+Run against main `5f0105a` (all six builder branches merged), plan/review
+merge commit; `tests/test_plan_review.py`: **14 passed, 2 errors** (both
+errors are the shared `optimized` fixture of the end-to-end `optimize`
+probe, finding 0; pytest reports a failing fixture as an error); builders'
+`tests/test_plan_interface.py`: 19 passed, 13 skipped.
 
-(b) **Clique over-constraint.** §2: "no two tiles conflict (hard)" -- the
-hard constraint is PAIRWISE; a clique inequality is a valid tightening only
-when every pair in the clique conflicts under `find_overlapping_tiles`.
-Triple P (0, 0), Q (23, 0), R (11.5, 23): pairwise feasible (3 mm edge
-gaps), anchor distances 23.0 / 25.7 / 25.7 mm < one tile diagonal 28.3 mm;
-all three is the unique brute-force optimum at N = 3.
-`build_conflicts` on the triple: not run (implementation absent at review time). Solvers on the builders' graph at
-N = 3: not run (implementation absent at review time). Dense 5 x 5 grid (11.5 mm pitch): pairs vs
-`find_overlapping_tiles` and every clique a true clique: not run (implementation absent at review time).
+(a) **Greedy provably suboptimal (N = 2) -- FIRED.** Flat wall; full tiles
+A (x = -15), B (+15), C (0), decoy D (+45); A-B feasible, C conflicts with
+both; target rows above A/C/B weighted 0.3/0.4/0.3, rx = 3000 cGy.
+Certified by the reference: single-tile V100 = 0.30 / 0.30 / 0.40 / 0.00,
+every feasible pair containing C has V100 <= 0.40, brute-force optimum
+{A, B} V100 = 0.84 (V200 = 0 everywhere, so P1 = V100). Builders' greedy:
+selection [C, D], V100 = 0.400, status ok (trapped exactly as constructed;
+its feasibility-aware bound does not rescue it because D keeps the packing
+bound satisfied). SA (seed 0): [A, B], V100 = 0.840 = brute force. MILP:
+[A, B], V100 = 0.840, status "optimal". MILP with `cliques=[]` (pairs
+only): feasible pair returned -- pairs are honoured without cliques.
 
-(c) **Influence rows.** 6 reference candidates on the phantom, full +5 mm
-shell (`m_opt` = M, no subsampling), points >= 2.5 mm from every seed,
-tolerance 1 % of rx. Tabulated kernel: not run (implementation absent at review time). Exact kernel: not run (implementation absent at review time).
+(b) **Clique over-constraint -- DID NOT FIRE (correct behaviour).** §2:
+"no two tiles conflict (hard)": the hard constraint is pairwise; a clique
+inequality is a valid tightening only when every pair in the clique
+conflicts under `find_overlapping_tiles`. Triple P (0, 0), Q (23, 0),
+R (11.5, 23): pairwise feasible (3 mm edge gaps), anchor distances
+23.0 / 25.7 / 25.7 mm < one tile diagonal 28.3 mm; all three is the unique
+brute-force optimum at N = 3. `build_conflicts` on the triple: 0 pairs,
+cliques = [] (no neighbourhood clique spans the triple); MILP, greedy and SA
+on the builders' graph all return all three at N = 3. Dense 5 x 5 grid at
+11.5 mm pitch: 72 true conflicting pairs, builders 72 pairs (symmetric, no
+diagonal, identical set), 16 cliques of size 4, every clique a true clique
+of the pairwise graph.
+
+(c) **Influence rows -- agree.** 6 reference candidates on the phantom,
+full 6152-point +5 mm shell (`m_opt` = M, no subsampling), points >= 2.5 mm
+from every seed, tolerance 1 % of rx (40 cGy). Tabulated kernel: max
+|influence - exact| = 0.05 cGy = 0.001 % of rx, best-fit scale
+1.00000-1.00001. Exact kernel: 0.00 cGy. S_K recorded = 3.5 U.
 
 (d) **SA seed sensitivity.** 24 reference candidates, N = 4, rx 4000.
-Not run (implementation absent at review time).
+seed 0 twice: identical selection [0, 1, 3, 5] (reproducible). seed 1: the
+same selection [0, 1, 3, 5] -- the answer did NOT change with the seed on
+this instance. Greedy: [8, 11, 14, 19], V100 0.4993; SA (both seeds): V100
+0.5324, P1 objective 0.5324 >= greedy 0.4993. Both feasible, status ok.
+(SA beats greedy by 3.3 pp here; the greedy-trap instance in (a) is the
+constructed case where the gap is 44 pp.)
 
-(e) **Re-derived metrics.** `Objective.metrics` vs reference on identical
-rows: not run (implementation absent at review time). `solve_greedy` result metrics: not run (implementation absent at review time). `optimize(greedy,
-N = 4)` grid-reported +5 mm V100/D90 vs reference on the full shell: not run (implementation absent at review time).
+(e) **Re-derived metrics -- agree where the code runs.** `Objective.metrics`
+on identical rows, selection [0, 5, 10, 15]: builders V100 0.4445, V150
+0.0596, V200 0.0, D90 2309.36 vs reference 0.4445 / 0.0596 / 0.0000 /
+2309.4 (weighted-quantile conventions agree to < 0.1 cGy). `solve_greedy`
+result metrics: V100 0.4993, V150 0.0019, V200 0.0, D90 2029.64 vs
+re-derived 0.4993 / 0.0019 / 0.0000 / 2029.6; `objective` 0.4993 = P1
+re-derived. `optimize(greedy, N = 4)` grid-reported +5 mm V100/D90 vs the
+reference on the full shell: NOT OBTAINABLE -- `optimize` raises (finding
+0), so the grid-vs-exact and weighted-vs-unweighted comparison is open.
 
-(f) **Planner consistency.** `optimize` output and greedy output under
-`find_overlapping_tiles`: not run (implementation absent at review time).
+(f) **Planner consistency.** `solve_greedy` output (N = 4, reference
+candidates): `find_overlapping_tiles` == [] and `feasible` True. `optimize`
+output: NOT OBTAINABLE (finding 0).
 
-## Findings so far (independent of the builders' code)
+## Findings
+
+0. **DEFECT -- `optimize()` is unusable end-to-end.** Every call fails:
+   `optimize(mesh, 4, rx_cgy=4000, solver=<greedy|sa|milp>, seed=0, h_mm=8)`
+   and `n_half=1` all raise
+   `ValueError: kinds_required needs candidate kinds: pass candidates= or
+   attach a CandidateSet as objective.candidates` from
+   `gtcore/plan/solvers.py` `solve_greedy` (called via
+   `gtcore/plan/api.py:556`). Cause as seen from the interface: `api.optimize`
+   passes `kinds_required={"full": n}` to the public
+   `gtcore.plan.solve_greedy`, whose frozen signature has no `candidates`
+   parameter and which does not attach the `CandidateSet` to the objective;
+   the underlying implementation needs one of the two. Direct check:
+   `solve_greedy(obj, 4)` -> ok; `solve_greedy(obj, 4, kinds_required=
+   {"full": 4})` -> the same ValueError; `solve_greedy(obj, 4,
+   kinds_required=..., candidates=cset)` -> `TypeError: unexpected keyword
+   argument 'candidates'`. At the default h = 2.5 mm the call spends ~300 s
+   building ~2250 candidates and the influence matrix before failing. The
+   two review errors are `test_reported_metrics_rederived_on_full_shell`
+   and `test_optimizer_output_never_flagged_by_planner` (fixture
+   `optimized`, exact message above). Not fixed here, per the brief.
+
 
 1. **Target-weight convention.** `TargetSet.from_shell` weights are one
    third of the face areas of the *offset shell* (sum 7696.6 mm^2 on the
@@ -98,31 +144,28 @@ N = 4)` grid-reported +5 mm V100/D90 vs reference on the full shell: not run (im
 
 ## Verdict
 
-At the time this report was written (plan/review at the merge of main
-`cd73082`, the Phase-0 interface freeze) no builder branch had merged, so
-every builder-dependent probe skips: **2 passed, 14 skipped, 0 failed** in
-`tests/test_plan_review.py`; `tests/test_interact.py` + the builders'
-`tests/test_plan_interface.py` 41 passed; full suite green. The two
-constructions are certified by the reference alone: the greedy trap fires
-(reference forward greedy 0.40 vs brute force 0.84) and the clique triple is
-pairwise-feasible with all anchors inside one tile diagonal, so the probes
-are armed. The maximum influence deviation could not be measured (no
-`build_influence`). The probes are written against the frozen signatures
-(`solve_*(objective, n_tiles, ...)`, `build_influence(CandidateSet,
-TargetSet, ...)`, `build_conflicts(CandidateSet)`, `optimize(mesh, n_full,
-...) -> (tiles, OptimizeReport)`), so they become real on the first merge
-with no edits: re-run `python -m pytest tests/test_plan_review.py -q -rs -s`
-after each merge and paste the printed "probe (x): ..." lines here.
+Solvers, influence, conflicts/cliques and metric conventions pass every
+independent probe: the greedy-suboptimal construction fires against the
+builders' greedy exactly as designed (0.40 vs 0.84) and SA / MILP recover
+the brute-force optimum; the clique over-constraint probe does not fire
+(the builders' cliques are true cliques of the pairwise graph and the
+pairwise graph equals `find_overlapping_tiles`); influence rows match the
+exact engine to 0.05 cGy (0.001 % of rx) with the tabulated kernel; weighted
+V100/V150/V200/D90 match the reference to < 0.1 cGy; SA is reproducible from
+its seed and, on the phantom instance, seed-insensitive and 3.3 pp better
+than greedy. One real defect: the integration entry point `optimize()`
+raises for every solver (finding 0), so the end-to-end probes (e)/(f) on the
+grid-reported metrics and on the planner-facing output could not run.
+Final counts for `tests/test_plan_review.py`: 14 passed, 2 errors (one
+fixture, finding 0), 0 skipped. Max influence deviation: 0.05 cGy (tabulated), 0.00 cGy (exact).
 
-## Not checked (implementation had not landed)
+## Not checked
 
-Builders' greedy/SA/MILP on the trap (a); `build_conflicts` pairs and
-cliques on the triple and on the 5 x 5 grid, and solver behaviour on the
-builders' graph (b); influence rows for either kernel (c); SA seed
-reproducibility and SA-vs-greedy objective (d); `Objective.metrics`,
-`SolverResult.metrics` and `optimize` grid-reported metrics against the
-reference (e); planner flag on optimizer output (f). Also unmeasured:
-`optimize` wall time at h = 2.5 mm on the phantom (the (e)/(f) fixture
-prints it), and whether `metrics_grid` (unweighted `dvh_stats` on grid-
-sampled vertices) stays within 0.5 pp of the weighted exact-point V100 --
-the (e) probe prints both weightings so that difference is attributable.
+`optimize` end-to-end (finding 0): grid-reported +5 mm metrics vs the
+weighted exact-point reference (and the unweighted `dvh_stats` vs weighted
+§2 definition question), `report.overlaps`, and `optimize` wall time at the
+default h = 2.5 mm (~300 s before the failure; the probe uses h = 4 mm).
+OAR terms, half tiles, `refine_continuous`, `sweep_n`, `suggest_next` and
+`recommend_tile_count` were outside the brief. The pytest traceback of the
+failing probe printed `gtcore/plan/solvers.py` source for `solve_greedy`;
+the reviewer did not otherwise read builders' code.

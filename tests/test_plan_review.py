@@ -55,6 +55,9 @@ RX_CGY = 4000.0          # phantom probes: 6000 cGy at +5 mm needs ~10 tiles on
                          # the objective flat.  4000 cGy gives V100 ~ 0.5 at
                          # N = 4 (V200 = 0), a discriminating regime.
 PHANTOM_N = 4            # tiles requested in the phantom probes
+OPTIMIZE_H_MM = 4.0      # anchor spacing for the end-to-end optimize probe
+                         # (default 2.5 mm spends ~5 min building
+                         # ~2250 candidates + influence on this cavity)
 P1_LAMBDA_HOT = 0.5      # §2 defaults, used to re-derive the P1 objective
 P1_V200_TOL = 0.10
 SOLVER_ROLES = {"greedy": "solve_greedy", "sa": "solve_sa", "milp": "solve_milp"}
@@ -633,8 +636,14 @@ def optimized(phantom_case):
     import time
     optimize = _fn("optimize")
     t0 = time.time()
-    out = _try(optimize, phantom_case["mesh"], PHANTOM_N, rx_cgy=RX_CGY,
-               solver="greedy", seed=0)
+    try:
+        out = _try(optimize, phantom_case["mesh"], PHANTOM_N, rx_cgy=RX_CGY,
+                   solver="greedy", seed=0, h_mm=OPTIMIZE_H_MM)
+    except Exception as exc:                      # a stub skips above
+        pytest.fail("optimize(mesh, n_full=%d, rx_cgy=%.0f, solver='greedy', "
+                    "seed=0, h_mm=%.1f) raised %s: %s"
+                    % (PHANTOM_N, RX_CGY, OPTIMIZE_H_MM,
+                       type(exc).__name__, exc))
     dt = time.time() - t0
     tiles, report = out
     print("optimize(greedy, N=%d, rx=%.0f): %.1f s wall, %d tiles"
