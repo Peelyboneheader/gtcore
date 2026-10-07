@@ -116,8 +116,21 @@ def cmd_optimize(args):
         print(rec.describe())
         n_tiles = args.tiles
         if n_tiles is None:
-            n_tiles = int(rec.n_tiles)
-            print("--tiles not given: using the recommended count, %d" % n_tiles)
+            # the rule has no packing loss: also measure what fits at this grid
+            from .plan.api import packing_capacity
+            cap, cap_info = packing_capacity(
+                mesh, rx_cgy=args.rx, kind="full", h_mm=args.h, n_spins=args.spins,
+                eligible_faces=eligible)
+            print("recommended %d (%g cm^2 rule) / fits at this grid (h %g mm, %s spins): "
+                  "%s%d  [capacity greedy %.1f s, %d candidates]"
+                  % (rec.n_tiles, plan.TILE_AREA_CM2, args.h,
+                     args.spins if args.spins is not None else "default",
+                     "at least " if cap_info.get("at_least") else "", cap,
+                     cap_info.get("seconds", 0.0), cap_info.get("n_candidates", 0)))
+            n_tiles = min(int(rec.n_tiles), int(cap)) if cap > 0 else int(rec.n_tiles)
+            which = ("the packing capacity" if cap < rec.n_tiles
+                     else "the recommended count")
+            print("--tiles not given: using %s, %d" % (which, n_tiles))
         if n_tiles < 1:
             print("tile count must be >= 1 (got %d)" % n_tiles)
             return 1

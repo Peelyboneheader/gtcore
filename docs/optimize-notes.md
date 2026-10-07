@@ -1511,11 +1511,23 @@ six, `N` on the warm cache 0.0 s. The remaining ~14 s of the warm run was
 `build_conflicts`, so the conflict graph is now cached per candidate set
 too (`api.cached_conflicts`): a warm `O` is solver time only.
 
-Open for the coordinator: (a) should the planner pre-fill the prompt with
-`min(recommendation, packing capacity)`? Capacity is only known after a
-greedy run; cheap to add as "try N, on infeasible offer the count that fit".
-(b) `final_report` shell rows on the shell fallback should take the eligible
-mask too (A5).
+Decided (coordinator, same day) and implemented — **capacity-aware prompt**:
+`api.packing_capacity(mesh, ..., fixed_tiles, n_max=CAPACITY_N_MAX=40)` runs
+the feasibility-aware greedy on the cached candidates / influence / robust
+conflicts and returns the number it placed (`at_least` when it never ran
+out). The `O` prompt shows `recommended 12 (4 cm^2 rule) / fits at this
+grid: 10` with the capacity greedy's time and pre-fills
+`min(recommendation, capacity)`; capacity is measured against the fixed
+tiles of the current mode. A run that cannot place the count raises
+`api.InfeasibleError(n_requested, n_placed)`; the planner reports "only N
+fit at this grid" and reopens the prompt pre-filled with N (not when N is
+0). `gt optimize` without `--tiles` prints both numbers and says which one
+it used. Tests: `test_packing_capacity_with_fakes`,
+`test_prompt_prefills_the_recommendation_when_it_is_smaller`,
+`test_infeasible_run_reopens_the_prompt_with_the_count_that_fits`,
+`test_cli_uses_the_capacity_when_it_is_below_the_recommendation` (fakes).
+Still open: `final_report` shell rows on the shell fallback should take the
+eligible mask too (A5).
 
 ## Reviewer report (A7)
 

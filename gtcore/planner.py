@@ -247,18 +247,27 @@ class _CountPrompt:
     planner binding is a no-op (typing "8" must not trigger anything).
     """
 
-    def __init__(self, recommended: Optional[int], note: str = ""):
+    def __init__(self, recommended: Optional[int], note: str = "",
+                 capacity: Optional[int] = None, capacity_note: str = ""):
         self.recommended = recommended      # manufacturer-rule count, or None
         self.note = note                    # one-line recommendation / reason
+        self.capacity = capacity            # tiles that fit at the planner grid
+        self.capacity_note = capacity_note
         self.text = {"full": "", "half": ""}
         self.field = "full"
+
+    @property
+    def prefill(self) -> Optional[int]:
+        """``min(recommendation, capacity)`` -- whichever numbers are known."""
+        known = [int(v) for v in (self.recommended, self.capacity) if v is not None]
+        return min(known) if known else None
 
     def value(self, field: str) -> int:
         txt = self.text[field]
         if txt:
             return int(txt)
-        if field == "full" and self.recommended is not None:
-            return int(self.recommended)
+        if field == "full" and self.prefill is not None:
+            return int(self.prefill)
         return 0
 
     def shown(self, field: str) -> str:
@@ -1423,14 +1432,52 @@ class _PlannerApp:
         else:
             self.optimize_placement()
 
-    def optimize_placement(self):
-        """'O': recommend a tile count for the wall, then prompt for N."""
+    def _fixed_for_mode(self, mode=None):
+        """Tiles the optimizer must keep as obstacles in ``mode``."""
+        mode = mode or self._opt_mode
+        return [t for t, tid in zip(self.tiles, self._tile_ids)
+                if mode == "add" or tid in self._adopted_ids]
+
+    def _capacity(self):
+        """``(tiles that fit at the planner grid or None, status line)``.
+
+        The manufacturer rule has no packing loss, so the prompt also shows
+        how many full tiles the feasibility-aware greedy can actually place
+        next to the current fixed tiles (cheap once candidates are cached).
+        """
+        try:
+            from .plan.api import packing_capacity
+            cap, info = packing_capacity(
+                self.cavity, rx_cgy=self.rx_cgy, kind="full", h_mm=PLANNER_H_MM,
+                n_spins=PLANNER_N_SPINS, eligible_faces=self._eligible_faces(),
+                fixed_tiles=self._fixed_for_mode())
+            line = "fits at this grid (h %g mm / %d spins): %s%d  [capacity greedy %.1f s, " \
+                   "%d candidates built in %.1f s]" % (
+                       PLANNER_H_MM, PLANNER_N_SPINS, "at least " if info.get("at_least") else "",
+                       cap, info.get("seconds", 0.0), info.get("n_candidates", 0),
+                       info.get("candidates_s", 0.0))
+            return cap, line
+        except NotImplementedError as exc:
+            return None, "capacity unavailable yet (%s)" % exc
+        except Exception as exc:
+            return None, "capacity check failed: %s" % exc
+
+    def optimize_placement(self, prefill: Optional[int] = None):
+        """'O': recommend a tile count for the wall (manufacturer rule and the
+        packing capacity at the planner grid), then prompt for N pre-filled
+        with ``min(recommendation, capacity)`` (or ``prefill`` when given)."""
         if not self._has_surface():
             self._update_status("no cavity surface in this scan -- nothing to optimize on")
             return None
-        rec, line = self._recommendation()
         self._hide_ghost()
-        self._prompt = _CountPrompt(rec.n_tiles if rec is not None else None, line)
+        self._update_status("optimize: computing the tile-count recommendation and the "
+                            "packing capacity -- please wait")
+        rec, line = self._recommendation()
+        cap, cap_line = self._capacity()
+        self._prompt = _CountPrompt(rec.n_tiles if rec is not None else None, line,
+                                    capacity=cap, capacity_note=cap_line)
+        if prefill is not None:
+            self._prompt.text["full"] = "%d" % int(prefill)
         self._update_status(self._prompt_text())
         return self._prompt
 
@@ -1438,13 +1485,18 @@ class _PlannerApp:
         p = self._prompt
         if p is None:
             return ""
-        rec = "recommended %d" % p.recommended if p.recommended is not None else "no recommendation"
+        from .plan import TILE_AREA_CM2
+        bits = []
+        bits.append("recommended %d (%g cm^2 rule)" % (p.recommended, TILE_AREA_CM2)
+                    if p.recommended is not None else "no recommendation")
+        if p.capacity is not None:
+            bits.append("fits at this grid: %d" % p.capacity)
         return ("OPTIMIZE: %s full + %s half tiles?  [%s]  type digits, Enter = run, "
                 "Esc = cancel\n  BackSpace = delete, H = edit %s count, M = mode (%s), "
-                "S = solver (%s)\n  %s"
-                % (p.shown("full"), p.shown("half"), rec,
+                "S = solver (%s)\n  %s\n  %s"
+                % (p.shown("full"), p.shown("half"), " / ".join(bits),
                    "full" if p.field == "half" else "half", self._opt_mode,
-                   self._opt_solver, p.note))
+                   self._opt_solver, p.note, p.capacity_note))
 
     def _prompt_key(self, key):
         """Route one key press into the open tile-count prompt."""
@@ -1505,7 +1557,7 @@ class _PlannerApp:
         n_full, n_half = int(n_full), int(n_half)
         keep = [(t, tid) for t, tid in zip(self.tiles, self._tile_ids)
                 if mode == "add" or tid in self._adopted_ids]
-        fixed = [t for t, _tid in keep]
+        fixed = self._fixed_for_mode(mode)
         n_removed = len(self.tiles) - len(keep)
         solver_used, note = solver, ""
         if fixed and solver != "greedy":
@@ -1529,6 +1581,17 @@ class _PlannerApp:
             self._update_status("optimizer not available yet: %s" % exc)
             return []
         except (ValueError, RuntimeError) as exc:
+            n_fit = getattr(exc, "n_placed", None)   # api.InfeasibleError
+            if n_fit is not None and int(n_fit) > 0 and self._has_surface():
+                # the count was the problem: say how many fit and reopen the
+                # prompt pre-filled with that number (section 4 V8: never
+                # place fewer tiles silently)
+                self.optimize_placement(prefill=int(n_fit))
+                self._update_status(
+                    "optimize failed: %s\n  -> only %d tiles fit at this grid; prompt "
+                    "reopened with %d (Enter = run, Esc = cancel)\n%s"
+                    % (exc, int(n_fit), int(n_fit), self._prompt_text()))
+                return []
             self._update_status("optimize failed: %s" % exc)
             return []
         except Exception as exc:  # anything else: stay alive, say what happened
