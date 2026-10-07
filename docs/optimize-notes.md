@@ -34,6 +34,22 @@ default must update both.
 | `TILE_AREA_CM2` | 4.0 | Manufacturer: a GammaTile is 2 × 2 cm (tile-count rule, plan §10). |
 | `CONFLICT_GAP_MM` | 0.0 | Minimum edge gap beyond the planner's overlap rule (`find_overlapping_tiles`, threshold 1 mm). |
 
+A1 module constants (`gtcore/plan/candidates.py`, `gtcore/plan/conflicts.py`;
+implementation tunables, not optimizer parameters):
+
+| Constant | Value | Justification |
+|---|---|---|
+| `candidates.DENSE_SAMPLES_PER_H2` | 20 | Dense surface samples per h² feeding farthest-point sampling: dense spacing ≈ h/4.5, well below the anchor spacing. |
+| `candidates.DENSE_SAMPLES_MIN/MAX` | 500 / 200 000 | Bounds on the dense sample count (tiny / huge eligible regions). |
+| `candidates.RAY_CHUNK` | 1000 | Grid points per batched fallback cast: bounds the transient (point, triangle) pair arrays (~2000 pairs per point on a 1 mm marching-cubes mesh). |
+| `candidates.FALLBACK_LATERAL_TOL_MM` | 0.5 | Diagnostic only (`grid_fallback_flags`); not used for rejection (decision 10). |
+| `candidates.VISIBLE_TOL_MM` | 0.5 | `visible_faces`: a first hit within this distance of the face centroid counts as the face (grazing an edge). |
+| `candidates.ELLIPSOID_P` | 1.6075 | Knud Thomsen ellipsoid-area exponent (relative error < 1.1 %). |
+| `candidates.MIN_FACES` | 4 | Fewer faces than a tetrahedron is a degenerate mesh (V8). |
+| `conflicts.PLANNER_THRESHOLD_MM` | 1.0 | `find_overlapping_tiles`' default threshold; `gap_mm` adds to it (decision 11). |
+| `conflicts.PAIR_CHUNK` | 512 | Candidate pairs per vectorized sample-distance batch (~30 MB transient). |
+| `conflicts.ITEM_CHUNK` | 65 536 | (sample, triangle) pairs per batched point-triangle pass (~30 MB transient). |
+
 ---
 
 ## Go/no-go (§8)
@@ -861,6 +877,101 @@ A4 (`plan/milp`, 2026-10-07).
     `__init__.py`, because they are not tunables of the problem.
     Candidate order default "degree" (single-coverage, then conflict
     degree) as directed; `order="potential"` (the scout's) is kept.
+A1 (`plan/candidates`, 2026-10-07).
+
+10. **Hanging detection replicates the conformer's ray cast instead of
+    inferring it from the conformed tile.** The brief suggested flagging a
+    grid point as a fallback when its recovered wall point (nearest mesh
+    point of the conformed point) deviates laterally > 0.5 mm from the ±n
+    ray. Measured: because `conform_tile` offsets along the *smooth
+    interpolated* normal (not the anchor normal), true ray hits showed
+    lateral deviations up to 1.9 mm (p99 1.26 mm) on the seed-1 cavity and
+    2.3 mm on the flat wall's edge strip; the rule rejected 30 of 63 good
+    tiles. Alternative kept as a diagnostic (`grid_fallback_flags`). Chosen:
+    `count_ray_fallbacks` casts the same ±n rays from the same flat grid
+    points with the same 12 mm sag rule (`interact._MAX_SAG_MM`), using
+    trimesh's own narrow phase but a broad phase clipped to the sag limit
+    (cKDTree ball of 12 mm + circumradius; a hit beyond 12 mm is a fallback
+    anyway), batched for all (anchor, spin, kind) *before* conforming so
+    hanging candidates never pay for `conform_tile`. Tested equal to the
+    `mesh.ray.intersects_location` reference on cavity, sphere, flat wall,
+    hollow shell and an all-miss tiny sphere (`count_ray_fallbacks_trimesh`).
+11. **`CONFLICT_GAP_MM` composes additively**: conflict threshold =
+    1 mm (planner) + `gap_mm`, i.e. exactly
+    `find_overlapping_tiles([t_i, t_j], threshold_mm=1.0 + gap_mm)`.
+    Alternative: `gap_mm` replacing the 1 mm. Chosen: additive, so gap 0
+    is the planner's rule verbatim and gap > 0 only adds conflicts
+    (tested monotone).
+12. **Pairwise conflicts are the two-tile planner call, batched.** The
+    multi-tile `find_overlapping_tiles(all_tiles)` uses one slack (max grid
+    cell diagonal over *all* tiles passed) for every pair; the two-tile call
+    uses the pair's own. The contract is the pair call; the two differ only
+    through ballooned footprints (decision 14): 3 of 2268 pairs on the
+    r = 25 mm icosphere, 0 of 3005 on the seed-1 cavity. Stage 1 (nearest
+    sample per sample, normal agreement, exclusive upper bound as
+    `cKDTree.query`) is vectorized over pair chunks; the exact stage is an
+    element-for-element port of `interact._point_triangle_dist` with a
+    batch axis (tested bit-identical), applied only to (sample, triangle)
+    pairs whose three vertices lie within threshold + longest edge of the
+    sample (a sound bound). Pair-by-pair equality with the planner call is
+    tested on random near, far and uniform pairs at gap 0 and 3 mm.
+13. **Cliques** = per sampled anchor (a) all candidates of that anchor (every
+    spin and kind), reduced greedily to a true clique if the planner's rule
+    ever disagrees (decision 14), and (b) a maximal clique grown greedily
+    (nearest anchors first, ties by id) from the anchor's first candidate
+    inside the neighbourhood of candidates whose anchor lies within their
+    *own kind's* tile diagonal (28.3 mm full, 22.4 mm half). Every clique
+    is verified against the pairwise matrix before it is listed, so the
+    clique form can never forbid a pairwise-feasible selection (tested on
+    random selections and greedy independent sets). Alternative: one clique
+    per anchor neighbourhood without reduction (not a true clique on real
+    geometry). Chosen: verified maximal cliques, deduplicated.
+14. **Planner defect found, not fixed (out of A1's remit:
+    `gtcore/interact.py`).** `interact._footprint_surface` fits a quadratic
+    height field through the 4 corners, the seeds and the anchor. Every
+    `conform_tile` placement has |u| = |v| at all fit points, so the u²−v²
+    direction is near-null (6th singular value ≈ 1e-4 of the first) — above
+    the `rcond=1e-6` cutoff, so it is *kept*, and on any curved wall the
+    residual noise is amplified into coefficients of ±100s: the sampled
+    footprint balloons (bounding radius median 38 mm, p90 140 mm, max
+    1969 mm on the r = 25 mm icosphere at h = 5, 3 spins; the nominal
+    corner radius is 14.1 mm). Consequences measured with the planner's own
+    `find_overlapping_tiles`: 45 % of its overlaps on that sphere are between
+    anchors > 32 mm apart (geometrically impossible); on the seed-1
+    marching-cubes cavity only 0.5 % (its irregular fit points condition the
+    fit). A one-fallback-corner tile on the flat wall balloons the same way
+    (radius 330 mm) because the corner's z is off the plane. Scratch test
+    (no code change): `rcond=1e-3` gives radius 12.6 mm for every sphere
+    tile and 0 spurious far overlaps (vs 4158 of 9270), leaves the cavity
+    unchanged, and does not cure the fallback-corner case (that needs
+    rejecting the outlier point or every fallback). The conflict graph
+    replicates the rule as instructed, so it inherits this until the
+    planner is fixed; A1 tests state geometric facts (same anchor ⇒
+    conflict; > 30 mm ⇒ no conflict) only for footprints with radius < 20 mm
+    and assert that every exception carries the signature. Recommendation
+    to the coordinator: change `rcond` to 1e-3 in `_footprint_surface` (and
+    consider excluding fallback points from the fit); A1's graph then
+    inherits the fix with no change.
+15. **`n_rejected` is counted in candidate units** (`"ineligible"` = dropped
+    anchors × spins × kinds; `"hanging"`, `"detached"`, `"conform_error"`
+    per (anchor, spin, kind)), so the counts add up with `len(cs)` to the
+    enumerated total. Alternative: anchors for `ineligible`. Chosen:
+    candidate units.
+16. **`CandidateSet.n_spins` records the spin count of the first kind in
+    `kinds`** when both kinds are built with their different defaults (6 /
+    12); the per-kind sets are recoverable from `spins_deg`.
+17. **Anchor sampling** = seeded `trimesh.sample.sample_surface` restricted
+    to eligible faces (20 samples per h²), then farthest-point sampling from
+    the dense point nearest the eligible centroid until the largest gap is
+    below h (anchors pairwise ≥ h apart; `method` records
+    `farthest_point(sample_surface n=..., seed=...)`). Alternative:
+    `sample_surface_even` (Poisson-disc rejection, no spacing guarantee).
+    Chosen: FPS for the spacing guarantee and determinism.
+18. **Spin step** = 90/n (full) or 180/n (half) when `n_spins` is given for
+    both kinds, as the frozen docstring says; the axis hint is the global
+    axis least aligned with the inward normal projected to the tangent
+    plane, rotated by the spin (Rodrigues) — `tile.axis_ras` at spin θ is
+    exactly the spin-0 axis rotated by θ (tested).
 
 ---
 

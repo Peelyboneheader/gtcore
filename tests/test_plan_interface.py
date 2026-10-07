@@ -85,10 +85,11 @@ def test_submodules_exist_but_are_not_imported_by_init():
         assert m.__doc__ and ("Owner" in m.__doc__)
 
 
-# Functions already wired to their branch module (each branch adds its own).
+# Functions already wired to their branch module (every branch has landed).
 IMPLEMENTED = {"build_influence", "make_objective", "evaluate",
                "solve_greedy", "solve_local", "solve_sa", "refine_continuous", "sweep_n",
-               "solve_milp"}
+               "solve_milp",
+               "build_candidates", "visible_faces", "build_conflicts", "recommend_tile_count"}
 
 
 @pytest.mark.parametrize("name", STUBS)
@@ -101,6 +102,10 @@ def test_every_stub_raises_not_implemented(name):
         1 for prm in inspect.signature(fn).parameters.values()
         if prm.default is inspect.Parameter.empty
         and prm.kind in (prm.POSITIONAL_ONLY, prm.POSITIONAL_OR_KEYWORD))
+    if name in IMPLEMENTED:
+        with pytest.raises((ValueError, TypeError)):
+            fn(*([None] * n_required))
+        return
     with pytest.raises(NotImplementedError, match=name + ": implemented on branch plan/"):
         fn(*([None] * n_required))
 
