@@ -551,10 +551,13 @@ def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
     n_total = n_full + n_half + len(fixed)
 
     objective = _plan.make_objective(infl_s, conf_s, rx_cgy=rx)
+    # the solvers read candidate kinds/anchors from the objective when present
+    # (kinds_required needs them; local/SA moves use the anchors)
+    objective.candidates = cand_s
 
     t0 = time.perf_counter()
     res = _plan.solve_greedy(objective, n_total, fixed=list(int(i) for i in fixed_ids),
-                             kinds_required=kinds_required)
+                             kinds_required=kinds_required, candidates=cand_s)
     if solver == "local":
         res = _plan.solve_local(objective, n_total, start=res.selection,
                                 candidates=cand_s)

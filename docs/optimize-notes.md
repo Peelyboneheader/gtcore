@@ -1068,3 +1068,32 @@ _To be pasted unedited._
 | 2026-10-07 | `python -m pytest -q -p no:cacheprovider tests/test_plan_candidates.py tests/test_plan_conflicts.py tests/test_plan_interface.py` | fixtures seeded 0 | 8a98e7e | 66 passed (32 new) | A1 candidates / conflicts |
 | 2026-10-07 | `python -m pytest -q -p no:cacheprovider` | — | 8a98e7e (working tree) | 502 passed, 278 s | full suite before the A1 commit |
 | 2026-10-07 | `python scripts/plan_candidates_runtime.py` | anchors 0, phantom 1 | 8a98e7e | V7 table above (A1 candidates/conflicts) | cavity h = 3 / 2.5, hollow sphere |
+
+### Open decision (coordinator, 2026-10-07): planner footprint fit on strongly curved walls — left for Jacob
+
+`gtcore.interact._footprint_surface` fits `z(u, v) = c · [1, u, v, u², uv, v²]`
+through the tile's 8–9 conformed points, all of which sit at |u| ≈ |v|, so the
+`u² − v²` direction is nearly unidentifiable. The code keeps it with
+`rcond=1e-6`. A1 measured (Open decision 14 above) that on an r = 25 mm
+icosphere the kept direction has singular value ≈ 1e-4 and amplifies noise
+into footprints with median bounding radius 38 mm (max 1969 mm, nominal 14.1),
+so 45 % of the planner's own overlap flags there are between anchors > 32 mm
+apart. On marching-cubes cavity meshes (synthetic phantom, printed phantom) the
+effect is rare (0.5 % of pairs) and the pinned overlap tests pass.
+
+Coordinator check (not committed): `rcond=1e-3` gives radius 12.6 mm
+everywhere on the icosphere and 0 far-apart overlap flags among 200 tiles.
+A different fix — fitting `u² + v²` as one column — was tried and REJECTED:
+it fails `tests/test_overlap.py::test_edge_to_edge_abutment_is_legal`
+(an abutting pair at 2.5 mm real gap gets flagged) because anisotropic cavity
+curvature is genuinely resolved by the separate columns on real meshes.
+
+Two candidate answers, per the §6 rule: (a) change `rcond` to `1e-3` in
+`interact.py` after running the full suite (A1's scratch test says the cavity
+meshes are unchanged; the flat-wall fallback-corner case is not cured); (b)
+leave `interact.py` alone and let the optimizer's conflict graph inherit the
+planner's definition exactly, which is what §3 C asks for. The directions
+forbid builders from editing `interact.py`, and the brief says the existing
+code has precedence, so (b) is in force; the optimizer's candidate filter
+(`min_fraction_on_wall`, hanging-tile rejection) keeps ballooned footprints
+out of the candidate set on the meshes tested. Decision (a) is Jacob's.

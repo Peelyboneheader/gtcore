@@ -1051,7 +1051,7 @@ def evaluate(objective: Objective, selection) -> Dict[str, Any]:
 
 
 def solve_greedy(objective: Objective, n_tiles: int, fixed: Sequence[int] = (),
-                 kinds_required: Optional[Dict[str, int]] = None) -> SolverResult:
+                 kinds_required: Optional[Dict[str, int]] = None, **kw) -> SolverResult:
     """E1 greedy forward selection: add the compatible candidate with the
     largest hard-objective gain until ``n_tiles`` (ties -> lowest id).
 
@@ -1062,7 +1062,7 @@ def solve_greedy(objective: Objective, n_tiles: int, fixed: Sequence[int] = (),
     compatible candidate remains.
     """
     from .solvers import solve_greedy as _impl
-    return _impl(objective, n_tiles, fixed=fixed, kinds_required=kinds_required)
+    return _impl(objective, n_tiles, fixed=fixed, kinds_required=kinds_required, **kw)
 
 
 def solve_local(objective: Objective, n_tiles: int, start, radius_mm: float = LOCAL_RADIUS_MM,
