@@ -32,8 +32,8 @@ uniform     farthest-point anchors, spin 0 (local implementation, below)
 greedy      ``solve_greedy``
 greedy+local ``solve_local`` started from greedy
 sa          ``solve_sa``
-milp        ``solve_milp`` on the reduced instance (h = 4 mm, 3 spins,
-            M = 1000, ``MILP_TIME_LIMIT_S``)
+milp        ``solve_milp(method="auto")`` on the reduced instance (h = 6 mm,
+            2 spins, M = 300, 300 s), N in ``V3_N`` only
 continuous  ``solve_continuous`` (A3, multi-start Nelder-Mead over continuous
             tile poses) with ``time_budget_s`` = greedy + SA wall time on the
             same instance (guarded: skipped when absent)
@@ -42,6 +42,14 @@ truth_raw   the phantom's raw truth seeds (no conformer)
 
 Every arm row records ``n_placed``; an arm that returns fewer than N tiles
 or a conflicting selection is a FAILED row, never a lower score.
+
+Conflict rule (validation-side mitigation, 2026-10-07): ``find_overlapping_tiles``
+misses real footprint overlaps on curved walls (its quadratic footprint
+reconstruction degenerates; reported), so A1's conflict graph is AUGMENTED
+here with the geometric proxy (``augment_conflicts``: anchors closer than
+18 mm or inter-tile seeds closer than 9 mm, normals agreeing) before any
+solver runs, and every returned plan is re-checked with the same proxy.
+``n_pairs_planner`` / ``n_pairs_added`` are recorded per instance.
 
 All endpoints (V100, D90, V150, V200 on the +5 mm shell; weighted V100 on
 the full target) come from ``final_report`` (``compute_dose_grid``, exact
@@ -99,7 +107,8 @@ SCALES = (0.8, 1.0, 1.25)
 # CAVITY_RADII multipliers: ~12-14, 24-28 and 48-54 mL cavities (stated per run).
 N_LIST = (4, 6, 8, 10, 12)
 # The manufacturer rule gives 11-12 tiles for the scale-1.0 cavities (coordinator, 2026-10-07).
-N_RANDOM = 50
+N_RANDOM = 20
+# (declared 50; trimmed to 20 for the overnight budget, coordinator 2026-10-07)
 N_TRUTH_TILES = 8
 PHANTOM_SPACING_MM = 1.0
 RX_CGY = DEFAULT_RX_CGY
@@ -109,16 +118,26 @@ REPORT_MARGIN_MM = 15.0
 # support; the full 50 mm report is written for the primary configurations.
 FULL_MARGIN_MM = 50.0
 H_MM = 4.0
-N_SPINS = 3
-# V2 discrete grid (coordinator, 2026-10-07): h = 4 mm / 3 spins builds 3.5x faster than
-# h = 3 / 6 spins with no systematic loss in the go/no-go scout; V4 re-examines this.
+N_SPINS = 6
+# V2 discrete grid: the coordinator's default was h = 4 mm / 3 spins; the quick V4
+# run (2026-10-07) showed 3 spins cannot pack 8 tiles on the 24 mL cavity s1
+# (enumeration proves infeasibility, 77 608 nodes) while h = 4 / 6 spins packs
+# them at V100 0.999 -- so V2 uses 6 spins ("unless V4 says otherwise").
 M_OPT = 1000
 # Optimization-time target subsample (V5 compares 1000 vs 4000).
-MILP_H_MM = 4.0
-MILP_N_SPINS = 3
-MILP_M_OPT = 1000
-V4_H = (4.0, 3.0, 2.5, 2.0)
+MILP_H_MM = 6.0
+MILP_N_SPINS = 2
+MILP_M_OPT = 300
+MILP_TIME_LIMIT_S = 300.0
+V3_N = (4, 6, 8)
+# Reduced MILP instances (coordinator 2026-10-07): h = 6 mm / 2 spins / M = 300,
+# N in V3_N, solve_milp(method="auto") -> enumeration branch-and-bound when
+# C <= 600 and N <= 8 (the section 7.3 scout showed HiGHS cannot close these),
+# 300 s limit; the bound is the reference when status == "time_limit".
+V4_H = (4.0, 3.0, 2.5)
 V4_SPINS = (3, 6, 12)
+# h = 2 mm dropped from the overnight grid: build_conflicts is O(C^2) exact
+# footprint tests (345 s at C = 2500; h = 2 / 6 spins would be ~6300 candidates).
 V4_N = 8
 V5_N = 8
 V5_OFFSETS_MM = (2.25, 3.0, 3.75)
@@ -137,6 +156,7 @@ except Exception:                                                     # pragma: 
     pass
 
 OUT_DIR = os.path.join(ROOT, "output", "validation_optimize")
+CAPTION = "(conflict rule = planner ∪ geometric proxy; n_pairs_added recorded per instance)"
 ARM_ORDER = ("random", "uniform", "greedy", "greedy+local", "sa", "milp", "continuous",
              "truth", "truth_raw")
 SOLVER_ARMS = ("uniform", "greedy", "greedy+local", "sa", "milp", "continuous")
@@ -175,6 +195,34 @@ def _try(name: str, fn: Callable[[], Any]) -> Tuple[Any, Optional[str]]:
         _log(traceback.format_exc().strip().splitlines()[-1])
     _log("%s -> %s" % (name, reason))
     return None, reason
+
+
+def _solve_milp(objective, n, time_limit_s):
+    """``solve_milp(method="auto")``: the ``gtcore.plan.solve_milp`` wrapper does
+    not forward ``method`` (reported to the coordinator), so the module
+    function is called directly when it accepts it."""
+    import inspect
+    try:
+        from gtcore.plan import milp as _milp
+        fn = _milp.solve_milp
+        if "method" in inspect.signature(fn).parameters:
+            return fn(objective, n, time_limit_s=time_limit_s, method="auto")
+    except ImportError:
+        pass
+    return plan.solve_milp(objective, n, time_limit_s=time_limit_s)
+
+
+def _solve_continuous():
+    """A3's ``solve_continuous``: from ``gtcore.plan`` when exported, else from
+    ``gtcore.plan.solvers`` (not re-exported at the time of writing)."""
+    fn = getattr(plan, "solve_continuous", None)
+    if fn is None:
+        try:
+            from gtcore.plan import solvers as _solvers
+            fn = getattr(_solvers, "solve_continuous", None)
+        except ImportError:
+            fn = None
+    return fn
 
 
 def row_status(reason: Optional[str]) -> Tuple[str, int]:
@@ -289,8 +337,12 @@ def uniform_heuristic(candidates, conflicts, n_tiles: int, kind: str = "full"
     FPS over the distinct eligible anchors (one representative per
     ``anchor_id``: the candidate with the smallest spin, kind ``kind``);
     at each FPS point the spin-0 candidate is taken if it conflicts with
-    nothing chosen so far, otherwise the next FPS point is tried.  Raises
-    ``Skip`` when fewer than ``n_tiles`` compatible anchors exist.
+    nothing chosen so far, otherwise the next FPS point is tried.  When the
+    spin-0 pass ends short of ``n_tiles`` (dense packings), a second pass
+    walks the same FPS order allowing the other spins at each anchor
+    (deterministic, smallest conflicting-free spin first); the number of
+    such fallback picks is available as ``uniform_heuristic.last_fallback``.
+    Raises ``Skip`` when still fewer than ``n_tiles``.
     """
     kinds = np.asarray(candidates.kinds, dtype=object)
     elig = np.asarray(candidates.eligible, dtype=bool) & (kinds == kind)
@@ -312,13 +364,35 @@ def uniform_heuristic(candidates, conflicts, n_tiles: int, kind: str = "full"
             chosen.append(c)
             if len(chosen) == int(n_tiles):
                 break
+    n_fallback = 0
     if len(chosen) < int(n_tiles):
-        raise Skip("uniform: only %d of %d non-conflicting spin-0 anchors"
+        by_anchor: Dict[int, List[int]] = {}
+        for c in ids:
+            by_anchor.setdefault(int(candidates.anchor_ids[c]), []).append(int(c))
+        used_anchors = {int(candidates.anchor_ids[c]) for c in chosen}
+        for k in order:
+            a = int(candidates.anchor_ids[rep_ids[k]])
+            if a in used_anchors:
+                continue
+            for c in sorted(by_anchor.get(a, []), key=lambda i: candidates.spins_deg[i]):
+                if conflicts.is_feasible(chosen + [c]):
+                    chosen.append(c)
+                    used_anchors.add(a)
+                    n_fallback += 1
+                    break
+            if len(chosen) == int(n_tiles):
+                break
+    uniform_heuristic.last_fallback = n_fallback
+    if len(chosen) < int(n_tiles):
+        raise Skip("uniform: only %d of %d non-conflicting anchors (spin fallback included)"
                    % (len(chosen), n_tiles))
     return np.asarray(sorted(chosen), dtype=int)
 
 
-def random_feasible(candidates, conflicts, n_tiles: int, rng, max_tries: int = 50
+uniform_heuristic.last_fallback = 0
+
+
+def random_feasible(candidates, conflicts, n_tiles: int, rng, max_tries: int = 500
                     ) -> np.ndarray:
     """One random feasible selection: a random candidate order, taking each
     candidate that conflicts with nothing taken, until ``n_tiles``."""
@@ -338,6 +412,81 @@ def random_feasible(candidates, conflicts, n_tiles: int, rng, max_tries: int = 5
                 return np.asarray(sorted(chosen), dtype=int)
             compat &= conflicts.compatible_mask(chosen)
     raise Skip("random: no feasible %d-tile draw in %d tries" % (n_tiles, max_tries))
+
+
+# ------------------------------------------------------ overlap proxy
+PROXY_OVERLAP_MM = 18.0
+# Two full tiles whose anchors are closer than 20 mm overlap for ANY spins
+# (each contains the 10 mm disc about its anchor); 18 mm leaves 2 mm for
+# chord-vs-surface effects.  Independent of ``find_overlapping_tiles``, whose
+# footprint reconstruction was found to fail on symmetric placements on
+# smooth spheres (reported 2026-10-07).
+
+
+PROXY_SEED_MM = 9.0
+# Every seed sits 5 mm inside its tile's edge, so two seeds of different
+# tiles closer than 10 mm (chord <= surface distance) lie in overlapping
+# 5 mm discs of the two sheets; 9 mm leaves 1 mm for the planner threshold.
+
+
+def _proxy_pair(a: PlacedTile, b: PlacedTile, d_mm: float = PROXY_OVERLAP_MM,
+                seed_mm: float = PROXY_SEED_MM) -> bool:
+    if float(a.normal_ras @ b.normal_ras) <= 0.5:
+        return False
+    lim = d_mm if (a.kind == "full" and b.kind == "full") else d_mm / 2.0
+    if np.linalg.norm(a.anchor_ras - b.anchor_ras) < lim:
+        return True
+    ds = np.linalg.norm(a.seed_centers[:, None, :] - b.seed_centers[None, :, :], axis=2)
+    return bool(ds.min() < seed_mm)
+
+
+def proxy_overlaps(tiles: Sequence[PlacedTile], d_mm: float = PROXY_OVERLAP_MM) -> List[Tuple[int, int]]:
+    """Pairs of tiles that certainly overlap by geometry alone: anchors closer
+    than ``d_mm`` (full/full; half the distance otherwise) or any inter-tile
+    seed pair closer than ``PROXY_SEED_MM``, with agreeing normals (dot > 0.5).
+    A conservative subset of true overlaps, independent of
+    ``find_overlapping_tiles``."""
+    tiles = list(tiles)
+    return [(i, j) for i in range(len(tiles)) for j in range(i + 1, len(tiles))
+            if _proxy_pair(tiles[i], tiles[j], d_mm)]
+
+
+def augment_conflicts(candidates, conflicts) -> Tuple[Any, int]:
+    """ConflictGraph = planner conflicts + the geometric proxy pairs (vectorized
+    over candidates).  Returns ``(graph, n_added)``; cliques are kept (adding
+    pairs cannot invalidate a clique)."""
+    import scipy.sparse as sp
+    from gtcore.plan import ConflictGraph
+    c = len(candidates)
+    A = np.asarray(candidates.anchors, dtype=float)
+    Nn = np.array([t.normal_ras for t in candidates.tiles], dtype=float)
+    Nn /= np.maximum(np.linalg.norm(Nn, axis=1), 1e-12)[:, None]
+    full = np.asarray(candidates.kinds, dtype=object) == "full"
+    dots = Nn @ Nn.T
+    D = np.linalg.norm(A[:, None, :] - A[None, :, :], axis=2)
+    lim = np.where(full[:, None] & full[None, :], PROXY_OVERLAP_MM, PROXY_OVERLAP_MM / 2.0)
+    close = D < lim
+    # seed-seed proximity (C, 4, 3) with NaN padding for half tiles
+    S = np.asarray(candidates.seed_centers, dtype=float)
+    S = np.where(np.isfinite(S), S, 1e6)
+    flat = S.reshape(c * 4, 3)
+    from scipy.spatial import cKDTree
+    tree = cKDTree(flat)
+    pairs = tree.query_pairs(PROXY_SEED_MM, output_type="ndarray")
+    seed_close = np.zeros((c, c), dtype=bool)
+    if pairs.size:
+        ci, cj = pairs[:, 0] // 4, pairs[:, 1] // 4
+        keep = ci != cj
+        seed_close[ci[keep], cj[keep]] = True
+        seed_close[cj[keep], ci[keep]] = True
+    proxy = (close | seed_close) & (dots > 0.5)
+    np.fill_diagonal(proxy, False)
+    old = conflicts.pairs.toarray().astype(bool)
+    new = old | proxy
+    n_added = int((new & ~old).sum() // 2)
+    graph = ConflictGraph(n=c, pairs=sp.csr_matrix(new), cliques=list(conflicts.cliques),
+                          gap_mm=conflicts.gap_mm)
+    return graph, n_added
 
 
 # ------------------------------------------------------------- perturbation
@@ -497,15 +646,21 @@ def build_instance(mesh, target: TargetSet, h_mm: float, n_spins: int, m_opt: in
     if len(cand) == 0:
         raise Skip("build_candidates returned no candidates")
     t0 = time.perf_counter()
-    conf = plan.build_conflicts(cand)
+    conf0 = plan.build_conflicts(cand)
     t["conflicts"] = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    n_pairs_planner = conf0.count_pairs()
+    conf, n_added = augment_conflicts(cand, conf0)
+    t["conflicts_augment"] = time.perf_counter() - t0
+    _log("  conflicts: %d planner pairs + %d proxy pairs added (%.1f %%)"
+         % (n_pairs_planner, n_added, 100.0 * n_added / max(n_pairs_planner, 1)))
     t0 = time.perf_counter()
     infl = plan.build_influence(cand, target, rx_cgy=RX_CGY, m_opt=m_opt, rng_seed=rng_seed)
     t["influence"] = time.perf_counter() - t0
     obj = plan.make_objective(infl, conf, rx_cgy=RX_CGY)
     inst = {"candidates": cand, "conflicts": conf, "influence": infl, "objective": obj,
             "timings": t, "h_mm": h_mm, "n_spins": n_spins, "m_opt": m_opt,
-            "from_cache": False}
+            "from_cache": False, "n_pairs_planner": n_pairs_planner, "n_pairs_added": n_added}
     if cache_path:
         try:
             with open(cache_path, "wb") as fh:
@@ -542,7 +697,8 @@ def evaluate_tiles(mesh, tiles: Sequence[PlacedTile], target: TargetSet,
     row = {"V100": s5["V100"], "D90": s5["D90"], "V150": s5["V150"], "V200": s5["V200"],
            "V100w": src["target"]["V100"], "D90w": src["target"]["D90"],
            "V100_wall": src[0.0]["V100"], "V100_10mm": src[10.0]["V100"],
-           "n_overlaps": len(rep.overlaps), "report_s": rep.runtime.get("total", float("nan"))}
+           "n_overlaps": len(rep.overlaps), "n_proxy_overlaps": len(proxy_overlaps(tiles)),
+           "report_s": rep.runtime.get("total", float("nan"))}
     if "rind" in src:
         row["rind_V100"] = src["rind"]["V100"]
         row["rind_D90"] = src["rind"]["D90"]
@@ -556,8 +712,8 @@ def evaluate_tiles(mesh, tiles: Sequence[PlacedTile], target: TargetSet,
 
 # ------------------------------------------------------------------- arms
 def run_arm(arm: str, inst: Optional[Dict[str, Any]], n: int, sa_seed: int,
-            mesh=None, target=None, milp_inst=None, time_budget_s: Optional[float] = None
-            ) -> Dict[str, Any]:
+            mesh=None, target=None, milp_inst=None, time_budget_s: Optional[float] = None,
+            start=None) -> Dict[str, Any]:
     """Run one solver arm; returns ``{"selection", "tiles", "solver", "solve_s",
     "n_placed"}``.  Raises NotImplementedError (stub), Skip (cannot run) or
     ArmFailed (ran but fewer than N tiles / conflicting / bad status)."""
@@ -569,57 +725,69 @@ def run_arm(arm: str, inst: Optional[Dict[str, Any]], n: int, sa_seed: int,
     res = None
     if arm == "uniform":
         sel = uniform_heuristic(cand, conf, n)
+        n_fb = uniform_heuristic.last_fallback
     elif arm == "greedy":
-        res = plan.solve_greedy(inst["objective"], n)
+        res = plan.solve_greedy(inst["objective"], n, candidates=cand)
         sel = res.selection
     elif arm == "greedy+local":
-        g = plan.solve_greedy(inst["objective"], n)
+        g = plan.solve_greedy(inst["objective"], n, candidates=cand)
         if g.status != "ok":
             raise ArmFailed("greedy %s: %s" % (g.status, g.reason), g.selection.size)
         res = plan.solve_local(inst["objective"], n, g.selection, candidates=cand)
         sel = res.selection
     elif arm == "sa":
-        res = plan.solve_sa(inst["objective"], n, seed=int(sa_seed), candidates=cand)
+        res = plan.solve_sa(inst["objective"], n, seed=int(sa_seed), candidates=cand,
+                            **({"start": np.asarray(start, dtype=int)} if start is not None else {}))
         sel = res.selection
     elif arm == "milp":
         if milp_inst is None:
             raise Skip("no reduced instance")
         cand, conf = milp_inst["candidates"], milp_inst["conflicts"]
-        res = plan.solve_milp(milp_inst["objective"], n, time_limit_s=plan.MILP_TIME_LIMIT_S)
+        if int(n) not in V3_N:
+            raise Skip("milp arm restricted to N in %s" % (V3_N,))
+        res = _solve_milp(milp_inst["objective"], n, time_limit_s=MILP_TIME_LIMIT_S)
         sel = res.selection
     elif arm == "continuous":
-        fn = getattr(plan, "solve_continuous", None)
+        fn = _solve_continuous()
         if fn is None:
-            raise NotImplementedError("solve_continuous: not in gtcore.plan yet (A3)")
+            raise NotImplementedError("solve_continuous: not in gtcore.plan / plan.solvers yet (A3)")
         if mesh is None or target is None:
             raise Skip("continuous: mesh/target not supplied")
-        kw = {"seed": int(sa_seed)}
+        kw = {"seed": int(sa_seed), "objective": inst["objective"], "conflicts": conf,
+              "m_opt": int(inst.get("m_opt", M_OPT))}
         if time_budget_s is not None and np.isfinite(time_budget_s) and time_budget_s > 0:
             kw["time_budget_s"] = float(time_budget_s)
         tiles, res = fn(mesh, cand, target, RX_CGY, n, **kw)
         tiles = list(tiles)
-        if res is not None and res.status not in ("ok", "time_limit"):
+        if res is not None and res.status not in ("ok", "optimal", "time_limit"):
             raise ArmFailed("continuous status %s: %s" % (res.status, res.reason or "(no reason)"),
                             len(tiles))
         if len(tiles) != int(n):
             raise ArmFailed("continuous returned %d tiles for N=%d" % (len(tiles), n), len(tiles))
-        ov = find_overlapping_tiles(tiles)
+        ov = find_overlapping_tiles(tiles) or proxy_overlaps(tiles)
         if ov:
-            raise ArmFailed("continuous tiles overlap (planner rule): %r" % (ov,), len(tiles))
+            raise ArmFailed("continuous tiles overlap (planner rule / anchor proxy): %r" % (ov,), len(tiles))
         return {"selection": None, "tiles": tiles, "solver": res,
                 "solve_s": time.perf_counter() - t0, "n_placed": len(tiles),
                 "time_budget_s": time_budget_s}
     else:
         raise ValueError("unknown arm %r" % arm)
     sel = np.asarray(sel, dtype=int).reshape(-1)
-    if res is not None and res.status not in ("ok", "time_limit"):
+    if res is not None and res.status not in ("ok", "optimal", "time_limit"):
         raise ArmFailed("%s status %s: %s" % (arm, res.status, res.reason or "(no reason)"), sel.size)
     if sel.size != int(n):
         raise ArmFailed("%s returned %d tiles for N=%d" % (arm, sel.size, n), sel.size)
     if not conf.is_feasible(sel):
         raise ArmFailed("%s selection violates a conflict (silent infeasible plan)" % arm, sel.size)
-    return {"selection": sel, "tiles": cand.tiles_of(sel), "solver": res,
-            "solve_s": time.perf_counter() - t0, "n_placed": int(sel.size)}
+    px = proxy_overlaps(cand.tiles_of(sel))
+    if px:
+        raise ArmFailed("%s selection has certain footprint overlaps missed by the conflict graph "
+                        "(anchors < %g mm): %r" % (arm, PROXY_OVERLAP_MM, px), sel.size)
+    out = {"selection": sel, "tiles": cand.tiles_of(sel), "solver": res,
+           "solve_s": time.perf_counter() - t0, "n_placed": int(sel.size)}
+    if arm == "uniform":
+        out["uniform_spin_fallback"] = int(n_fb)
+    return out
 
 
 # ------------------------------------------------------------------- I/O
@@ -723,7 +891,7 @@ def section_v2(cfg) -> Dict[str, Any]:
 
         inst, reason = _try("build_instance", lambda: build_instance(
             mesh, target, H_MM, N_SPINS, M_OPT, cav["seed"],
-            cache_path=os.path.join(cfg.cache_dir, "inst_%s_h%g_s%d_m%d_%s.pkl"
+            cache_path=os.path.join(cfg.cache_dir, "inst_%s_h%g_s%d_m%d_cg%s.pkl"
                                     % (cav["key"], H_MM, N_SPINS, M_OPT, git_commit())),
             use_cache=cfg.use_cache))
         if inst is None:
@@ -734,7 +902,7 @@ def section_v2(cfg) -> Dict[str, Any]:
         elif "milp" in cfg.arms:
             milp_inst, reason = _try("build_instance(milp)", lambda: build_instance(
                 mesh, target, MILP_H_MM, MILP_N_SPINS, MILP_M_OPT, cav["seed"],
-                cache_path=os.path.join(cfg.cache_dir, "inst_%s_h%g_s%d_m%d_%s.pkl"
+                cache_path=os.path.join(cfg.cache_dir, "inst_%s_h%g_s%d_m%d_cg%s.pkl"
                                         % (cav["key"], MILP_H_MM, MILP_N_SPINS, MILP_M_OPT,
                                            git_commit())),
                 use_cache=cfg.use_cache))
@@ -783,8 +951,12 @@ def section_v2(cfg) -> Dict[str, Any]:
                     rows.append(dict(base, N=n, arm=arm, status=st, reason=reason, n_placed=n_placed))
                     continue
                 budget[arm] = res["solve_s"]
+                _log("  %s N=%d: %.1f s, n_placed %d" % (arm, n, res["solve_s"], res["n_placed"]))
                 ev, _ = evaluate_tiles(mesh, res["tiles"], target, solver_result=res["solver"])
-                extra = {"time_budget_s": res.get("time_budget_s")}
+                extra = {"time_budget_s": res.get("time_budget_s"),
+                         "uniform_spin_fallback": res.get("uniform_spin_fallback"),
+                         "n_pairs_planner": inst.get("n_pairs_planner") if inst else None,
+                         "n_pairs_added": inst.get("n_pairs_added") if inst else None}
                 if res["solver"] is not None:
                     extra.update({"objective_influence": res["solver"].objective,
                                   "V100_influence": res["solver"].metrics.get("V100", float("nan")),
@@ -851,20 +1023,33 @@ def section_v2(cfg) -> Dict[str, Any]:
         flagged = n_star is None
         if flagged:
             n_star = max(uni)
+        both = sorted(set(uni) & set(sa))
         if n_star not in sa:
-            continue
+            # declared N* has no SA row (packing-limited FAILED/skipped arm): fall
+            # back to the largest N where both arms succeeded, flagged as such
+            if not both:
+                primary_rows.append({"cavity": key, "N_star": n_star, "uniform_never_reached_rx": flagged,
+                                     "N_used": None, "fallback": True})
+                continue
+            n_used, fallback = both[-1], True
+        else:
+            n_used, fallback = n_star, False
         primary_rows.append({"cavity": key, "N_star": n_star, "uniform_never_reached_rx": flagged,
-                             "V100_uniform": uni[n_star]["V100"], "V100_sa": sa[n_star]["V100"],
-                             "diff_pp": 100 * (sa[n_star]["V100"] - uni[n_star]["V100"])})
+                             "N_used": n_used, "fallback": fallback,
+                             "V100_uniform": uni[n_used]["V100"], "V100_sa": sa[n_used]["V100"],
+                             "diff_pp": 100 * (sa[n_used]["V100"] - uni[n_used]["V100"])})
     primary = {}
-    if primary_rows:
-        va = np.array([r["V100_sa"] for r in primary_rows])
-        vb = np.array([r["V100_uniform"] for r in primary_rows])
+    primary_rows_ok = [r for r in primary_rows if r.get("N_used") is not None]
+    if primary_rows_ok:
+        va = np.array([r["V100_sa"] for r in primary_rows_ok])
+        vb = np.array([r["V100_uniform"] for r in primary_rows_ok])
         ci = paired_ci(va, vb)
         primary = {"comparison": "SA - uniform at N*", "mean_pp": 100 * ci["mean"],
                    "ci_lo_pp": 100 * ci["ci_lo"], "ci_hi_pp": 100 * ci["ci_hi"], "n": ci["n"],
                    "wilcoxon_p": wilcoxon_p(va, vb),
-                   "n_flagged": int(sum(r["uniform_never_reached_rx"] for r in primary_rows))}
+                   "n_flagged": int(sum(r["uniform_never_reached_rx"] for r in primary_rows)),
+                   "n_fallback_N": int(sum(bool(r.get("fallback")) for r in primary_rows_ok)),
+                   "n_no_pair": int(len(primary_rows) - len(primary_rows_ok))}
         write_csv(os.path.join(out, "v2_primary.csv"), primary_rows + [primary])
 
     # ---- figure: coverage vs N, mean +- SD band per arm
@@ -896,7 +1081,7 @@ def section_v2(cfg) -> Dict[str, Any]:
     plt.close(fig)
 
     # ---- markdown
-    md.append("\n### V2 results (mean ± SD across cavities; +5 mm shell, grid based)\n")
+    md.append("\n### V2 results (mean ± SD across cavities; +5 mm shell, grid based) %s\n" % CAPTION)
     md.append(md_table([{"N": r["N"], "arm": r["arm"], "n_cav": r["n_cav"],
                          "V100": "%.3f ± %.3f" % (r["V100_mean"], r["V100_sd"]),
                          "D90 [cGy]": "%.0f ± %.0f" % (r["D90_mean"], r["D90_sd"]),
@@ -909,10 +1094,16 @@ def section_v2(cfg) -> Dict[str, Any]:
         md.append(md_table(paired, ["N", "comparison", "mean_pp", "ci_lo_pp", "ci_hi_pp", "n", "wilcoxon_p"],
                            {"mean_pp": "%.2f", "ci_lo_pp": "%.2f", "ci_hi_pp": "%.2f", "wilcoxon_p": "%.3f"}))
     if primary:
-        md.append("\n**Primary endpoint** (SA − uniform, V100 at N*): %.2f pp [%.2f, %.2f], "
-                  "n = %d, Wilcoxon p = %.3f, %d cavities where uniform never reached D90 ≥ rx."
+        md.append("\n**Primary endpoint** (SA - uniform, V100 at N*): %.2f pp [%.2f, %.2f], "
+                  "n = %d, Wilcoxon p = %.3f; %d cavities where uniform never reached D90 >= rx "
+                  "(N* := max N); %d cavities used the largest N with both arms OK instead of N* "
+                  "(packing-limited arms); %d cavities with no N where both arms succeeded."
                   % (primary["mean_pp"], primary["ci_lo_pp"], primary["ci_hi_pp"], primary["n"],
-                     primary["wilcoxon_p"], primary["n_flagged"]))
+                     primary["wilcoxon_p"], primary["n_flagged"], primary["n_fallback_N"],
+                     primary["n_no_pair"]))
+        md.append("\n" + md_table(primary_rows, ["cavity", "N_star", "N_used", "fallback",
+                                                  "uniform_never_reached_rx", "V100_uniform", "V100_sa",
+                                                  "diff_pp"], {"diff_pp": "%.2f"}))
     failed_rows = [r for r in rows if r.get("status") == "failed"]
     if failed_rows:
         md.append("\nFAILED arm rows (fewer than N tiles / conflict / bad status; excluded from all statistics):\n")
@@ -934,20 +1125,31 @@ def section_v3(cfg) -> Dict[str, Any]:
         target = TargetSet.from_shell(mesh, plan.TARGET_SHELL_OFFSET_MM)
         inst, reason = _try("build_instance(milp)", lambda: build_instance(
             mesh, target, MILP_H_MM, MILP_N_SPINS, MILP_M_OPT, cav["seed"],
-            cache_path=os.path.join(cfg.cache_dir, "inst_%s_h%g_s%d_m%d_%s.pkl"
+            cache_path=os.path.join(cfg.cache_dir, "inst_%s_h%g_s%d_m%d_cg%s.pkl"
                                     % (cav["key"], MILP_H_MM, MILP_N_SPINS, MILP_M_OPT, git_commit())),
             use_cache=cfg.use_cache))
-        for n in cfg.n_list:
+        for n in cfg.v3_n:
             base = {"cavity": cav["key"], "volume_ml": cav["volume_ml"], "N": n,
                     "h_mm": MILP_H_MM, "n_spins": MILP_N_SPINS, "m_opt": MILP_M_OPT}
             if inst is None:
                 rows.append(dict(base, status="skipped", reason=reason))
                 continue
             total_w = inst["influence"].target.total_weight
-            sa, r_sa = _try("sa N=%d" % n, lambda: run_arm("sa", inst, n, SA_SEED_BASE + cav["seed"]))
             mi, r_mi = _try("milp N=%d" % n, lambda: run_arm("milp", inst, n, 0, milp_inst=inst))
+            sa, r_sa = _try("sa N=%d" % n, lambda: run_arm("sa", inst, n, SA_SEED_BASE + cav["seed"]))
+            sa_start = "greedy"
+            if sa is None and mi is not None and r_sa and "FAILED" in r_sa:
+                # coordinator 2026-10-07: when SA's greedy start cannot pack N on the
+                # reduced instance, start SA from the enumeration reference instead
+                sa, r_sa2 = _try("sa(start=milp) N=%d" % n, lambda: run_arm(
+                    "sa", inst, n, SA_SEED_BASE + cav["seed"], start=mi["selection"]))
+                sa_start = "milp"
+                r_sa = (r_sa + " | restart from milp: " + r_sa2) if sa is None else r_sa
             if sa is None or mi is None:
-                rows.append(dict(base, status="skipped", reason="; ".join(x for x in (r_sa, r_mi) if x)))
+                st = "failed" if any(x and "FAILED" in x for x in (r_sa, r_mi)) else "skipped"
+                rows.append(dict(base, status=st, reason="; ".join(x for x in (r_sa, r_mi) if x),
+                                 milp_status=None if mi is None else mi["solver"].status,
+                                 V100_milp_influence=None if mi is None else mi["solver"].metrics.get("V100")))
                 continue
             v_sa = float(sa["solver"].metrics.get("V100", float("nan")))
             v_mi = float(mi["solver"].metrics.get("V100", float("nan")))
@@ -957,12 +1159,14 @@ def section_v3(cfg) -> Dict[str, Any]:
             ref = bound if (mi["solver"].status == "time_limit" and bound is not None) else v_mi
             ev_sa, _ = evaluate_tiles(mesh, sa["tiles"], target)
             ev_mi, _ = evaluate_tiles(mesh, mi["tiles"], target)
-            row = dict(base, status="ok", reason="", V100_sa_influence=v_sa,
+            row = dict(base, status="ok", reason="", V100_sa_influence=v_sa, sa_start=sa_start,
                        V100_milp_influence=v_mi, milp_status=mi["solver"].status,
                        milp_bound=bound, mip_gap=mi["solver"].mip_gap,
                        reference=ref, gap=(v_sa - ref) / ref if ref else float("nan"),
                        V100_sa_grid=ev_sa["V100"], V100_milp_grid=ev_mi["V100"],
                        sa_s=sa["solve_s"], milp_s=mi["solve_s"])
+            if mi["solver"] is not None:
+                row["milp_method"] = mi["solver"].extra.get("method") if isinstance(mi["solver"].extra, dict) else None
             gr, r_g = _try("greedy N=%d" % n, lambda: run_arm("greedy", inst, n, 0))
             tb = (gr["solve_s"] if gr else 0.0) + sa["solve_s"]
             co, r_c = _try("continuous N=%d" % n, lambda: run_arm(
@@ -994,14 +1198,15 @@ def section_v3(cfg) -> Dict[str, Any]:
         fig.savefig(os.path.join(out, "v3_gap.png"), dpi=140)
         plt.close(fig)
         gaps = np.array([r["gap"] for r in ok if np.isfinite(r["gap"])])
-        md.append("### V3 optimality gap\n")
+        md.append("### V3 optimality gap %s\n" % CAPTION)
         md.append("Reference = MILP incumbent V100 (influence matrix, coverage only), or the "
                   "MILP bound when the time limit (%g s) was hit. Gap over %d instances: "
                   "mean %.2f %%, min %.2f %%, max %.2f %%, time-limit hits: %d.\n"
-                  % (plan.MILP_TIME_LIMIT_S, gaps.size, 100 * gaps.mean(), 100 * gaps.min(),
+                  % (MILP_TIME_LIMIT_S, gaps.size, 100 * gaps.mean(), 100 * gaps.min(),
                      100 * gaps.max(), sum(r["milp_status"] == "time_limit" for r in ok)))
-        md.append(md_table(ok, ["cavity", "N", "V100_sa_influence", "V100_milp_influence", "milp_status",
-                                "mip_gap", "gap", "V100_sa_grid", "V100_milp_grid", "V100_continuous_grid",
+        md.append(md_table(ok, ["cavity", "N", "sa_start", "V100_sa_influence", "V100_milp_influence", "milp_status",
+                                "milp_method", "milp_bound", "mip_gap", "gap", "V100_sa_grid", "V100_milp_grid",
+                                "V100_continuous_grid",
                                 "gap_continuous_grid", "milp_s", "continuous_s"],
                            {"gap": "%.4f", "gap_continuous_grid": "%.4f", "milp_s": "%.1f",
                             "continuous_s": "%.1f"}))
@@ -1010,18 +1215,25 @@ def section_v3(cfg) -> Dict[str, Any]:
                   "it may exceed the discrete MILP because it is not restricted to the candidate grid).")
     else:
         md.append("### V3 optimality gap\n\nNot run: " + "; ".join(sorted({r["reason"] for r in rows})))
+    bad = [r for r in rows if r["status"] in ("failed", "skipped")]
+    if bad:
+        md.append("\nV3 rows not evaluated (FAILED / skipped, never dropped):\n")
+        md.append(md_table(bad, ["cavity", "N", "status", "milp_status", "reason"]))
     return {"rows": rows, "md": "\n".join(md)}
 
 
 # ------------------------------------------------------------------- V4
 def section_v4(cfg) -> Dict[str, Any]:
     out, md, rows = cfg.out, [], []
-    cavities = [get_cavity(s, 1.0, cfg.cache_dir, cfg.use_cache) for s in cfg.seeds[:3]]
+    cavities = [get_cavity(s, 1.0, cfg.cache_dir, cfg.use_cache) for s in cfg.seeds[:2]]
+    # two cavities: the h = 2 mm / 12-spin cells dominate the overnight budget
     for cav in cavities:
         mesh = cav["mesh"]
         target = TargetSet.from_shell(mesh, plan.TARGET_SHELL_OFFSET_MM)
         for h in cfg.v4_h:
             for ns in cfg.v4_spins:
+                if not cfg.quick and ((ns >= 12 and h < 4.0) or (ns >= 6 and h <= 2.5)):
+                    continue        # overnight budget: 12 spins only at h = 4; (2.5, 6) dropped (notes)
                 base = {"cavity": cav["key"], "h_mm": h, "n_spins": ns, "N": V4_N}
                 inst, reason = _try("instance h=%g spins=%d" % (h, ns), lambda: build_instance(
                     mesh, target, h, ns, M_OPT, cav["seed"], use_cache=False))
@@ -1060,7 +1272,7 @@ def section_v4(cfg) -> Dict[str, Any]:
                 rows.append(row)
     write_csv(os.path.join(out, "v4_discretization.csv"), rows)
     ok = [r for r in rows if r["status"] == "ok"]
-    md.append("### V4 discretization (N = %d, M = %d)\n" % (V4_N, M_OPT))
+    md.append("### V4 discretization (N = %d, M = %d) %s\n" % (V4_N, M_OPT, CAPTION))
     if ok:
         md.append(md_table(ok, ["cavity", "h_mm", "n_spins", "n_candidates", "t_candidates", "t_influence",
                                 "greedy_V100", "greedy_s", "sa_V100", "sa_s", "e5_V100", "e5_gain_pp",
@@ -1092,7 +1304,7 @@ def section_v5(cfg) -> Dict[str, Any]:
             configs["truth"] = tiles
         inst, reason = _try("instance", lambda: build_instance(
             mesh, target, H_MM, N_SPINS, M_OPT, cav["seed"],
-            cache_path=os.path.join(cfg.cache_dir, "inst_%s_h%g_s%d_m%d_%s.pkl"
+            cache_path=os.path.join(cfg.cache_dir, "inst_%s_h%g_s%d_m%d_cg%s.pkl"
                                     % (cav["key"], H_MM, N_SPINS, M_OPT, git_commit())),
             use_cache=cfg.use_cache))
         for arm in ("uniform", "greedy", "sa"):
@@ -1146,7 +1358,7 @@ def section_v5(cfg) -> Dict[str, Any]:
     write_csv(os.path.join(out, "v5_sensitivity.csv"), rows)
     write_csv(os.path.join(out, "v5_rank_stability.csv"), tau_rows)
     ok = [r for r in rows if r["status"] == "ok"]
-    md.append("### V5 sensitivity (N = %d; V100 of +5 mm shell)\n" % V5_N)
+    md.append("### V5 sensitivity (N = %d; V100 of +5 mm shell) %s\n" % (V5_N, CAPTION))
     if ok:
         # spread per arm: max - min over perturbations (nominal included), averaged over cavities
         spread = []
@@ -1312,7 +1524,7 @@ def section_v6(cfg) -> Dict[str, Any]:
     # (b) optimized with the same N
     inst, reason = _try("instance (printed)", lambda: build_instance(
         mesh, target, H_MM, N_SPINS, M_OPT, 0, eligible_faces=eligible,
-        cache_path=os.path.join(cfg.cache_dir, "inst_printed_h%g_s%d_m%d_%s.pkl"
+        cache_path=os.path.join(cfg.cache_dir, "inst_printed_h%g_s%d_m%d_cg%s.pkl"
                                 % (H_MM, N_SPINS, M_OPT, git_commit())), use_cache=cfg.use_cache))
     milp_inst, r2 = _try("instance (printed, milp)", lambda: build_instance(
         mesh, target, MILP_H_MM, MILP_N_SPINS, MILP_M_OPT, 0, eligible_faces=eligible, use_cache=False))
@@ -1365,7 +1577,7 @@ def section_v6(cfg) -> Dict[str, Any]:
         fig.savefig(os.path.join(out, "v6_dvh.png"), dpi=140)
         plt.close(fig)
 
-    md.append("### V6 printed phantom\n")
+    md.append("### V6 printed phantom %s\n" % CAPTION)
     md.append("Endpoints below are the WEIGHTED stats of the eligible +5 mm target (the mesh's own "
               "shell vertices include the outer surface of the printed shell; those are kept as "
               "`*_shellverts` in `v6_phantom.csv`).\n")
@@ -1402,6 +1614,8 @@ def section_v7(cfg) -> Dict[str, Any]:
                                                                  cav["seed"], use_cache=False))
         if inst is not None:
             row["n_candidates"] = len(inst["candidates"])
+            row["n_pairs_planner"] = inst.get("n_pairs_planner")
+            row["n_pairs_added"] = inst.get("n_pairs_added")
             for k, v in inst["timings"].items():
                 row["t_" + k] = v
             for arm in ("greedy", "greedy+local", "sa", "milp", "continuous"):
@@ -1439,7 +1653,8 @@ def section_v7(cfg) -> Dict[str, Any]:
     write_csv(os.path.join(out, "v7_runtime.csv"), rows)
     with open(os.path.join(out, "v7_hardware.json"), "w", encoding="utf-8") as fh:
         json.dump(hw, fh, indent=2)
-    md.append("### V7 runtime (s; N = %d, h = %g mm, %d spins, M = %d)\n" % (V4_N, H_MM, N_SPINS, plan.M_OPT_MAX))
+    md.append("### V7 runtime (s; N = %d, h = %g mm, %d spins, M = %d) %s\n"
+              % (V4_N, H_MM, N_SPINS, plan.M_OPT_MAX, CAPTION))
     md.append("Hardware: %s; %s; %s cores; Python %s; numpy %s\n"
               % (hw["platform"], hw["processor"], hw["cores"], hw["python"], hw["numpy"]))
     cols = ["cavity", "volume_ml", "n_candidates", "t_candidates", "t_conflicts", "t_influence", "t_greedy",
@@ -1464,6 +1679,7 @@ def section_v8(cfg) -> Dict[str, Any]:
     flat = pf.flat_wall_mesh(size_mm=60.0, step_mm=2.0)
     cen = np.asarray(flat.triangles_center)
     disc = pf.flat_wall_top_faces(flat) & (np.linalg.norm(cen[:, :2], axis=1) <= 5.0)
+    narrow = pf.flat_wall_mesh(size_mm=12.0, step_mm=2.0)       # wall patch narrower than a tile
     sphere = trimesh.creation.icosphere(subdivisions=4, radius=25.0)
     tiny_mask = np.asarray(sphere.triangles_center)[:, 2] > 24.3          # ~ < 5 % of the wall
     degenerate = trimesh.Trimesh(vertices=np.array([[0, 0, 0], [10, 0, 0], [0, 10, 0]], float),
@@ -1475,12 +1691,19 @@ def section_v8(cfg) -> Dict[str, Any]:
          lambda: plan.optimize(tiny, n_full=12, solver="greedy", report=False)),
         ("N larger than any packing (sphere r=12 mm, N=12)", "build_candidates+solve_greedy",
          lambda: _greedy_pipeline(tiny, 12)),
-        ("tile wider than the wall patch (10 mm disc eligible)", "build_candidates",
-         lambda: _require_candidates(flat, eligible=disc)),
-        ("tile wider than the wall patch (10 mm disc eligible)", "optimize",
-         lambda: plan.optimize(flat, n_full=1, eligible_faces=disc, report=False)),
-        ("eligibility mask excluding > 95 % of the wall", "optimize",
-         lambda: plan.optimize(sphere, n_full=4, eligible_faces=tiny_mask, report=False)),
+        ("tile wider than the wall patch (12 mm wall mesh)", "build_candidates",
+         lambda: _require_candidates(narrow)),
+        ("tile wider than the wall patch (12 mm wall mesh)", "optimize",
+         lambda: plan.optimize(narrow, n_full=1, report=False)),
+        ("eligibility disc (10 mm) smaller than a tile on a 60 mm wall", "optimize",
+         lambda: _checked_plan(plan.optimize(flat, n_full=1, eligible_faces=disc, report=False),
+                               flat, disc, 1)),
+        ("eligibility disc (10 mm) smaller than a tile, N=2 (cannot fit)", "optimize",
+         lambda: _checked_plan(plan.optimize(flat, n_full=2, eligible_faces=disc, report=False),
+                               flat, disc, 2)),
+        ("eligibility mask excluding > 95 % of the wall (sphere cap, N=4)", "optimize",
+         lambda: _checked_plan(plan.optimize(sphere, n_full=4, eligible_faces=tiny_mask, report=False),
+                               sphere, tiny_mask, 4)),
         ("degenerate mesh (3 vertices)", "build_candidates", lambda: _require_candidates(degenerate)),
         ("degenerate mesh (3 vertices)", "optimize", lambda: plan.optimize(degenerate, n_full=2, report=False)),
         ("empty mesh", "build_candidates", lambda: _require_candidates(empty)),
@@ -1501,9 +1724,11 @@ def section_v8(cfg) -> Dict[str, Any]:
                          "verdict": "PASS" if msg else "FAIL (empty reason)", "message": msg[:160],
                          "s": time.perf_counter() - t0})
             continue
-        # returned: loud only if a status/reason says so
+        # returned: loud only if a status/reason says so, or the plan is valid
         verdict, outcome, msg = "FAIL (silent return)", "returned", ""
-        if isinstance(res, tuple) and len(res) == 2 and hasattr(res[1], "solver"):
+        if isinstance(res, dict) and "verdict" in res:
+            verdict, outcome, msg = res["verdict"], res["outcome"], res["message"]
+        elif isinstance(res, tuple) and len(res) == 2 and hasattr(res[1], "solver"):
             tiles, rep = res
             sr = rep.solver
             if sr is not None and sr.status != "ok" and sr.reason:
@@ -1516,9 +1741,32 @@ def section_v8(cfg) -> Dict[str, Any]:
         rows.append({"case": case, "function": fn_name, "outcome": outcome, "verdict": verdict,
                      "message": str(msg)[:160], "s": time.perf_counter() - t0})
     write_csv(os.path.join(out, "v8_failure_modes.csv"), rows)
-    md.append("### V8 failure modes\n")
+    md.append("### V8 failure modes %s\n" % CAPTION)
     md.append(md_table(rows, ["case", "function", "outcome", "verdict", "message"]))
     return {"rows": rows, "md": "\n".join(md)}
+
+
+def _checked_plan(res, mesh, eligible, n):
+    """Classify an ``optimize`` return on an eligibility case: a valid plan
+    (N tiles, no overlap, every anchor on an eligible face) is a PASS that is
+    NOT a failure mode; a short / overlapping / off-mask plan without a
+    reason is a FAIL."""
+    tiles, rep = res
+    sr = rep.solver
+    if sr is not None and sr.status != "ok" and sr.reason:
+        return {"verdict": "PASS", "outcome": "status=%s" % sr.status, "message": sr.reason}
+    ov = find_overlapping_tiles(tiles)
+    px = proxy_overlaps(tiles)
+    _cp, _d, tid = trimesh.proximity.closest_point(mesh, np.array([t.anchor_ras for t in tiles]))
+    on_e = bool(np.all(np.asarray(eligible, dtype=bool)[np.asarray(tid)]))
+    msg = ("%d tiles; planner rule: %d overlaps; geometric proxy: %d overlaps; anchors on eligible "
+           "faces: %s" % (len(tiles), len(ov), len(px), on_e))
+    if len(tiles) == n and not ov and not px and on_e:
+        return {"verdict": "PASS (valid plan; not a failure mode)", "outcome": "returned", "message": msg}
+    if len(tiles) == n and not ov and px:
+        return {"verdict": "FAIL under the planner rule alone (silent overlapping plan); the proxy "
+                           "makes it fail loudly", "outcome": "returned", "message": msg}
+    return {"verdict": "FAIL (silent: " + msg + ")", "outcome": "returned", "message": msg}
 
 
 def _require_candidates(mesh, eligible=None):
@@ -1569,6 +1817,7 @@ def parse_args(argv=None) -> Config:
     cfg.v4_h = (4.0, 2.5) if a.quick else V4_H
     cfg.v4_spins = (3, 6) if a.quick else V4_SPINS
     cfg.v6_n_max = 10 if a.quick else V6_N_MAX
+    cfg.v3_n = (4, 8) if a.quick else V3_N
     cfg.out = a.out
     cfg.cache_dir = os.path.join(a.out, "cache")
     cfg.use_cache = not a.no_cache
@@ -1593,9 +1842,9 @@ def main(argv=None) -> Dict[str, Any]:
     blocks = ["## validation_optimize run %s — commit %s — `python scripts/validation_optimize.py %s`\n"
               % (time.strftime("%Y-%m-%d %H:%M"), commit, " ".join(cfg.argv)),
               "Seeds %s × scales %s; N %s; n_random %d; rx %.0f cGy; grid %g mm; report margin %g mm; "
-              "h %g mm; %d spins; M_opt %d; MILP reduced h %g mm / %d spins / M %d / %g s.\n"
+              "h %g mm; %d spins; M_opt %d; MILP reduced h %g mm / %d spins / M %d / %g s, N in %s.\n"
               % (cfg.seeds, cfg.scales, cfg.n_list, cfg.n_random, RX_CGY, GRID_MM, REPORT_MARGIN_MM,
-                 H_MM, N_SPINS, M_OPT, MILP_H_MM, MILP_N_SPINS, MILP_M_OPT, plan.MILP_TIME_LIMIT_S)]
+                 H_MM, N_SPINS, M_OPT, MILP_H_MM, MILP_N_SPINS, MILP_M_OPT, MILP_TIME_LIMIT_S, cfg.v3_n)]
     results = {}
     for sec in cfg.sections:
         fn = SECTIONS.get(sec)

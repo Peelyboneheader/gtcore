@@ -127,6 +127,40 @@ clique/pairwise agreement; greedy never violates a conflict; SA reproducible
 from seed; MILP equals brute force on the toy instance; the planner never
 flags an optimizer output as overlapping.
 
+## Conflict rule used by the campaign (A5, 2026-10-07; applies to V2–V8)
+
+**Defect found.** `gtcore.interact.find_overlapping_tiles` misses real
+footprint overlaps on the phantom cavities, so A1's `build_conflicts` (which
+calls it) has holes and every solver exploited them. Evidence on cavity s1
+(scale 1.0, h = 4 mm / 3 spins, C = 433): greedy N = 4 selected tiles 76 and
+187 — anchors 13.1 mm apart, anchor normals dot 0.75, nearest seeds of the two
+tiles 1.9 mm apart, reconstructed footprint clouds 0.62 mm apart — and
+`find_overlapping_tiles([t76, t187]) == []`. Over all candidate pairs with
+anchor chord < 18 mm and normal dot > 0.5 (a certain overlap: each full tile
+contains the 10 mm disc about its anchor) 565 of 20 869 (2.7 %) are absent
+from `conflicts.pairs`; 9 of 433 candidates have an exploded footprint
+reconstruction (> 25 mm from the anchor). Root cause: the quadratic
+height-field least squares in `interact._footprint_surface` (rcond = 1e-6)
+degenerates on (near-)symmetric placements — on an r = 25 mm icosphere two
+tiles 3 mm apart produce footprint samples 1121 mm away and are not flagged
+(r = 12 mm works). Pre-existing primitive; the planner's overlap caution has
+the same blind spot. Reported to the coordinator (2026-10-07) and now being
+adopted in the library (`build_conflicts(robust=True)`, continuous solver
+acceptance test).
+
+**Rule used here: conflict = planner rule ∪ geometric proxy.** Before any
+solver runs, the validation script augments the instance's `ConflictGraph`
+with the proxy — two tiles conflict when their anchor normals agree
+(dot > 0.5) and either the anchor chord is < 18 mm (full/full; 9 mm when a
+half tile is involved) or any inter-tile seed pair is < 9 mm apart (every
+seed is 5 mm inside its tile edge; 9 mm leaves 1 mm for the planner's
+threshold) — and records `n_pairs_planner` / `n_pairs_added` per instance
+(≈ 2.7–4.2 % added on the scale-1.0 cavities). Every returned plan,
+including the continuous solver's poses (which cannot be augmented because
+the solver tests overlap internally), is re-checked with the proxy and
+recorded as a FAILED row when it overlaps. Every table below carries the
+caption "conflict rule = planner ∪ geometric proxy".
+
 ## V2 Synthetic benchmark
 
 ### Declared design (A5, 2026-10-07, written BEFORE any arm was run)
@@ -156,22 +190,34 @@ the 1.25-scale ones sparse — stated, not corrected.
 **N list.** N ∈ {4, 6, 8, 10, 12} (12 added because the manufacturer rule gives
 11–12 tiles for the scale-1.0 cavities; coordinator note 2026-10-07). On the
 0.8-scale cavities N = 10, 12 may be packing-infeasible: such arm rows are
-recorded as FAILED with `n_placed`, never as a lower score.
+recorded as FAILED with `n_placed`, never as a lower score. An arm "fails"
+when it returns fewer than N tiles, a conflicting selection (planner rule or
+proxy), or a status other than ok/optimal/time_limit.
 
 **Target.** `TargetSet.from_shell(mesh, 5)` (+5 mm shell, shell-area weights),
-rx = 6000 cGy. Discrete candidate grid h = 4 mm, 3 spins, M_opt = 1000
-(coordinator default pending V4).
+rx = 6000 cGy. Discrete candidate grid h = 4 mm, **6 spins**, M_opt = 1000.
+The coordinator's default was h = 4 / 3 spins "unless V4 says otherwise";
+the quick V4 run (`--quick`, 2026-10-07) said otherwise for packing: at
+h = 4 / 3 spins the enumeration proves no 8-tile selection exists on the
+24 mL cavity s1 (77 608 nodes), while h = 4 / 6 spins packs 8 at V100 0.999
+(greedy) — see V4.
 
-**Arms** (per cavity × N): `random` (n_random = 50 feasible draws from the
-candidate set; median and 95th percentile of V100 / D90), `uniform`
-(farthest-point anchors over the distinct eligible anchors, spin-0 candidate,
-next FPS point when a pick conflicts; local implementation in the script),
-`greedy`, `greedy+local`, `sa` (seed 1000 + cavity seed), `milp` (reduced
-instance h = 4 mm / 3 spins / M = 1000 / `MILP_TIME_LIMIT_S`; coverage only),
-`continuous` (A3's `solve_continuous`, wall-time budget = greedy + SA wall
-time on the same instance; skipped while absent), `truth` (the phantom's
-truth tiles re-draped by `conform_tile` at their own anchor, N = 8 fixed) and
-`truth_raw` (the raw truth seeds, N = 8 fixed).
+**Arms** (per cavity × N): `random` (n_random = 20 feasible draws from the
+candidate set — declared 50, trimmed to 20 for the overnight budget on the
+coordinator's instruction; median and 95th percentile of V100 / D90; up to
+500 draw attempts), `uniform` (farthest-point anchors over the distinct
+eligible anchors, spin-0 candidate, next FPS point when a pick conflicts;
+when the spin-0 pass ends short of N a second deterministic pass allows the
+other spins at the same FPS anchors — `uniform_spin_fallback` counts those
+picks; local implementation in the script), `greedy` (feasibility-aware,
+`candidates=` passed), `greedy+local`, `sa` (seed 1000 + cavity seed), `milp`
+(reduced instance h = 6 mm / 2 spins / M = 300, `solve_milp(method="auto")`
+→ enumeration branch-and-bound, 300 s limit, N ∈ {4, 6, 8} only; coverage
+only), `continuous` (A3's `solve_continuous` started from the instance
+objective's greedy solution, wall-time budget = greedy + SA wall time on the
+same instance), `truth` (the phantom's truth tiles re-draped by
+`conform_tile` at their own anchor, N = 8 fixed) and `truth_raw` (the raw
+truth seeds, N = 8 fixed).
 
 **Endpoints.** V100, D90, V150, V200 of the +5 mm shell vertices and the
 weighted V100 of the full target, all from `final_report` (`compute_dose_grid`,
@@ -187,7 +233,11 @@ continuous − uniform.
 per cavity, the smallest N in the list at which the uniform arm first reaches
 D90 ≥ rx (if never: N* = 12 and the cavity is flagged in `v2_primary.csv`).
 Paired mean difference, 95 % CI, Wilcoxon p across the 18 cavities. No
-post-hoc switching.
+post-hoc switching. Amendment before the full run (after the quick run
+showed packing-limited arms at large N): when the SA or uniform row at N*
+is FAILED/skipped, the cavity contributes the pair at the largest N where
+both arms succeeded, flagged `fallback` in the table; cavities with no such N
+are counted (`n_no_pair`) and excluded.
 
 ### Results
 
@@ -200,15 +250,83 @@ pairs among the conformed truth tiles (the generator packs tiles by seed
 clearance, not footprint). Both numbers are references for the optimizer
 arms, not results.
 
+<!-- campaign:V2 -->
+## validation_optimize run 2026-10-07 04:24 — commit d42d6c4 — `python scripts/validation_optimize.py --quick`
+
+Seeds (1, 2) × scales (1.0,); N (4, 8); n_random 10; rx 6000 cGy; grid 1 mm; report margin 15 mm; h 4 mm; 3 spins; M_opt 1000; MILP reduced h 6 mm / 2 spins / M 300 / 300 s, N in (4, 8).
+
+### V2 — `--quick` run under the augmented rule (mean ± SD across cavities; +5 mm shell, grid based)
+
+| N | arm | n_cav | V100 | D90 [cGy] | V150 | V200 | solve s |
+|---|---|---|---|---|---|---|---|
+| 4 | random | 2 | 0.002 ± 0.001 | 2309 ± 103 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.0 |
+| 4 | uniform | 2 | 0.000 ± 0.000 | 2376 ± 50 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.0 |
+| 4 | greedy | 2 | 0.168 ± 0.032 | 1589 ± 63 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.1 |
+| 4 | greedy+local | 2 | 0.189 ± 0.004 | 1560 ± 104 | 0.000 ± 0.000 | 0.000 ± 0.000 | 0.1 |
+| 4 | sa | 2 | 0.248 ± 0.040 | 1331 ± 37 | 0.000 ± 0.000 | 0.000 ± 0.000 | 1.4 |
+| 4 | milp | 2 | 0.210 ± 0.053 | 1417 ± 34 | 0.000 ± 0.000 | 0.000 ± 0.000 | 1.5 |
+| 4 | continuous | 2 | 0.168 ± 0.032 | 1589 ± 63 | 0.000 ± 0.000 | 0.000 ± 0.000 | 1.5 |
+| 8 | greedy | 1 | 0.797 ± 0.000 | 5137 ± 0 | 0.170 ± 0.000 | 0.000 ± 0.000 | 0.1 |
+| 8 | greedy+local | 1 | 0.956 ± 0.000 | 6202 ± 0 | 0.085 ± 0.000 | 0.000 ± 0.000 | 0.2 |
+| 8 | sa | 1 | 0.990 ± 0.000 | 6452 ± 0 | 0.008 ± 0.000 | 0.000 ± 0.000 | 1.5 |
+| 8 | milp | 1 | 0.977 ± 0.000 | 6413 ± 0 | 0.000 ± 0.000 | 0.000 ± 0.000 | 3.1 |
+| 8 | continuous | 1 | 0.826 ± 0.000 | 5434 ± 0 | 0.166 ± 0.000 | 0.000 ± 0.000 | 1.6 |
+| 8 | truth | 2 | 0.646 ± 0.017 | 3683 ± 126 | 0.382 ± 0.038 | 0.028 ± 0.020 | 0.0 |
+| 8 | truth_raw | 2 | 0.635 ± 0.017 | 3621 ± 116 | 0.380 ± 0.035 | 0.048 ± 0.020 | 0.0 |
+
+Paired differences in V100 (pp), t-based 95 % CI, Wilcoxon signed-rank:
+
+| N | comparison | mean_pp | ci_lo_pp | ci_hi_pp | n | wilcoxon_p |
+|---|---|---|---|---|---|---|
+| 4 | sa - greedy | 7.95 | 1.17 | 14.73 | 2 | 0.500 |
+| 4 | sa - uniform | 24.75 | -10.42 | 59.92 | 2 | 0.500 |
+| 4 | greedy - uniform | 16.80 | -11.58 | 45.19 | 2 | 0.500 |
+| 4 | greedy+local - greedy | 2.02 | -23.63 | 27.66 | 2 | 1.000 |
+| 4 | sa - random | 24.56 | -9.76 | 58.88 | 2 | 0.500 |
+| 4 | continuous - sa | -7.95 | -14.73 | -1.17 | 2 | 0.500 |
+| 4 | continuous - uniform | 16.80 | -11.58 | 45.19 | 2 | 0.500 |
+| 8 | sa - greedy | 19.30 | — | — | 1 | 1.000 |
+| 8 | greedy+local - greedy | 15.92 | — | — | 1 | 1.000 |
+| 8 | continuous - sa | -16.41 | — | — | 1 | 1.000 |
+
+**Primary endpoint** (SA − uniform, V100 at N*): 24.75 pp [-10.42, 59.92], n = 2, Wilcoxon p = 0.500, 2 cavities where uniform never reached D90 ≥ rx.
+
+FAILED arm rows (fewer than N tiles / conflict / bad status; excluded from all statistics):
+
+| cavity | N | arm | n_placed | reason |
+|---|---|---|---|---|
+| s1_x1.00 | 8 | greedy | 7 | FAILED (n_placed=7): greedy status infeasible: no compatible candidate left after placing 7 of 8 tiles |
+| s1_x1.00 | 8 | greedy+local | 7 | FAILED (n_placed=7): greedy infeasible: no compatible candidate left after placing 7 of 8 tiles |
+| s1_x1.00 | 8 | sa | 7 | FAILED (n_placed=7): sa status infeasible: greedy start failed: no compatible candidate left after placing 7 of 8 tiles |
+| s1_x1.00 | 8 | milp | 0 | FAILED (n_placed=0): milp status infeasible: no 8-candidate selection satisfies the conflict / OAR rows (77608 nodes searched) |
+| s1_x1.00 | 8 | continuous | 0 | FAILED (n_placed=0): continuous status infeasible: no feasible 8-tile start found among 433 candidates |
+
+Skipped arms:
+
+| arm | reason |
+|---|---|
+| random | skipped: random: no feasible 8-tile draw in 500 tries |
+| uniform | skipped: uniform: only 6 of 8 non-conflicting anchors (spin fallback included) |
+
+_v2: 170 s wall._
+
+![V2](figures/optimize/v2_coverage_vs_n.png)
+
+<!-- /campaign:V2 -->
+
 ## V3 Optimality gap
 
-Script: `--section v3` (seeds 1–6, scale 1.0, N ∈ N_LIST) on the reduced
-instance h = 4 mm / 3 spins / M = 1000: gap = (V100_SA − ref) / ref with
-V100 from the influence matrix (what the MILP optimizes; coverage only) and
-ref = MILP incumbent, or the MILP bound when `status == "time_limit"` (bound
-normalized by the target weight if the solver reports it unnormalized —
-open decision 11). Grid V100 of both selections, and of the continuous arm
-(budget = greedy + SA), reported alongside. Figure `v3_gap.png`.
+Script: `--section v3` (seeds 1–6, scale 1.0, N ∈ {4, 6, 8}) on the reduced
+instance h = 6 mm / 2 spins / M = 300 (coordinator, 2026-10-07), solved with
+`solve_milp(method="auto")` (enumeration branch-and-bound when C ≤ 600 and
+N ≤ 8; HiGHS otherwise), 300 s limit: gap = (V100_SA − ref) / ref with V100
+from the influence matrix (what the MILP optimizes; coverage only) and
+ref = MILP incumbent, or the MILP bound when `status == "time_limit"`. SA runs
+on the same reduced instance; when its greedy start cannot pack N, SA is
+restarted from the enumeration's selection (`sa_start = milp`), otherwise
+the row is FAILED with the reason (never dropped). Grid V100 of both
+selections, and of the continuous arm (budget = greedy + SA), reported
+alongside. Figure `v3_gap.png`.
 
 _Pending A3–A4._
 _Pending for SA._ (SA − MILP)/MILP on V100 over reduced instances; MIP gap
@@ -324,14 +442,61 @@ cavity run here: A1 (`build_candidates`) is not on main as of this commit
 (`git log main` shows A2 and A3 merged only), so the V3 cavity rows wait for
 sync point (1).
 
+<!-- campaign:V3 -->
+## validation_optimize run 2026-10-07 04:24 — commit d42d6c4 — `python scripts/validation_optimize.py --quick`
+
+Seeds (1, 2) × scales (1.0,); N (4, 8); n_random 10; rx 6000 cGy; grid 1 mm; report margin 15 mm; h 4 mm; 3 spins; M_opt 1000; MILP reduced h 6 mm / 2 spins / M 300 / 300 s, N in (4, 8).
+
+### V3 — `--quick` run under the augmented rule: optimality gap
+
+Reference = MILP incumbent V100 (influence matrix, coverage only), or the MILP bound when the time limit (300 s) was hit. Gap over 2 instances: mean 0.00 %, min 0.00 %, max 0.00 %, time-limit hits: 0.
+
+| cavity | N | V100_sa_influence | V100_milp_influence | milp_status | milp_method | milp_bound | mip_gap | gap | V100_sa_grid | V100_milp_grid | V100_continuous_grid | gap_continuous_grid | milp_s | continuous_s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| s1_x1.00 | 4 | 0.277 | 0.277 | optimal | enum_bb | 0.277 | 0.000 | 0.0000 | 0.248 | 0.248 | 0.235 | -0.0511 | 1.1 | 1.1 |
+| s2_x1.00 | 4 | 0.210 | 0.210 | optimal | enum_bb | 0.210 | 0.000 | 0.0000 | 0.172 | 0.172 | 0.094 | -0.4560 | 1.8 | 1.0 |
+
+`gap_continuous_grid` compares grid V100 of the continuous solver against the MILP incumbent's grid V100 (the continuous solver has no influence-matrix objective; it may exceed the discrete MILP because it is not restricted to the candidate grid).
+
+_v3: 19 s wall._
+
+![V3](figures/optimize/v3_gap.png)
+
+<!-- /campaign:V3 -->
+
 ## V4 Discretization
 
-Script: `--section v4` (seeds 1–3, scale 1.0, N = 8): h ∈ {4, 3, 2.5, 2} mm ×
-n_spins ∈ {3, 6, 12}; greedy, SA and continuous (same budget) per cell;
-candidate / influence build time; E5 `refine_continuous` gain on the SA
-solution (grid V100 before / after).
+Script: `--section v4` (seeds 1–2, scale 1.0, N = 8): h ∈ {4, 3, 2.5} mm ×
+n_spins ∈ {3, 6} plus (4 mm, 12 spins); greedy, SA and continuous (same
+budget) per cell; candidate / conflict / influence build time; E5
+`refine_continuous` gain on the SA solution (grid V100 before / after).
+Grid trimmed for the overnight budget: `build_conflicts` is O(C²) exact
+footprint tests (quick run: 345 s at C = 2492 for h = 2.5 / 6 spins; h = 2 mm
+would give ≈ 6300 candidates), so h = 2 mm, (2.5 mm, 6 spins) and 12 spins
+below h = 4 mm were dropped.
 
 _Pending A1–A3._
+
+<!-- campaign:V4 -->
+## validation_optimize run 2026-10-07 04:24 — commit d42d6c4 — `python scripts/validation_optimize.py --quick`
+
+Seeds (1, 2) × scales (1.0,); N (4, 8); n_random 10; rx 6000 cGy; grid 1 mm; report margin 15 mm; h 4 mm; 3 spins; M_opt 1000; MILP reduced h 6 mm / 2 spins / M 300 / 300 s, N in (4, 8).
+
+### V4 — `--quick` run under the augmented rule: discretization (N = 8, M = 1000)
+
+| cavity | h_mm | n_spins | n_candidates | t_candidates | t_influence | greedy_V100 | greedy_s | sa_V100 | sa_s | e5_V100 | e5_gain_pp | continuous_V100 | continuous_s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| s1_x1.00 | 4.000 | 3 | 433 | 6.9 | 0.3 |  |  |  |  |  |  |  |  |
+| s1_x1.00 | 4.000 | 6 | 869 | 11.7 | 0.7 | 0.999 | 0.3 | 1.000 | 2.0 | 1.000 | 0.00 | 0.999 | 2.4 |
+| s1_x1.00 | 2.500 | 3 | 1154 | 16.9 | 0.7 | 1.000 | 0.3 | 1.000 | 2.4 | 1.000 | -0.02 | 1.000 | 2.7 |
+| s1_x1.00 | 2.500 | 6 | 2310 | 39.2 | 1.2 | 0.988 | 0.4 | 1.000 | 3.3 | 1.000 | 0.00 | 0.988 | 3.7 |
+| s2_x1.00 | 4.000 | 3 | 481 | 7.3 | 0.3 | 0.797 | 0.1 | 0.990 | 1.4 | 0.990 | 0.00 | 0.826 | 1.5 |
+| s2_x1.00 | 4.000 | 6 | 965 | 14.1 | 0.9 | 0.864 | 0.4 | 1.000 | 3.0 | 1.000 | 0.00 | 0.864 | 3.5 |
+| s2_x1.00 | 2.500 | 3 | 1243 | 19.6 | 0.9 | 0.918 | 0.4 | 1.000 | 2.6 | 1.000 | 0.00 | 0.918 | 3.1 |
+| s2_x1.00 | 2.500 | 6 | 2492 | 41.4 | 1.4 | 0.925 | 0.6 | 1.000 | 4.1 | 1.000 | 0.00 | 0.925 | 4.8 |
+
+_v4: 1462 s wall._
+<!-- /campaign:V4 -->
 
 ## V5 Sensitivity
 
@@ -346,6 +511,50 @@ spread (max − min over perturbations) per arm, and Kendall τ between the arm
 ranking under the nominal evaluation and under each perturbation.
 
 _Pending A1–A3._
+
+<!-- campaign:V5 -->
+## validation_optimize run 2026-10-07 04:24 — commit d42d6c4 — `python scripts/validation_optimize.py --quick`
+
+Seeds (1, 2) × scales (1.0,); N (4, 8); n_random 10; rx 6000 cGy; grid 1 mm; report margin 15 mm; h 4 mm; 3 spins; M_opt 1000; MILP reduced h 6 mm / 2 spins / M 300 / 300 s, N in (4, 8).
+
+### V5 — `--quick` run under the augmented rule: sensitivity (N = 8; V100 of +5 mm shell)
+
+| arm | spread_pp_mean | spread_pp_sd | n_cav |
+|---|---|---|---|
+| greedy | 17.95 | 0.00 | 1 |
+| sa | 6.73 | 0.00 | 1 |
+| truth | 4.74 | 0.38 | 2 |
+
+| cavity | perturbation | truth | uniform | greedy | sa |
+|---|---|---|---|---|---|
+| s1_x1.00 | interference_on | 0.639 |  |  |  |
+| s1_x1.00 | m_opt_4000 |  |  |  |  |
+| s1_x1.00 | nominal | 0.658 |  |  |  |
+| s1_x1.00 | seed_plane_2.25mm | 0.652 |  |  |  |
+| s1_x1.00 | seed_plane_3.75mm | 0.662 |  |  |  |
+| s1_x1.00 | sk_+5% | 0.681 |  |  |  |
+| s1_x1.00 | sk_-5% | 0.631 |  |  |  |
+| s2_x1.00 | interference_on | 0.618 |  | 0.781 | 0.977 |
+| s2_x1.00 | m_opt_4000 |  |  | 0.919 | 1.000 |
+| s2_x1.00 | nominal | 0.634 |  | 0.797 | 0.990 |
+| s2_x1.00 | seed_plane_2.25mm | 0.633 |  | 0.803 | 0.983 |
+| s2_x1.00 | seed_plane_3.75mm | 0.633 |  | 0.787 | 0.994 |
+| s2_x1.00 | sk_+5% | 0.657 |  | 0.835 | 0.999 |
+| s2_x1.00 | sk_-5% | 0.612 |  | 0.739 | 0.933 |
+
+Arm-ranking stability (Kendall tau vs nominal):
+
+| cavity | perturbation | arms | kendall_tau |
+|---|---|---|---|
+| s2_x1.00 | seed_plane_2.25mm | greedy,sa,truth | 1.00 |
+| s2_x1.00 | seed_plane_3.75mm | greedy,sa,truth | 1.00 |
+| s2_x1.00 | sk_-5% | greedy,sa,truth | 1.00 |
+| s2_x1.00 | sk_+5% | greedy,sa,truth | 1.00 |
+| s2_x1.00 | interference_on | greedy,sa,truth | 1.00 |
+| s2_x1.00 | m_opt_4000 | greedy,sa | 1.00 |
+
+_v5: 179 s wall._
+<!-- /campaign:V5 -->
 
 ## V6 Physical phantom and clinical case
 
@@ -411,6 +620,39 @@ before this fix) — flagged for A1/A6 under open decision 17.
 
 **Clinical case 2:** not on this machine — the `--clinical <path>` hook exists
 and prints "not run"; RTSTRUCT HR-CTV handling is not written.
+
+<!-- campaign:V6 -->
+## validation_optimize run 2026-10-07 04:24 — commit d42d6c4 — `python scripts/validation_optimize.py --quick`
+
+Seeds (1, 2) × scales (1.0,); N (4, 8); n_random 10; rx 6000 cGy; grid 1 mm; report margin 15 mm; h 4 mm; 3 spins; M_opt 1000; MILP reduced h 6 mm / 2 spins / M 300 / 300 s, N in (4, 8).
+
+### V6 — `--quick` run under the augmented rule: printed phantom
+
+Endpoints below are the WEIGHTED stats of the eligible +5 mm target (the mesh's own shell vertices include the outer surface of the printed shell; those are kept as `*_shellverts` in `v6_phantom.csv`).
+
+Wall = `meshes["body"]` (53863 mm², 473.9 mL enclosed, 72396 faces); eligible = faces visible from the implant centroid (cached mask (C:\Users\jacob\OneDrive\Desktop\gt-worktrees\plan-validation\output\validation_optimize\cache\printed_visible_72396.npy)) AND within 35 mm of a detected seed: 4651 mm² (7347 faces); target = +5 mm shell of the eligible faces (4210 points, 15539 mm²). 32 localized seeds, 8 fitted tiles. Recommended tiles: 12 (plan.recommend_tile_count).
+
+Conformer substitution alone: localized seeds sit 0.84 mm off this mesh on average, the conformer puts them at 3 mm (mean seed shift 3.94 mm): V100 +1.75 pp, D90 -6 cGy.
+
+| arm | N | n_placed | status | V100 | D90 | V150 | V200 | V100w | n_overlaps | solve_s | reason |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| as_implanted | 8 |  | ok | 0.654 | 2349 | 0.552 | 0.418 | 0.654 | 3 |  |  |
+| as_implanted_conformed | 8 |  | ok | 0.671 | 2344 | 0.555 | 0.423 | 0.671 | 6 |  |  |
+| uniform | 8 | 8 | ok | 0.637 | 4053 | 0.307 | 0.211 | 0.637 | 0 | 0.0 |  |
+| greedy | 8 | 8 | ok | 0.779 | 4558 | 0.531 | 0.282 | 0.779 | 0 | 0.0 |  |
+| sa | 8 | 8 | ok | 0.838 | 4845 | 0.423 | 0.142 | 0.838 | 0 | 2.0 |  |
+| milp | 8 | 8 | ok | 0.770 | 3961 | 0.403 | 0.177 | 0.770 | 0 | 0.3 |  |
+| continuous | 8 | 8 | ok | 0.779 | 4558 | 0.531 | 0.282 | 0.779 | 0 | 2.0 |  |
+
+Minimum N (P2): {"D90>=rx": 10, "V100>=0.90": 10}
+
+Clinical case: clinical case 2 is not on this machine: not run
+
+_v6: 137 s wall._
+
+![V6](figures/optimize/v6_dvh.png)
+
+<!-- /campaign:V6 -->
 
 ## V7 Runtime
 
@@ -567,6 +809,22 @@ flat 60 mm wall, h = 5, 3 spins: 261 enumerated / 154 accepted in 0.9 s;
 `build_conflicts` on 444 cavity candidates (h = 4, 3 spins; 98 007 close
 pairs, 42 813 conflicts) 10.5 s.
 
+<!-- campaign:V7 -->
+## validation_optimize run 2026-10-07 04:24 — commit d42d6c4 — `python scripts/validation_optimize.py --quick`
+
+Seeds (1, 2) × scales (1.0,); N (4, 8); n_random 10; rx 6000 cGy; grid 1 mm; report margin 15 mm; h 4 mm; 3 spins; M_opt 1000; MILP reduced h 6 mm / 2 spins / M 300 / 300 s, N in (4, 8).
+
+### V7 — `--quick` run under the augmented rule: runtime (s; N = 8, h = 4 mm, 3 spins, M = 4000)
+
+Hardware: Windows-11-10.0.26200-SP0; AMD64 Family 25 Model 97 Stepping 2, AuthenticAMD; 12 cores; Python 3.12.10; numpy 2.5.2
+
+| cavity | volume_ml | n_candidates | t_candidates | t_conflicts | t_influence | t_greedy | t_greedy+local | t_sa | t_milp | t_continuous | t_final_report_15mm | t_final_report_full_50mm |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| s1_x1.00 | 24.382 | 433 | 6.3 | 9.0 | 0.6 | — | — | — | — | — | 2.1 | 19.2 |
+
+_v7: 42 s wall._
+<!-- /campaign:V7 -->
+
 ## V8 Failure modes
 
 Script: `python scripts/validation_optimize.py --section v8` →
@@ -584,6 +842,32 @@ return (or an empty plan without a reason) is FAIL.
 | empty mesh | `final_report` | raised `ValueError("final_report: mesh is empty or None")` | PASS |
 
 (2026-10-07, commit cd73082 + A5 changes, `--quick --section v8`.)
+
+<!-- campaign:V8 -->
+## validation_optimize run 2026-10-07 04:24 — commit d42d6c4 — `python scripts/validation_optimize.py --quick`
+
+Seeds (1, 2) × scales (1.0,); N (4, 8); n_random 10; rx 6000 cGy; grid 1 mm; report margin 15 mm; h 4 mm; 3 spins; M_opt 1000; MILP reduced h 6 mm / 2 spins / M 300 / 300 s, N in (4, 8).
+
+### V8 — `--quick` run under the augmented rule: failure modes
+
+| case | function | outcome | verdict | message |
+|---|---|---|---|---|
+| N larger than any packing (sphere r=12 mm, N=12) | optimize | raised ValueError | PASS | build_candidates: every candidate was rejected before conforming (1014 enumerated; rejections {'ineligible': 0, 'hanging': 1014, 'detached': 0, 'conform_error': |
+| N larger than any packing (sphere r=12 mm, N=12) | build_candidates+solve_greedy | raised ValueError | PASS | build_candidates: every candidate was rejected before conforming (354 enumerated; rejections {'ineligible': 0, 'hanging': 354, 'detached': 0, 'conform_error': 0 |
+| tile wider than the wall patch (12 mm wall mesh) | build_candidates | raised ValueError | PASS | build_candidates: every candidate was rejected before conforming (231 enumerated; rejections {'ineligible': 0, 'hanging': 231, 'detached': 0, 'conform_error': 0 |
+| tile wider than the wall patch (12 mm wall mesh) | optimize | raised ValueError | PASS | build_candidates: every candidate was rejected before conforming (1200 enumerated; rejections {'ineligible': 0, 'hanging': 1200, 'detached': 0, 'conform_error': |
+| eligibility disc (10 mm) smaller than a tile on a 60 mm wall | optimize | returned | PASS (valid plan; not a failure mode) | 1 tiles, 0 overlaps, anchors on eligible faces: True |
+| eligibility disc (10 mm) smaller than a tile, N=2 (cannot fit) | optimize | raised RuntimeError | PASS | greedy solver failed: status infeasible (no compatible candidate of the required kinds left after placing 1 of 2 tiles) |
+| eligibility mask excluding > 95 % of the wall (sphere cap, N=4) | optimize | returned | PASS (valid plan; not a failure mode) | 4 tiles, 0 overlaps, anchors on eligible faces: True |
+| degenerate mesh (3 vertices) | build_candidates | raised ValueError | PASS | build_candidates: degenerate mesh (1 faces < 4) |
+| degenerate mesh (3 vertices) | optimize | raised ValueError | PASS | build_candidates: degenerate mesh (1 faces < 4) |
+| empty mesh | build_candidates | raised ValueError | PASS | build_candidates: degenerate mesh (empty: no faces) |
+| empty mesh | optimize | raised ValueError | PASS | build_candidates: degenerate mesh (empty: no faces) |
+| empty mesh | final_report | raised ValueError | PASS | final_report: mesh is empty or None |
+
+_v8: 4 s wall._
+<!-- /campaign:V8 -->
+
 
 ---
 
@@ -855,6 +1139,19 @@ A5 (plan/validation, 2026-10-07):
     parameter. Alternative: edit the generator (out of A5's remit).
 15. **`test_plan_interface.STUBS` no longer lists `final_report`** (it is
     implemented); other branches will drop their names the same way.
+20. **Conflict rule = planner ∪ geometric proxy** (see the section above):
+    adopted for the whole campaign on the coordinator's instruction after
+    the `find_overlapping_tiles` defect; the library adopts the identical
+    proxy, so campaign numbers match shipped behaviour.
+21. **Primary-endpoint fallback** (declared before the full run, after the
+    quick run): the largest N with both arms OK replaces N* when the N* row
+    is packing-limited; counted and flagged, never silent.
+22. **V2 spins = 6** (V4 evidence, above) and **V3 reduced instance = h 6 mm /
+    2 spins / M 300** (coordinator) replace the Phase 0 declaration.
+23. **Continuous-arm budget is small** (greedy + SA ≈ 1.5–4 s on these
+    instances); the quick run shows it returning its greedy start unchanged
+    (identical V100) or worse than the discrete optimum at N = 4. Alternative:
+    a floor of, say, 30 s. Kept as instructed (equal wall time), flagged.
 16. **`final_report` reads optional knobs from `parameters`**
     (`sk_per_seed_u`, `seed`, `shell_offsets_mm`, `rind_depth_mm`,
     `shadowing`) because the frozen signature has no S_K argument.
@@ -1062,6 +1359,9 @@ _To be pasted unedited._
 | 2026-10-07 | `python scripts/validation_optimize.py --quick` | 1, 2 | cd73082 + A5 | `v2_rows.csv` (truth arms only), `v6_*`, `v7_runtime.csv` | A1–A4 stubs: every solver arm skipped with reason; see V2/V6/V7 text |
 | 2026-10-07 | `python scripts/validation_optimize.py --quick --section v6` | — | cd73082 + A5 | `v6_phantom.csv`, `v6_info.json`, `v6_dvh.png`, `v6_as_implanted*.json` | after the centre-snap fix; numbers in V6 (517 s incl. the ray test) |
 | 2026-10-07 | `python -m pytest -q -p no:cacheprovider` | — | cd73082 + A5 | 491 passed, 490 s | full suite with `test_plan_report.py` (10) and `test_validation_optimize_smoke.py` (12) |
+| 2026-10-07 | `git merge main` (d42d6c4) → `python scripts/validation_optimize.py --quick` | 1, 2 | d42d6c4 + A5 | `notes_block_20261007_045809.md`, all `v*_*.csv/png` | every arm executes under real solvers; conflict rule = planner ∪ geometric proxy; results pasted per V-section above (quick grid: seeds 1–2, scale 1.0, N 4/8, n_random 10) |
+| 2026-10-07 04:59 | `python scripts/validation_optimize.py` (full campaign, one process) | 1–6 × 0.8/1.0/1.25 | d42d6c4 + A5 | `full_run.log` (scratch) | **killed by the Claude Code harness at V2 cavity 3/18 (s3_x0.80) for critically low system memory** (other jobs shared the machine); no partial CSVs beyond the quick-run files; relaunch with the same command when memory allows (~3–3.5 h) |
+| 2026-10-07 | `python -m pytest -q -p no:cacheprovider` (post-merge) | — | d42d6c4 + A5 | killed at ~10 % by the same memory reaper | validation modules alone: `test_validation_optimize_smoke.py` 15, `test_plan_report.py` 10, `test_plan_interface.py` 19 passed / 13 skipped (implemented stubs) |
 | 2026-10-07 | `python -m pytest -q tests/test_plan_milp.py` | toy rng_seed 0 | (A4 commit, plan/milp) | 20 passed, 17 s (full suite 490 passed, 1 skipped, 385 s under load) | MILP = brute force on the toy; 80-candidate toy at N = 6 not closed in 60 s (gap 0.14) |
 | 2026-10-07 | `python -m pytest -q tests/test_plan_milp.py` + direct `solve_milp(..., cover_cuts=…)` calls on `toy_instance(80, 300)` N = 6 | toy rng_seed 0 | (A4 cover-cut commit, plan/milp) | 22 passed, 32 s (full suite 491 passed, 1 skipped, 328 s) | pigeonhole cover cuts: optimum unchanged; LP bound exact at N = 1; no bound gain on toy80 N = 6, worse 60 s incumbent (0.787 vs 0.867) → off for the MILP, on for `lp_bound` |
 | 2026-10-07 | `python -m pytest -q tests/test_plan_milp.py` + direct `solve_enumeration` calls on `toy_instance(12,150)` (pitch 10/15) and `toy_instance(80,300)` N = 4/6/8 | toy rng_seed 0 | (A4 enumeration commit, plan/milp) | 32 passed, 29 s (full suite 501 passed, 1 skipped, 267 s) | enumeration B&B = brute force on every toy case; proves toy80 N = 6 (0.9033) in 34 s where HiGHS stalled at 0.867 / 0.997; `solve_milp` auto-routes to it for C ≤ 600, N ≤ 8 |

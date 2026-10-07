@@ -167,3 +167,42 @@ def test_parse_args_quick(vo):
     full = vo.parse_args([])
     assert full.sections == ["v2", "v3", "v4", "v5", "v6", "v7", "v8"]
     assert full.seeds == vo.SEEDS and full.n_random == vo.N_RANDOM
+
+
+def test_proxy_overlaps_conservative(vo, toy):
+    cand = toy["candidates"]
+    # 10 mm pitch grid: neighbours (0, 1) are 10 mm apart -> certain overlap;
+    # (0, 2) are 20 mm apart -> not flagged by the proxy (abutting is legal)
+    assert vo.proxy_overlaps(cand.tiles_of([0, 1])) == [(0, 1)]
+    assert vo.proxy_overlaps(cand.tiles_of([0, 2])) == []
+    # opposite-facing tiles never count
+    a, b = cand.tiles_of([0, 1])
+    flipped = vo.PlacedTile(kind=b.kind, center_ras=b.center_ras, normal_ras=-b.normal_ras,
+                            axis_ras=b.axis_ras, seed_centers=b.seed_centers,
+                            seed_axes=b.seed_axes, corners_ras=b.corners_ras,
+                            anchor_ras=b.anchor_ras)
+    assert vo.proxy_overlaps([a, flipped]) == []
+
+
+def test_uniform_heuristic_spin_fallback_bookkeeping(vo, toy):
+    cand, conf = toy["candidates"], toy["conflicts"]
+    sel = vo.uniform_heuristic(cand, conf, 4)
+    assert vo.uniform_heuristic.last_fallback == 0      # spin-0 only on the toy grid
+    assert conf.is_feasible(sel)
+
+
+def test_augment_conflicts_adds_only_proxy_pairs(vo, toy):
+    cand, conf = toy["candidates"], toy["conflicts"]
+    graph, n_added = vo.augment_conflicts(cand, conf)
+    old = conf.pairs.toarray()
+    new = graph.pairs.toarray()
+    assert new.shape == old.shape and np.array_equal(new.T, new)
+    assert not new.diagonal().any()
+    assert np.all(new[old])                               # planner pairs kept
+    added = new & ~old
+    assert n_added == int(added.sum() // 2)
+    # every added pair satisfies the proxy; on the toy grid (10 mm pitch,
+    # abutting tiles already conflict) a diagonal neighbour at 14.1 mm is new
+    for i, j in zip(*np.nonzero(np.triu(added))):
+        assert vo.proxy_overlaps(cand.tiles_of([int(i), int(j)])) == [(0, 1)]
+    assert len(graph.cliques) == len(conf.cliques)
