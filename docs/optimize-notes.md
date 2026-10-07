@@ -844,11 +844,11 @@ return (or an empty plan without a reason) is FAIL.
 (2026-10-07, commit cd73082 + A5 changes, `--quick --section v8`.)
 
 <!-- campaign:V8 -->
-## validation_optimize run 2026-10-07 04:24 — commit d42d6c4 — `python scripts/validation_optimize.py --quick`
+## validation_optimize run 2026-10-07 05:03 — commit 483a355 — `python scripts/validation_optimize.py --quick --section v8`
 
-Seeds (1, 2) × scales (1.0,); N (4, 8); n_random 10; rx 6000 cGy; grid 1 mm; report margin 15 mm; h 4 mm; 3 spins; M_opt 1000; MILP reduced h 6 mm / 2 spins / M 300 / 300 s, N in (4, 8).
+Seeds (1, 2) × scales (1.0,); N (4, 8); n_random 10; rx 6000 cGy; grid 1 mm; report margin 15 mm; h 4 mm; 6 spins; M_opt 1000; MILP reduced h 6 mm / 2 spins / M 300 / 300 s, N in (4, 8).
 
-### V8 — `--quick` run under the augmented rule: failure modes
+### V8 — `--quick --section v8` under the current script: failure modes (conflict rule = planner ∪ geometric proxy; n_pairs_added recorded per instance)
 
 | case | function | outcome | verdict | message |
 |---|---|---|---|---|
@@ -856,9 +856,9 @@ Seeds (1, 2) × scales (1.0,); N (4, 8); n_random 10; rx 6000 cGy; grid 1 mm; re
 | N larger than any packing (sphere r=12 mm, N=12) | build_candidates+solve_greedy | raised ValueError | PASS | build_candidates: every candidate was rejected before conforming (354 enumerated; rejections {'ineligible': 0, 'hanging': 354, 'detached': 0, 'conform_error': 0 |
 | tile wider than the wall patch (12 mm wall mesh) | build_candidates | raised ValueError | PASS | build_candidates: every candidate was rejected before conforming (231 enumerated; rejections {'ineligible': 0, 'hanging': 231, 'detached': 0, 'conform_error': 0 |
 | tile wider than the wall patch (12 mm wall mesh) | optimize | raised ValueError | PASS | build_candidates: every candidate was rejected before conforming (1200 enumerated; rejections {'ineligible': 0, 'hanging': 1200, 'detached': 0, 'conform_error': |
-| eligibility disc (10 mm) smaller than a tile on a 60 mm wall | optimize | returned | PASS (valid plan; not a failure mode) | 1 tiles, 0 overlaps, anchors on eligible faces: True |
+| eligibility disc (10 mm) smaller than a tile on a 60 mm wall | optimize | returned | PASS (valid plan; not a failure mode) | 1 tiles; planner rule: 0 overlaps; geometric proxy: 0 overlaps; anchors on eligible faces: True |
 | eligibility disc (10 mm) smaller than a tile, N=2 (cannot fit) | optimize | raised RuntimeError | PASS | greedy solver failed: status infeasible (no compatible candidate of the required kinds left after placing 1 of 2 tiles) |
-| eligibility mask excluding > 95 % of the wall (sphere cap, N=4) | optimize | returned | PASS (valid plan; not a failure mode) | 4 tiles, 0 overlaps, anchors on eligible faces: True |
+| eligibility mask excluding > 95 % of the wall (sphere cap, N=4) | optimize | returned | FAIL under the planner rule alone (silent overlapping plan); the proxy makes it fail loudly | 4 tiles; planner rule: 0 overlaps; geometric proxy: 6 overlaps; anchors on eligible faces: True |
 | degenerate mesh (3 vertices) | build_candidates | raised ValueError | PASS | build_candidates: degenerate mesh (1 faces < 4) |
 | degenerate mesh (3 vertices) | optimize | raised ValueError | PASS | build_candidates: degenerate mesh (1 faces < 4) |
 | empty mesh | build_candidates | raised ValueError | PASS | build_candidates: degenerate mesh (empty: no faces) |
