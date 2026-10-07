@@ -557,7 +557,7 @@ def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
 
     t0 = time.perf_counter()
     res = _plan.solve_greedy(objective, n_total, fixed=list(int(i) for i in fixed_ids),
-                             kinds_required=kinds_required, candidates=cand_s)
+                             kinds_required=kinds_required)
     if solver == "local":
         res = _plan.solve_local(objective, n_total, start=res.selection,
                                 candidates=cand_s)
