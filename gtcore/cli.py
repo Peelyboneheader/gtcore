@@ -4,6 +4,7 @@
     gt view                          same, on the synthetic phantom
     gt plan <dicom-folder-or-file>   pipeline + interactive tile planner
     gt plan                          same, on the synthetic phantom
+    gt optimize <scan> --tiles N     pipeline + opt-in placement optimizer -> JSON/CSV
     gt demo                          full phantom demo (writes output/ files)
     gt test                          run the test suite
 
@@ -62,7 +63,108 @@ def cmd_plan(args):
     prior = ImplantPrior(n_full=args.tiles, n_half=args.half, n_seeds=args.seeds)
     print("implant prior:", prior.describe())
     result = reconstruct(vol, n_seeds_expected=prior.n_seeds)
-    run_planner(result, rx_cgy=args.rx, suggest=bool(args.suggest), prior=prior)
+    # additive: the historical call is untouched unless --optimizer is set
+    extra = {}
+    if getattr(args, "optimizer", "greedy") != "greedy":
+        extra["solver"] = args.optimizer
+    run_planner(result, rx_cgy=args.rx, suggest=bool(args.suggest), prior=prior, **extra)
+    return 0
+
+
+def _implant_center(result, mesh):
+    """Detected-seed mean when seeds exist, else the mesh centroid (RAS)."""
+    import numpy as np
+
+    seeds = getattr(result, "seeds", None)
+    if seeds is not None and len(seeds):
+        return np.asarray(seeds.centers_ras, dtype=float).mean(axis=0)
+    return np.asarray(mesh.vertices, dtype=float).mean(axis=0)
+
+
+def cmd_optimize(args):
+    """``gt optimize``: pipeline -> wall -> tile-count recommendation ->
+    gtcore.plan.optimize (or sweep_n with --min-n) -> JSON + CSV + seed CSV."""
+    import json
+    import time
+
+    import numpy as np
+
+    import gtcore.plan as plan
+    from .interact import export_plan_csv
+    from .pipeline import reconstruct
+    from .planner import wall_mesh_for
+
+    vol, title = _load(args.path, args.spacing)
+    print("volume %s @ %s mm" % (vol.array.shape, tuple(round(s, 2) for s in vol.spacing)))
+    result = reconstruct(vol)
+    mesh, label = wall_mesh_for(result)
+    if mesh is None or not len(getattr(mesh, "vertices", ())):
+        print("no cavity or body surface in this scan -- nothing to optimize on")
+        return 2
+    print("wall: %s (%d faces)" % (label, len(mesh.faces)))
+
+    try:
+        eligible = None
+        if label != "cavity wall":
+            # a closed printed shell has an inner and an outer surface: only
+            # the faces seen from the implant are eligible (plan section 10)
+            eligible = np.asarray(plan.visible_faces(mesh, _implant_center(result, mesh)),
+                                  dtype=bool)
+            print("eligible faces (visible from the implant): %d of %d"
+                  % (int(eligible.sum()), eligible.size))
+        rec = plan.recommend_tile_count(mesh, eligible_faces=eligible)
+        print(rec.describe())
+        n_tiles = args.tiles
+        if n_tiles is None:
+            n_tiles = int(rec.n_tiles)
+            print("--tiles not given: using the recommended count, %d" % n_tiles)
+        if n_tiles < 1:
+            print("tile count must be >= 1 (got %d)" % n_tiles)
+            return 1
+
+        out_dir = args.out or os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "output",
+            time.strftime("optimize_%Y%m%d_%H%M%S"))
+        os.makedirs(out_dir, exist_ok=True)
+
+        kw = dict(rx_cgy=args.rx, solver=args.solver, seed=args.seed, h_mm=args.h,
+                  n_spins=args.spins, eligible_faces=eligible,
+                  time_budget_s=float(args.budget))
+        n_full = n_tiles
+        if args.min_n:
+            target = plan.TargetSet.from_shell(mesh, plan.TARGET_SHELL_OFFSET_MM)
+            sweep = plan.sweep_n(mesh, target, n_tiles, **kw)
+            print("coverage vs N (%s):" % args.solver)
+            for row in sweep.rows:
+                print("  N %2d  V100 %.3f  D90 %.0f cGy  V150 %.3f  V200 %.3f  %.1f s"
+                      % (row.get("N", 0), row.get("V100", float("nan")),
+                         row.get("D90", float("nan")), row.get("V150", float("nan")),
+                         row.get("V200", float("nan")), row.get("runtime_s", 0.0)))
+            print("minimum N:", ", ".join("%s -> %s" % (k, v) for k, v in sweep.min_n.items()))
+            with open(os.path.join(out_dir, "sweep.json"), "w", encoding="utf-8") as fh:
+                json.dump(plan._jsonable({"rows": sweep.rows, "min_n": sweep.min_n}),
+                          fh, indent=2)
+            chosen = sweep.min_n.get("D90>=rx")
+            if chosen is None:
+                print("no N <= %d reaches D90 >= rx; placing %d tiles" % (n_tiles, n_tiles))
+                chosen = n_tiles
+            n_full = int(chosen)
+        tiles, rep = plan.optimize(mesh, n_full, args.half, refine=bool(args.refine),
+                                   report=not args.no_report, verbose=True, **kw)
+    except NotImplementedError as exc:
+        print("optimizer not available yet:", exc)
+        return 2
+    except (ValueError, RuntimeError) as exc:
+        print("optimize failed:", exc)
+        return 1
+
+    print(rep.summary())
+    rep.to_json(os.path.join(out_dir, "report.json"))
+    rep.to_csv(os.path.join(out_dir, "report.csv"))
+    seeds_csv = os.path.join(out_dir, "plan_seeds.csv")
+    n_seeds = export_plan_csv(seeds_csv, tiles, result.seeds.centers_ras,
+                              result.seeds.axes_ras, rx_cgy=args.rx)
+    print("%d tiles, %d seeds written to %s" % (len(tiles), n_seeds, out_dir))
     return 0
 
 
@@ -124,7 +226,39 @@ def main(argv=None):
                           "detection is checked against it and, on coarse "
                           "scans, the HU threshold is lowered stepwise "
                           "until that many seeds are found near the implant")
+    pln.add_argument("--optimizer", choices=("greedy", "sa", "continuous"), default="greedy",
+                     help="placement optimizer solver for the planner's 'O' key "
+                          "(Shift+O cycles it in the window)")
     pln.set_defaults(fn=cmd_plan)
+
+    o = sub.add_parser("optimize", help="run the pipeline and the opt-in placement "
+                                        "optimizer (gtcore.plan); writes JSON + CSV")
+    o.add_argument("path", nargs="?", default=None,
+                   help="DICOM folder or .nrrd/.nii/.mha file (default: phantom)")
+    o.add_argument("--tiles", type=int, default=None,
+                   help="FULL tiles to place (default: the manufacturer-rule "
+                        "recommendation from the wall area, printed first)")
+    o.add_argument("--half", type=int, default=0, help="HALF (2x1) tiles to place")
+    o.add_argument("--min-n", action="store_true", dest="min_n",
+                   help="sweep N = 1..--tiles and place the smallest N with D90 >= rx")
+    o.add_argument("--solver", choices=("greedy", "local", "sa", "milp", "continuous"),
+                   default="greedy")
+    o.add_argument("--budget", type=float, default=60.0,
+                   help="wall-time budget in s for --solver continuous (default 60)")
+    o.add_argument("--seed", type=int, default=0, help="RNG seed (stochastic solvers)")
+    o.add_argument("--rx", type=float, default=6000.0, help="prescription dose in cGy")
+    o.add_argument("--h", type=float, default=2.5, help="candidate anchor spacing in mm")
+    o.add_argument("--spins", type=int, default=None,
+                   help="spins per anchor (default 6 full / 12 half)")
+    o.add_argument("--out", default=None,
+                   help="output folder (default output/optimize_<timestamp>/)")
+    o.add_argument("--refine", action="store_true",
+                   help="continuous (u, v, theta) polish after the discrete solve")
+    o.add_argument("--no-report", action="store_true", dest="no_report",
+                   help="skip the dose-grid final report (influence metrics only)")
+    o.add_argument("--spacing", type=float, default=0.7,
+                   help="phantom voxel size in mm (phantom mode only)")
+    o.set_defaults(fn=cmd_optimize)
 
     d = sub.add_parser("demo", help="full phantom demo, writes output/ files")
     d.add_argument("--spacing", type=float, default=0.7)

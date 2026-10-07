@@ -18,6 +18,9 @@ From this folder (`gt.bat` wraps the project venv — no activation needed):
 .\gt plan  <dicom-folder-or-file>   pipeline + interactive tile planner (drag/drop + isodoses)
 .\gt plan  <scan> --suggest         ... starting from the inferred tiles (planner key 'T')
 .\gt plan  <scan> --tiles 6 --half 0 --seeds 24   ... telling it what the OR team knows (all optional)
+.\gt optimize <scan> --tiles 8      opt-in placement optimizer (gtcore.plan): recommends a tile count, then
+                                    places N tiles -> output\optimize_<timestamp>\ (JSON, CSV, seed CSV);
+                                    --tiles omitted = the recommended count; --solver greedy|local|sa|milp|continuous
 .\gt view                           either command, phantom mode (synthetic ground truth)
 .\gt demo                           full phantom demo -> output\ (NRRD, PLY meshes, figures, CSV)
 .\gt test                           run the test suite (424 tests)
@@ -30,6 +33,8 @@ Planner controls (the same legend is on screen; `?` collapses it):
 | Place | hover the blue wall | white **ghost tile** previews the next drop (red = would overlap) |
 | | right-click or `P` | drop the tile there; `H` = next tile full / half |
 | | `T` | **suggest tiles**: infer the implant configuration from the detected seeds (`gt plan --suggest` starts this way). With `--tiles N` the OR count is a trusted input; without it the count is inferred, **no half tiles are assumed** and every tile has 4 seeds. Gold outline = supported by the calibrated fit; **orange outline = tentative** (cover pass / triplet completion: verify it); a hollow orange sphere is a seed detection missed, inferred from its 3 tile-mates; **magenta seeds** are detected seeds inside the implant no tile explains (place one by hand). Suggestions are ordinary tiles afterwards, and they **own** the detected seeds they were built from: those seeds move with the tile (they are not drawn separately) and are counted once in dose and export; deleting the tile releases them |
+| | `O` | **optimize placement** (opt-in `gtcore.plan`, see `docs/plan-tile-optimize.md`): first recommends a tile count from the wall area by the manufacturer's rule, treatable surface area / 4 cm² per tile rounded up (GammaTile Cavity Surface Area Calculator; on a measured post-resection mesh contraction defaults to 0 %), then prompts for N in the status line: digits / BackSpace edit, `H` edits the half-tile count, `M` flips the mode, `S` cycles the solver, Enter runs, Esc cancels. Mode **replace** (default): this session's hand-placed tiles are replaced (one undo step) while tiles fitted from the scan stay as fixed obstacles; **add** keeps everything on the board fixed. The result lands as ordinary tiles, **violet until touched** (drag, nudge or rotate); the status line reports the solver, wall time and V100/D90 on the +5 mm shell before/after. `Shift+O` (or `gt plan --optimizer greedy\|sa\|continuous`) cycles the solver; fixed tiles always use greedy |
+| | `N` | **suggest next tile**: one greedy step of the same optimizer given the current board, for the current full/half kind; drops the tile (violet) and reports the coverage gain |
 | Adjust | left-drag on a tile | grab it by its quad or seed capsules (no modifier) and slide it along the wall; hovered tile lights up. On a scan with no cavity or shell mesh (e.g. a degraded export) tiles move rigidly in free space instead |
 | | Ctrl + left-drag on the wall | slide the *selected* tile from anywhere (forgiving mode); a press that grabs nothing says so in the status bar |
 | | gold outline | tile fitted **from the scan** (the implant); green = placed by hand. Backspace clears only hand-placed tiles |

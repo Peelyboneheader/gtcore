@@ -35,8 +35,10 @@ STUBS = [
     "build_candidates", "visible_faces", "build_influence", "build_conflicts",
     "make_objective", "evaluate", "solve_greedy", "solve_local", "solve_sa",
     "solve_milp", "refine_continuous", "sweep_n", "final_report",
-    "recommend_tile_count", "optimize", "suggest_next",
+    "recommend_tile_count",
 ]
+# implemented on branch plan/ui (gtcore.plan.api); no longer stubs
+ENTRY_POINTS = ["optimize", "suggest_next"]
 
 
 # ------------------------------------------------------------------ package
@@ -45,8 +47,17 @@ def test_package_imports_and_all():
         assert hasattr(plan, name), name
     for name in CONSTANTS:
         assert name in plan.__all__
-    for name in STUBS:
+    for name in STUBS + ENTRY_POINTS:
         assert name in plan.__all__
+
+
+def test_entry_points_delegate_to_api():
+    """``optimize`` / ``suggest_next`` validate their inputs in
+    ``gtcore.plan.api`` before touching any still-stubbed function."""
+    with pytest.raises(ValueError, match="at least one tile"):
+        plan.optimize(None, 0)
+    with pytest.raises(ValueError, match="kind"):
+        plan.suggest_next(None, [], kind="third")
     assert "Given" in plan.__doc__ and "P1 (fixed N)" in plan.__doc__
 
 
