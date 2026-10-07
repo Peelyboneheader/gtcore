@@ -440,8 +440,9 @@ def test_sweep_other_solvers_and_errors(toy30):
         assert inst["conflicts"].is_feasible(r.selection)
     with pytest.raises(ValueError, match="solver"):
         sweep_n(inst["mesh"], inst["target"], 2, solver="milp", **common)
-    with pytest.raises(NotImplementedError):
-        sweep_n(inst["mesh"], inst["target"], 2)     # builders are other branches'
+    # without prebuilt objects the builders run; a missing mesh fails loudly
+    with pytest.raises((ValueError, TypeError)):
+        sweep_n(None, inst["target"], 2)
 
 
 # ------------------------------------------------------ continuous refinement
