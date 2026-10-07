@@ -171,14 +171,40 @@ def tiles_dose(tiles: Sequence[PlacedTile], points, sk_per_seed_u: Optional[floa
                                      exact=False), dtype=float).reshape(-1)
 
 
+def default_target(mesh, eligible_faces=None,
+                   offset_mm: float = TARGET_SHELL_OFFSET_MM) -> TargetSet:
+    """The +``offset_mm`` shell of ``mesh`` restricted to the eligible wall.
+
+    ``TargetSet.from_shell`` covers the whole mesh; on the printed-phantom
+    fallback (a closed shell whose inner wall is the only eligible part)
+    that would make V100 a fraction of a target that is mostly the outer
+    surface no tile can ever cover.  Shell vertices belonging to no eligible
+    face therefore get weight 0 (the point set is unchanged, so indices and
+    ``total_weight`` semantics stay those of the eligible wall).  With
+    ``eligible_faces`` None this is exactly ``from_shell``.
+    """
+    target = TargetSet.from_shell(mesh, float(offset_mm))
+    if eligible_faces is None:
+        return target
+    mask = np.asarray(eligible_faces, dtype=bool).reshape(-1)
+    faces = np.asarray(mesh.faces, dtype=int)
+    if mask.shape[0] != faces.shape[0]:
+        raise ValueError("eligible_faces must have one entry per mesh face")
+    keep = np.zeros(len(target), dtype=bool)
+    keep[np.unique(faces[mask])] = True
+    w = np.where(keep, target.weights, 0.0)
+    return TargetSet(points=target.points, weights=w,
+                     name=target.name + " (eligible wall)")
+
+
 def evaluate_tiles(mesh, tiles: Sequence[PlacedTile], rx_cgy: float = DEFAULT_RX_CGY,
                    target: Optional[TargetSet] = None, m_max: int = M_OPT_MAX,
-                   rng_seed: int = 0) -> Dict[str, float]:
+                   rng_seed: int = 0, eligible_faces=None) -> Dict[str, float]:
     """Influence-style metrics of any tile list on ``target`` (default the
-    +5 mm shell, subsampled to ``m_max`` points): the planner's before /
-    after readout, independent of the solver modules."""
+    +5 mm shell of the eligible wall, subsampled to ``m_max`` points): the
+    planner's before / after readout, independent of the solver modules."""
     if target is None:
-        target = TargetSet.from_shell(mesh, TARGET_SHELL_OFFSET_MM)
+        target = default_target(mesh, eligible_faces)
     sub, _idx = target.subsample(int(m_max), rng_seed=int(rng_seed))
     d = tiles_dose(tiles, sub.points)
     out = target_metrics(d, sub.weights, rx_cgy)
@@ -333,10 +359,31 @@ def cached_influence(candidates: CandidateSet, target: TargetSet,
     return infl
 
 
+_conflict_cache: "OrderedDict[tuple, tuple]" = OrderedDict()    # key -> (candidates, ConflictGraph)
+
+
+def cached_conflicts(candidates: CandidateSet, gap_mm: float = CONFLICT_GAP_MM
+                     ) -> ConflictGraph:
+    """``build_conflicts`` behind an LRU keyed on the candidate object and
+    ``gap_mm`` (the graph is a pure function of the two; it costs ~10 s on a
+    400-candidate wall, most of a warm planner run)."""
+    key = (id(candidates), len(candidates), float(gap_mm))
+    hit = _conflict_cache.get(key)
+    if hit is not None and hit[0] is candidates:
+        _conflict_cache.move_to_end(key)
+        return hit[1]
+    conf = _plan.build_conflicts(candidates, gap_mm=float(gap_mm))
+    _conflict_cache[key] = (candidates, conf)
+    while len(_conflict_cache) > CANDIDATE_CACHE_SIZE:
+        _conflict_cache.popitem(last=False)
+    return conf
+
+
 def clear_cache() -> None:
-    """Drop every cached candidate set and influence matrix."""
+    """Drop every cached candidate set, influence matrix and conflict graph."""
     _candidate_cache.clear()
     _influence_cache.clear()
+    _conflict_cache.clear()
 
 
 # -------------------------------------------------------------- fixed tiles
@@ -507,6 +554,11 @@ def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
                          % (solver, len(fixed)))
     continuous = solver == "continuous"
     solve_continuous = getattr(_plan, "solve_continuous", None)
+    if solve_continuous is None:  # A3 ships it in plan.solvers without a package re-export
+        try:
+            from .solvers import solve_continuous
+        except ImportError:
+            solve_continuous = None
     if continuous and solve_continuous is None:
         raise NotImplementedError("solve_continuous: implemented on branch plan/solvers "
                                   "(not merged into this checkout yet)")
@@ -517,7 +569,7 @@ def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
 
     t0 = time.perf_counter()
     if target is None:
-        target = TargetSet.from_shell(mesh, TARGET_SHELL_OFFSET_MM)
+        target = default_target(mesh, eligible_faces)
     runtime["target"] = time.perf_counter() - t0
     kinds = ("full",) + (("half",) if n_half > 0 else ())
     say("target %s: %d points, %.0f mm^2" % (target.name, len(target), target.total_weight))
@@ -539,7 +591,7 @@ def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
                                                infl.kernel, runtime["influence"]))
 
     t0 = time.perf_counter()
-    conf = _plan.build_conflicts(cand)
+    conf = cached_conflicts(cand)
     runtime["conflicts"] = time.perf_counter() - t0
     say("conflicts: %d pairs, %d cliques in %.1f s"
         % (conf.count_pairs(), len(conf.cliques), runtime["conflicts"]))
@@ -574,7 +626,7 @@ def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
         cont_tiles, res = solve_continuous(
             mesh, cand_s, target, rx, n_total, seed=seed,
             time_budget_s=float(time_budget_s), start=res.selection,
-            kinds_required=kinds_required)
+            kinds_required=kinds_required, objective=objective, conflicts=conf_s)
         cont_tiles = list(cont_tiles)
     runtime["solver"] = time.perf_counter() - t0
     say("solver %s: objective %.4f, status %s in %.1f s"
@@ -703,13 +755,16 @@ def suggest_next(mesh, placed_tiles: Sequence[PlacedTile], rx_cgy: float = DEFAU
     placed = list(placed_tiles or ())
     rx = float(rx_cgy)
     if target is None:
-        target = TargetSet.from_shell(mesh, TARGET_SHELL_OFFSET_MM)
+        target = default_target(mesh, eligible_faces)
     cand = candidates if candidates is not None else cached_candidates(
         mesh, h_mm=h_mm, n_spins=n_spins, kinds=(kind,), eligible_faces=eligible_faces)
+    t_cand = time.perf_counter() - t0
     if len(cand) == 0:
         raise ValueError("suggest_next: no candidate placement survived on this wall "
                          "(rejected: %r)" % (dict(cand.n_rejected),))
+    t1 = time.perf_counter()
     infl = cached_influence(cand, target, rx_cgy=rx)
+    t_infl = time.perf_counter() - t1
     pts, w = infl.target.points, infl.target.weights
     base = tiles_dose(placed, pts, _sk_of(infl))
     mask = (cand.kinds == kind) & cand.eligible & compatible_with_placed(cand, placed)
@@ -731,6 +786,8 @@ def suggest_next(mesh, placed_tiles: Sequence[PlacedTile], rx_cgy: float = DEFAU
         "candidate_id": best, "n_candidates": int(len(cand)), "n_compatible": n_compat,
         "n_placed": len(placed), "seconds": time.perf_counter() - t0, "kind": kind,
         "target": infl.target.name, "n_target_points": int(infl.n_targets),
+        "candidates_s": t_cand, "influence_s": t_infl,   # 0 on a cache hit
+        "h_mm": float(cand.h_mm), "n_spins": int(cand.n_spins),
     }
     return tile, info
 
@@ -749,8 +806,8 @@ def recommended_count(mesh, eligible_faces=None, **kw
 
 __all__ = [
     "SOLVERS", "PLANNER_OVERLAP_THRESHOLD_MM", "CANDIDATE_CACHE_SIZE",
-    "weighted_quantile", "target_metrics", "tiles_dose", "evaluate_tiles",
+    "weighted_quantile", "target_metrics", "tiles_dose", "default_target", "evaluate_tiles",
     "compatible_with_placed", "candidate_key", "cached_candidates",
-    "cached_influence", "clear_cache", "optimize", "suggest_next",
+    "cached_influence", "cached_conflicts", "clear_cache", "optimize", "suggest_next",
     "recommended_count",
 ]

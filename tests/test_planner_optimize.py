@@ -215,6 +215,9 @@ def test_enter_runs_the_optimizer_and_tiles_land_as_ordinary_tiles(app, fakes):
     assert kw["solver"] == "greedy" and kw["rx_cgy"] == app.rx_cgy
     assert kw["fixed_tiles"] == [] and kw["eligible_faces"] is None
     assert kw["report"] is False
+    from gtcore.planner import PLANNER_H_MM, PLANNER_N_SPINS
+    assert kw["h_mm"] == PLANNER_H_MM == 4.0 and kw["n_spins"] == PLANNER_N_SPINS == 3
+    assert "candidates at h 4 mm / 3 spins built in" in app._last_status
     assert len(app.tiles) == 3 and all(t.kind == "full" for t in app.tiles)
     assert set(app._tile_ids) == app._optimized_ids
     assert len(app._history) == n_hist + 1, "one undo step for the whole run"
@@ -310,6 +313,7 @@ def test_n_key_adds_exactly_one_tile(app, fakes):
     assert len(calls) == 1 and calls[0][1] == 0 and calls[0][2]["kind"] == "full"
     s = app._last_status
     assert "next tile suggested" in s and "gain +0.120" in s
+    assert calls[0][2]["h_mm"] == 4.0 and calls[0][2]["n_spins"] == 3
     assert "V100 0.50 -> 0.62" in s
     assert app._tile_ids[0] in app._optimized_ids
     assert len(app._history) == 1
@@ -506,6 +510,38 @@ def test_cli_optimize_runs_on_the_phantom(result, monkeypatch, tmp_path, capsys)
     assert call[1] == 1 and call[3]["eligible_faces"] is not None
 
 
+def test_cli_min_n_sweeps_without_forwarding_the_budget(result, monkeypatch, tmp_path, capsys):
+    """``--min-n`` hands the eligible-wall target to ``sweep_n`` and never
+    the continuous-solver budget (the discrete solvers reject it)."""
+    import gtcore.pipeline as pipeline_mod
+    from gtcore.cli import main
+    from gtcore.plan import SweepResult
+
+    calls = []
+    _install_fakes(monkeypatch, calls, n_recommended=3)
+    monkeypatch.setattr(pipeline_mod, "reconstruct", lambda vol, **kw: result)
+    seen = {}
+
+    def sweep_n(mesh, target, n_max, rx_cgy=6000.0, solver="greedy", seed=0, **kw):
+        seen.update(n_max=n_max, kw=dict(kw), target=target.name)
+        rows = [{"N": n, "V100": 0.3 * n, "D90": 2000.0 * n, "V150": 0.0, "V200": 0.0,
+                 "runtime_s": 0.1, "solver": solver} for n in range(1, n_max + 1)]
+        return SweepResult(rows=rows, min_n={"D90>=rx": 3, "V100>=0.90": None})
+
+    monkeypatch.setattr(plan, "sweep_n", sweep_n)
+    out = tmp_path / "minn"
+    rc = main(["optimize", "--spacing", "1.0", "--out", str(out), "--tiles", "4",
+               "--min-n", "--no-report", "--budget", "7"])
+    assert rc == 0
+    assert seen["n_max"] == 4 and "time_budget_s" not in seen["kw"]
+    assert seen["kw"]["h_mm"] == 2.5 and seen["target"].startswith("shell")
+    call = [c for c in calls if c[0] == "optimize"][-1]
+    assert call[1] == 3, "the smallest N with D90 >= rx is placed"
+    text = capsys.readouterr().out
+    assert "coverage vs N" in text and "D90>=rx -> 3" in text
+    assert (out / "sweep.json").exists() and (out / "report.json").exists()
+
+
 def test_cli_optimize_reports_stubs_and_failures(result, monkeypatch, tmp_path, capsys):
     import gtcore.pipeline as pipeline_mod
     from gtcore.cli import main
@@ -523,3 +559,66 @@ def test_cli_optimize_reports_stubs_and_failures(result, monkeypatch, tmp_path, 
     rc = main(["optimize", "--spacing", "1.0", "--out", str(tmp_path / "b"), "--tiles", "2"])
     assert rc == 1 and "optimize failed" in capsys.readouterr().out
     assert not os.path.exists(str(tmp_path / "b" / "report.json"))
+
+
+# ------------------------------------------------- end-to-end (opt-in, slow)
+@pytest.mark.skipif(os.environ.get("GT_E2E") != "1",
+                    reason="real optimizer end-to-end run (~1-2 min); set GT_E2E=1")
+def test_e2e_o_key_runs_the_real_optimizer(result):
+    """The REAL gtcore.plan stack (no monkeypatches) behind the O key on the
+    synthetic phantom at the planner grid (h 4 mm / 3 spins): prompt ->
+    Enter with the recommended count -> tiles land, no overlap flagged
+    (section 4 V1), before/after in the status line, undo removes them."""
+    import time
+
+    from gtcore.plan import api
+    api.clear_cache()
+    try:
+        app = _PlannerApp(result, off_screen=True)
+        app.pl.render()
+    except Exception as exc:
+        pytest.skip("off-screen rendering unavailable: %r" % (exc,))
+    try:
+        t0 = time.perf_counter()
+        _key(app, "o")
+        assert app._prompt is not None and app._prompt.recommended is not None
+        n = int(app._prompt.recommended)
+        assert "recommended %d" % n in app._last_status
+        _key(app, "Return")
+        dt = time.perf_counter() - t0
+        s = app._last_status
+        assert "optimizer not available" not in s, s
+        if "optimize failed" in s:
+            # the manufacturer rule (area / 4 cm^2) ignores packing loss: on
+            # this cavity more tiles are recommended than fit at h 4 mm / 3
+            # spins.  Section 4 V8: fail loudly, never fewer tiles as success.
+            assert "infeasible" in s and len(app.tiles) == 0 and not app._history, s
+            print("E2E: recommended %d infeasible at h 4 / 3 spins (%.1f s): %s"
+                  % (n, dt, s.splitlines()[-1]))
+            n = 6
+            t0 = time.perf_counter()
+            _key(app, "o")
+            _key(app, "6")
+            _key(app, "Return")
+            dt = time.perf_counter() - t0
+            s = app._last_status
+            assert "optimize failed" not in s, s
+        assert len(app.tiles) == n, s
+        assert set(app._tile_ids) == app._optimized_ids
+        assert "optimized: %d tiles placed by greedy in" % n in s
+        assert "V100" in s and "->" in s and "D90" in s
+        app._refresh_overlaps()
+        assert app._overlap_pairs == [] and "CAUTION" not in s
+        rep = app._last_optimize
+        assert rep is not None and rep.overlaps == []
+        assert rep.candidate_stats["h_mm"] == 4.0 and rep.candidate_stats["n_spins"] == 3
+        print("E2E O key: %d tiles in %.1f s; %s" % (n, dt, s.splitlines()[-2:]))
+        app.undo()
+        assert len(app.tiles) == 0
+        # N on the warm cache is quick and adds exactly one tile
+        t1 = time.perf_counter()
+        _key(app, "n")
+        assert len(app.tiles) == 1 and "next tile suggested" in app._last_status
+        print("E2E N key: %.1f s" % (time.perf_counter() - t1))
+    finally:
+        app.close()

@@ -132,8 +132,11 @@ def cmd_optimize(args):
                   time_budget_s=float(args.budget))
         n_full = n_tiles
         if args.min_n:
-            target = plan.TargetSet.from_shell(mesh, plan.TARGET_SHELL_OFFSET_MM)
-            sweep = plan.sweep_n(mesh, target, n_tiles, **kw)
+            from .plan.api import default_target
+            target = default_target(mesh, eligible)   # +5 mm shell of the eligible wall
+            # sweep_n forwards **kw to the discrete solvers, which take no budget
+            kw_sweep = {k: v for k, v in kw.items() if k != "time_budget_s"}
+            sweep = plan.sweep_n(mesh, target, n_tiles, **kw_sweep)
             print("coverage vs N (%s):" % args.solver)
             for row in sweep.rows:
                 print("  N %2d  V100 %.3f  D90 %.0f cGy  V150 %.3f  V200 %.3f  %.1f s"
