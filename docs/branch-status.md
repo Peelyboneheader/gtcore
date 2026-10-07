@@ -1,25 +1,36 @@
-# Branch status (snapshot 2026-09-01, evening)
+# Branch status (snapshot 2026-10-07, optimizer overnight run)
 
 Remote: https://github.com/Peelyboneheader/gtcore.git
-Main branch lives in `C:\Users\jacob\OneDrive\Desktop\AlgorithmProject` (Desktop is OneDrive-synced on this machine, so "Desktop" and "OneDrive\Desktop" are the same folder).
+Main branch lives in `C:\Users\jacob\OneDrive\Desktop\AlgorithmProject` (Desktop is OneDrive-synced on this machine).
 Each feature branch is checked out in its own worktree under `C:\Users\jacob\OneDrive\Desktop\gt-worktrees\<name>`.
-The worktrees were moved here from `C:\Users\jacob\gt-worktrees` and re-linked with `git worktree repair`.
 
-| Branch | Worktree | vs main | State |
+## Optimizer build (`gtcore.plan`, docs/plan-tile-optimize.md)
+
+Baseline before the build: da71f76 (tile-selection work committed, 436 tests).
+Interface freeze: cd73082. All branches below are fully merged into main;
+the suite on main is 671 passed / 14 skipped (14 = interface stub checks for
+wired functions + one `GT_E2E=1`-gated planner test).
+
+| Branch | Worktree | Owner | State |
 |---|---|---|---|
-| main | AlgorithmProject | - | Integration branch. 419 tests passed at 32b20c2; dose-engine merged on top (eabe76d). Has uncommitted edits to tiles/auto.py, tiles/fit.py, planner.py, pipeline.py, cli.py, tests/test_tiles_suggest.py (tile-selection work in progress) |
-| feature/tile-selection | gt-worktrees/tile-selection | 0 ahead, 0 behind | New, at main. No commits of its own yet |
-| feature/dose-engine | gt-worktrees/dose-engine | 0 ahead, 2 behind | Merged into main at eabe76d (TG-43U1S2 default dataset, U1S1 interpolation, source verification). 424 tests passed on the branch |
-| feature/tile-inference | gt-worktrees/tile-inference | 0 ahead, 2 behind | Fully merged. Tile-config inference + shadowing check |
-| feature/tile-autogen | gt-worktrees/tile-autogen | 0 ahead, 7 behind | Fully merged. Steps 0-5: rigid tile model, Kabsch fit, count-free search, fold deformation, stick-to-surface fit, pipeline/CLI/planner integration |
-| feature/ui-interaction | gt-worktrees/ui-interaction | 0 ahead, 14 behind | Fully merged. Planner UI v3 |
-| feature/reconstruction | gt-worktrees/reconstruction | 0 ahead, 25 behind | Fully merged, stale. Original suite commit (169 tests) |
-| feature/validation | gt-worktrees/validation | 0 ahead, 25 behind | Fully merged, stale. Same commit as reconstruction; never diverged |
+| plan/candidates | gt-worktrees/plan-candidates | A1 | merged (candidates, visible_faces angular broad phase, robust conflicts, tile-count rule) |
+| plan/influence | gt-worktrees/plan-influence | A2 | merged (influence matrix, objective, §3 B gate) |
+| plan/solvers | gt-worktrees/plan-solvers | A3 | merged (greedy, local, SA, E5, continuous multi-start, N-sweep) |
+| plan/milp | gt-worktrees/plan-milp | A4 | merged (enumeration B&B reference, HiGHS MILP, LP bound, brute force) |
+| plan/validation | gt-worktrees/plan-validation | A5 | merged (final_report, campaign script, quick-run results); full campaign results merged when its commit lands |
+| plan/ui | gt-worktrees/plan-ui | A6 | merged (api, `gt optimize`, planner O/N keys with capacity-aware prompt) |
+| plan/review | gt-worktrees/plan-review | A7 | merged (independent reference metrics + adversarial tests, 16/16 pass) |
+| plan/scout-objective | gt-worktrees/plan-scout-objective | scout 7.1 | NOT merged by design; report + script copied into main (docs/scout-objective.md) |
+| plan/scout-milp-bound | gt-worktrees/plan-scout-milp-bound | scout 7.3 | NOT merged by design; report + script copied (docs/scout-milp-bound.md) |
+| plan/scout-continuous | gt-worktrees/plan-scout-continuous | scout 7.4 | NOT merged by design; report + script copied (docs/scout-continuous.md) |
 
-Every feature branch is fully contained in main. The only live work is the uncommitted tile-selection edits in the main worktree.
+Older feature branches (dose-engine, reconstruction, tile-autogen, tile-inference,
+tile-selection, ui-interaction, validation) are all contained in main and can be
+deleted with their worktrees (`git worktree remove <path>`, `git branch -d <name>`).
+The plan/* worktrees can be removed the same way once the campaign commit is merged.
 
 ## To resume
 
-- Tile selection: the edits sit uncommitted in the main worktree. Either commit them on `feature/tile-selection` (from that worktree) or on main directly.
-- All six older feature branches can be deleted along with their worktrees (`git worktree remove <path>` then `git branch -d <name>`), or kept as bookmarks.
-- Test command: `C:\Users\jacob\.venvs\gammatile\Scripts\python.exe -m pytest -q` (about 3.5 min).
+- Test command: `C:\Users\jacob\.venvs\gammatile\Scripts\python.exe -m pytest -q -p no:cacheprovider` (about 7 min; run it alone — the off-screen VTK planner tests hang when several suites share the GPU).
+- Open decision for Jacob: `interact._footprint_surface` rcond (docs/optimize-notes.md, "Open decisions"); the optimizer works around it with the geometric proxy.
+- Validation campaign: `python scripts/validation_optimize.py` (3-3.5 h, needs ~11 GB free); `--quick` for a smoke run.
