@@ -44,6 +44,7 @@ implementation tunables, not optimizer parameters):
 | `candidates.RAY_CHUNK` | 1000 | Grid points per batched fallback cast: bounds the transient (point, triangle) pair arrays (~2000 pairs per point on a 1 mm marching-cubes mesh). |
 | `candidates.FALLBACK_LATERAL_TOL_MM` | 0.5 | Diagnostic only (`grid_fallback_flags`); not used for rejection (decision 10). |
 | `candidates.VISIBLE_TOL_MM` | 0.5 | `visible_faces`: a first hit within this distance of the face centroid counts as the face (grazing an edge). |
+| `candidates.VISIBLE_RAY_CHUNK` | 400 | `visible_faces` rays per batch: bounds the (ray, wide-triangle) pair arrays of the angular broad phase and the per-ray candidate arrays of the trimesh reference cast. |
 | `candidates.ELLIPSOID_P` | 1.6075 | Knud Thomsen ellipsoid-area exponent (relative error < 1.1 %). |
 | `candidates.MIN_FACES` | 4 | Fewer faces than a tetrahedron is a degenerate mesh (V8). |
 | `conflicts.PLANNER_THRESHOLD_MM` | 1.0 | `find_overlapping_tiles`' default threshold; `gap_mm` adds to it (decision 11). |
@@ -880,6 +881,28 @@ Reading:
   the reduced anchor neighbourhoods, deduplicated), the largest covering
   237 candidates (all spins of the ≈ 40 anchors nearest one anchor).
 
+`visible_faces` on large shells (A6's report: the unchunked trimesh cast on
+the printed phantom's 72 396-face `meshes["body"]` allocated a
+(210 778 340, 3) float64 array, 4.7 GiB, and died with ArrayMemoryError
+under concurrent load; A5 measured ≈ 6 min for that cast once). Stand-in
+measured here (same hardware, scratch script, commit of decision 19):
+hollow icosphere shell with 81 920 inner + 5120 outer faces (87 040),
+origin at the centre:
+
+| method | time | peak traced memory | result |
+|---|---|---|---|
+| trimesh cast, 2000 rays per call | 577 s | 6.1 GB | inner 81 920/81 920, outer 0/5120 |
+| trimesh cast, 400 rays per call (`visible_faces_trimesh`) | 596 s | 1.7 GB | identical |
+| angular broad phase (`visible_faces`, default) | 10.8 s | 49 MB | identical |
+
+Chunking the trimesh cast bounds memory only linearly (every ray from the
+centre crosses the whole shell, so its box broad phase keeps thousands of
+candidate triangles per ray); the angular broad phase is the fix (decision
+19). Smaller meshes, angular vs trimesh: 20 480-face icosphere 0.22 s vs
+8.1 s; 12 300-face seed-1 cavity 0.17 s vs 2.7 s; 2560-face hollow sphere
+0.04 s vs 0.2 s; the 2160-face flat-wall box 0.83 s vs 0.3 s (its huge side
+triangles take the brute path).
+
 Unit-test-scale timings (same hardware, `pytest --durations`): sphere r =
 25 mm (5120 faces), h = 6, 2 spins: 260 candidates in 3.9 s (1.5 s/100);
 flat 60 mm wall, h = 5, 3 spins: 261 enumerated / 154 accepted in 0.9 s;
@@ -1449,6 +1472,27 @@ A1 (`plan/candidates`, 2026-10-07).
     axis least aligned with the inward normal projected to the tangent
     plane, rotated by the spin (Rodrigues) — `tile.axis_ras` at spin θ is
     exactly the spin-0 axis rotated by θ (tested).
+19. **`visible_faces` uses an angular broad phase, not trimesh's ray cast.**
+    All rays share one origin, so a triangle can only be hit by a ray whose
+    unit direction lies inside the triangle's cone as seen from the centre
+    (cap of angular radius θ_t = max angle between centroid and vertex
+    directions; a cap of radius < π/2 is convex, so it contains the
+    spherical triangle). One cKDTree ball query on the unit centroid
+    directions (radius 2 sin(θ_cut/2), θ_cut = 3 × median θ_t) yields ~10
+    candidates per ray; triangles with wider cones (or θ ≥ π/2) are paired
+    with every ray in bounded chunks. The narrow phase is trimesh's own
+    (`planes_lines`, barycentric containment at `tol.zero`, forward test),
+    so the hits are exactly the planner's; the first hit per ray is chosen
+    the same way, and ties at identical distance (edge grazing) give the
+    same visibility because the hit point is then within `VISIBLE_TOL_MM`
+    of the centroid either way. Tested bit-identical to the chunked
+    trimesh cast (`visible_faces_trimesh`, kept as the reference) on the
+    hollow sphere (centred and off-centre), a 20 480-face icosphere, the
+    flat-wall box and the seed-1 cavity. Alternative: chunk the trimesh
+    cast only (400 rays per call) — identical result but still 596 s and
+    1.7 GB peak on an 87k-face shell (V7 table). Chosen: angular broad
+    phase, 10.8 s and 49 MB on the same shell. `ray_pyembree` is not
+    available, so everything stays pure numpy/scipy/trimesh.
 
 ---
 
