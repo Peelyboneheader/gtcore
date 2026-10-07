@@ -117,6 +117,27 @@ Planner controls (the same legend is on screen; `?` collapses it):
    truth) and the interactive planner on top; `gtcore.dose.dvh` scores
    cavity-wall shells (offset outward into tissue) for the planner's dose
    panel.
+8. **`gtcore.plan` (opt-in placement optimizer)** — a separate module layered
+   on 1-7 that changes none of their defaults: given a wall mesh, a target
+   (default: the +5 mm shell, area-weighted) and a tile count, it proposes a
+   non-overlapping, wall-conformed configuration maximizing V100 with hot-spot
+   and OAR penalties. Candidates = farthest-point anchors × spins draped with
+   `interact.conform_tile`; a float32 influence matrix from the TG-43 engine
+   (gated against the exact 1 mm grid); a conflict graph that is the
+   planner's overlap rule **union** a geometric proxy (the planner's
+   footprint fit misses a few per cent of certain overlaps on strongly curved
+   walls; `docs/optimize-notes.md`, "Open decisions"); solvers = feasibility-
+   aware greedy (also "suggest next tile"), local search, simulated annealing,
+   a direct continuous multi-start Nelder–Mead over each tile's (u, v, θ)
+   through the conformer, and an exact reference (enumeration branch-and-bound
+   on reduced instances; HiGHS MILP kept as an incumbent finder). Minimum-N
+   by an N-sweep; every reported metric comes from `compute_dose_grid`, never
+   from the influence matrix. The tile-count recommendation is the
+   manufacturer's rule (treatable wall area / 4 cm², rounded up) next to the
+   number that actually packs at the chosen grid. Directions:
+   `docs/plan-tile-optimize.md`; measurements, scout reports and the
+   independent review: `docs/optimize-notes.md`; campaign script:
+   `scripts/validation_optimize.py`.
 
 `gtcore.pipeline.reconstruct(vol, n_full_tiles=..., n_half_tiles=...)` runs
 1→5 in one call; `gtcore.phantom` provides the synthetic ground-truth head
