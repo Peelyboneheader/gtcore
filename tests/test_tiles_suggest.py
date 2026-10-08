@@ -181,9 +181,12 @@ def test_suggested_tile_owns_its_detected_seeds(result):
         app._translate_selected(3.0, 0.0)
         assert not np.allclose(app.tiles[0].seed_centers, before)
         assert sum(1 for n in names() if n.startswith("det_seed_")) == n_det - 8
-        # delete releases the seeds; undo hides them again
+        # delete takes the seeds off the board with the tile (they do not
+        # reappear at the scan position); undo brings both back
         app._delete_selected()
-        assert sum(1 for n in names() if n.startswith("det_seed_")) == n_det - 4
+        assert sum(1 for n in names() if n.startswith("det_seed_")) == n_det - 8
+        free_c, _ = app._free_detected()
+        assert len(free_c) == n_det - 8
         app.undo()
         assert sum(1 for n in names() if n.startswith("det_seed_")) == n_det - 8
     finally:
