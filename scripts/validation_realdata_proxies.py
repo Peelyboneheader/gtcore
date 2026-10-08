@@ -483,7 +483,7 @@ def printed_report(ctx, slim, vol):
     pk = peaks_near(vol, centers, r_mm=1.0)
     rep.update(peak_median=float(np.median(pk)), peak_min=float(pk.min()),
                peak_sat=int((pk >= 3070.5).sum()))
-    tiles = tile_report(slim)
+    tiles = tile_report(slim, centers=centers)
     rep["tiles"] = tiles
     rms = [t["rms_mm"] for t in tiles if "rms_mm" in t]
     rep["rms_mean"] = float(np.mean(rms)) if rms else np.nan
