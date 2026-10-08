@@ -11,6 +11,8 @@ import plan_fixtures as pf
 from gtcore.plan import (
     LAMBDA_HOT,
     LAMBDA_OAR,
+    LAMBDA_TAIL,
+    TAIL_Q,
     TAU_FRACTION,
     V200_TOL,
     ConflictGraph,
@@ -165,19 +167,22 @@ def test_hard_and_soft_monotone_in_dose():
     prev_h, prev_s = -1.0, -1.0
     for s in np.linspace(0.2, 3.0, 29):
         inf = InfluenceMatrix(dose=s * base, target=target, target_index=np.arange(500), rx_cgy=RX)
-        obj = make_objective(inf, cg, lambda_hot=0.0)
+        obj = make_objective(inf, cg, lambda_hot=0.0, lambda_tail=0.0)   # pure coverage
         h, so = obj.hard([0]), obj.soft([0])
         assert h >= prev_h - 1e-15 and so >= prev_s - 1e-15
         assert 0.0 <= h <= 1.0 and 0.0 <= so <= 1.0
         prev_h, prev_s = h, so
+        # with the tail term the bound is 1 + lambda_tail and monotonicity holds too
+        full = make_objective(inf, cg, lambda_hot=0.0)
+        assert h <= full.hard([0]) <= 1.0 + LAMBDA_TAIL
     assert prev_h == 1.0 and prev_s > 0.99
     # the soft coverage is a smooth version of the hard one around rx
     inf = InfluenceMatrix(dose=base, target=target, target_index=np.arange(500), rx_cgy=RX)
-    obj = make_objective(inf, cg, lambda_hot=0.0)
+    obj = make_objective(inf, cg, lambda_hot=0.0, lambda_tail=0.0)
     assert abs(obj.soft([0]) - obj.hard([0])) < 0.05
     assert obj.tau_cgy == pytest.approx(TAU_FRACTION * RX)
     # a narrower tau brings soft closer to hard
-    obj2 = make_objective(inf, cg, lambda_hot=0.0, tau_cgy=1.0)
+    obj2 = make_objective(inf, cg, lambda_hot=0.0, tau_cgy=1.0, lambda_tail=0.0)
     assert abs(obj2.soft([0]) - obj2.hard([0])) < 1e-3
 
 
@@ -189,7 +194,7 @@ def test_hot_penalty_kicks_in_exactly_at_tolerance():
         dose = np.full((1, m), 1.2 * RX, dtype=np.float32)
         dose[0, :k] = 2.0 * RX
         inf = InfluenceMatrix(dose=dose, target=target, target_index=np.arange(m), rx_cgy=RX)
-        obj = make_objective(inf, cg)
+        obj = make_objective(inf, cg, lambda_tail=0.0)      # isolate the hot penalty
         v200 = k / m
         expected = 1.0 - LAMBDA_HOT * max(0.0, v200 - V200_TOL)
         assert obj.hard([0]) == pytest.approx(expected, abs=1e-12)
@@ -201,7 +206,7 @@ def test_hot_penalty_kicks_in_exactly_at_tolerance():
         expected_soft = ob.soft_coverage(obj, inf.dose_of([0])) - LAMBDA_HOT * max(0.0, v200 - V200_TOL)
         assert obj.soft([0]) == pytest.approx(expected_soft, abs=1e-12)
         # custom weights
-        obj3 = make_objective(inf, cg, lambda_hot=2.0, v200_tol=0.0)
+        obj3 = make_objective(inf, cg, lambda_hot=2.0, v200_tol=0.0, lambda_tail=0.0)
         assert obj3.hard([0]) == pytest.approx(1.0 - 2.0 * v200, abs=1e-12)
 
 
@@ -216,7 +221,7 @@ def test_oar_penalty_kicks_in_exactly_at_limit():
                "free": np.array([[5000.0], [5000.0]], dtype=np.float32)}    # no limit
         inf = InfluenceMatrix(dose=dose, target=target, target_index=np.arange(m),
                               rx_cgy=RX, oar=oar, oar_limits={"stem": limit})
-        obj = make_objective(inf, cg)
+        obj = make_objective(inf, cg, lambda_tail=0.0)      # isolate the OAR penalty
         expected = 1.0 - LAMBDA_OAR * max(0.0, dmax - limit)
         assert obj.hard([0, 1]) == pytest.approx(expected, rel=1e-12, abs=1e-9)
         assert obj.metrics([0, 1])["oar_dmax_stem"] == pytest.approx(dmax)
@@ -266,7 +271,7 @@ def test_gains_all_equals_gain_loop_and_hard_difference(oars):
 
 def test_gain_is_additive_coverage_on_toy_instance():
     inst = pf.toy_instance(n_candidates=9, n_targets=200)
-    obj = make_objective(inst["influence"], inst["conflicts"], lambda_hot=0.0)
+    obj = make_objective(inst["influence"], inst["conflicts"], lambda_hot=0.0, lambda_tail=0.0)
     # the gain of the first tile equals its own V100
     for c in range(9):
         assert obj.gain([], c) == pytest.approx(obj.metrics([c])["V100"])
@@ -341,3 +346,115 @@ def test_gains_all_timing_c2000_m4000():
     per = (time.perf_counter() - t0) / 5.0
     print("\ngains_all(): %.1f ms at C = 2000, M = 4000" % (1e3 * per))
     assert per <= 1.000  # budget 100 ms; 10x slack for loaded machines (the printed number is what gets reported)
+
+
+# ------------------------------------------------------------ tail term
+def test_tail_rows_matches_brute_force_and_is_bounded():
+    """tail_mean = weighted mean of min(D, rx)/rx over the coldest q of the
+    weight; <= min(D90, rx)/rx; 1 iff V100 = 1; 0 for all-zero dose."""
+    rng = np.random.default_rng(11)
+    for trial in range(20):
+        m = int(rng.integers(5, 80))
+        d = rng.uniform(0.0, 2.5 * RX, m)
+        w = rng.uniform(0.2, 3.0, m)
+        t = ob.tail_mean(d, w, RX, TAIL_Q)
+        # brute force: sort, walk the cumulative weight, last point fractional
+        order = np.argsort(d, kind="stable")
+        k_w = TAIL_Q * w.sum()
+        acc = taken = 0.0
+        for i in order:
+            use = min(w[i], k_w - taken)
+            if use <= 0:
+                break
+            acc += use * min(d[i], RX) / RX
+            taken += use
+        assert t == pytest.approx(acc / k_w, abs=1e-12)
+        d90 = ob.weighted_quantile(d, w, 0.10)
+        assert t <= min(d90, RX) / RX + 1e-12
+        assert 0.0 <= t <= 1.0
+    w = np.ones(30)
+    assert ob.tail_mean(np.full(30, RX), w, RX, TAIL_Q) == pytest.approx(1.0)
+    assert ob.tail_mean(np.zeros(30), w, RX, TAIL_Q) == 0.0
+    d = np.full(30, 2.0 * RX)
+    d[0] = 0.5 * RX                                    # one cold point -> V100 < 1 -> tail < 1
+    assert ob.tail_mean(d, w, RX, TAIL_Q) < 1.0
+    # uniform weights, q * m integer: the mean of the k smallest capped doses
+    d = rng.uniform(0.0, 2.0 * RX, 40)
+    k = int(round(TAIL_Q * 40))
+    ref = np.sort(np.minimum(d, RX) / RX)[:k].mean()
+    assert ob.tail_mean(d, np.ones(40), RX, TAIL_Q) == pytest.approx(ref, abs=1e-12)
+    # row form == scalar form per row; zero-weight entries are ignored
+    block = rng.uniform(0.0, 2.0 * RX, (6, 40))
+    rows = ob.tail_rows(block, np.ones(40), RX, TAIL_Q)
+    assert rows.shape == (6,)
+    for r in range(6):
+        assert rows[r] == pytest.approx(ob.tail_mean(block[r], np.ones(40), RX, TAIL_Q))
+    w0 = np.ones(40)
+    w0[:5] = 0.0
+    assert ob.tail_mean(block[0], w0, RX, TAIL_Q) == pytest.approx(
+        ob.tail_mean(block[0, 5:], w0[5:], RX, TAIL_Q))
+
+
+def test_tail_term_is_continuous_where_v100_steps():
+    """Raising one cold point towards rx moves the tail term smoothly while
+    V100 only changes when the point crosses rx."""
+    m = 50
+    w = np.ones(m)
+    base = np.full(m, 1.5 * RX)
+    prev = None
+    for frac in np.linspace(0.0, 1.0, 21):
+        d = base.copy()
+        d[0] = frac * RX
+        t = ob.tail_mean(d, w, RX, TAIL_Q)
+        if prev is not None:
+            assert t > prev                                # strictly increasing below rx
+            assert t - prev == pytest.approx((RX / 20) / RX / (TAIL_Q * m), abs=1e-12)
+        prev = t
+        v100 = float(w @ (d >= RX)) / m
+        assert v100 == (1.0 if frac >= 1.0 else 1.0 - 1.0 / m)
+
+
+def test_lambda_tail_zero_restores_pure_v100_and_default_adds_it():
+    inf, cg = synthetic(12, 300, rng_seed=7, dose_scale=1.5 * RX, oars={"stem": 5},
+                        oar_limits={"stem": 2000.0})
+    obj = make_objective(inf, cg)
+    assert obj.lambda_tail == LAMBDA_TAIL and obj.tail_q == TAIL_Q
+    obj0 = make_objective(inf, cg, lambda_tail=0.0)
+    for sel in ([], [0], [1, 4, 9], list(range(12))):
+        d = inf.dose_of(sel)
+        m = obj.metrics(sel)
+        pen = LAMBDA_HOT * max(0.0, m["V200"] - V200_TOL) \
+            + LAMBDA_OAR * max(0.0, m["oar_dmax_stem"] - 2000.0)
+        assert obj0.hard(sel) == pytest.approx(m["V100"] - pen, abs=1e-12)
+        tail = ob.tail_mean(d, inf.target.weights, RX, TAIL_Q)
+        assert obj.hard(sel) == pytest.approx(m["V100"] + LAMBDA_TAIL * tail - pen, abs=1e-12)
+        assert obj.soft(sel) - obj0.soft(sel) == pytest.approx(LAMBDA_TAIL * tail, abs=1e-9)
+    # custom weight / q flow through make_objective
+    obj2 = make_objective(inf, cg, lambda_tail=0.3, tail_q=0.25)
+    d = inf.dose_of([2, 3])
+    assert obj2.hard([2, 3]) - obj0.hard([2, 3]) == pytest.approx(
+        0.3 * ob.tail_mean(d, inf.target.weights, RX, 0.25), abs=1e-9)
+    with pytest.raises(ValueError):
+        make_objective(inf, cg, tail_q=0.0)
+
+
+def test_tail_term_prefers_spreading_over_clustering():
+    """Two half-coverage tiles: V100 cannot tell 'same half twice' from 'both
+    halves'; the tail term can."""
+    m = 100
+    target = TargetSet.from_points(np.zeros((m, 3)))
+    dose = np.zeros((3, m), dtype=np.float32)
+    dose[0, :50] = 0.8 * RX          # left half, below rx
+    dose[1, :50] = 0.8 * RX          # left half again (clustered: 1.6 rx on the left)
+    dose[2, 50:] = 0.8 * RX          # right half
+    inf = InfluenceMatrix(dose=dose, target=target, target_index=np.arange(m), rx_cgy=RX)
+    cg = ConflictGraph(n=3, pairs=sp.csr_matrix((3, 3), dtype=bool))
+    pure = make_objective(inf, cg, lambda_tail=0.0, lambda_hot=0.0)
+    assert pure.hard([0, 1]) == pytest.approx(0.5) and pure.hard([0, 2]) == pytest.approx(0.0)
+    mixed = make_objective(inf, cg, lambda_hot=0.0)   # default lambda_tail
+    # clustered: coldest 10 % at 0 -> tail 0; spread: coldest 10 % at 0.8 rx -> tail 0.8
+    assert mixed.hard([0, 1]) == pytest.approx(0.5)
+    assert mixed.hard([0, 2]) == pytest.approx(0.8 * LAMBDA_TAIL)
+    assert mixed.hard([0, 2]) > mixed.hard([0, 1])
+    g = ob.gains_all(mixed, [0])
+    assert g[2] > g[1]
