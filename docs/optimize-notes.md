@@ -2332,3 +2332,97 @@ _v7: 618 s wall; process RSS 1072 MB, peak 1619 MB._
 | empty mesh | final_report | raised ValueError | PASS | final_report: mesh is empty or None |
 
 _v8: 3 s wall; process RSS 1110 MB, peak 1619 MB._
+
+## Objective: lower-tail term (2026-10-08, Jacob's question "V100 vs D90")
+
+**Question.** P1 maximizes V100, the clinic judges by D90, and the go/no-go
+table showed greedy raising V100 while lowering D90 (seed 2, N = 6: greedy
+D90 2106 vs uniform 4427 cGy). Is the solver winning the wrong game, and
+should the objective be D90 (or a lower-tail mean)?
+
+**Finding 1 — the two P2 criteria are one criterion.** D90 is the weighted
+10th percentile, so D90 ≥ rx holds exactly when ≤ 10 % of the target weight
+is below rx, i.e. V100 ≥ 0.90. Checked on the 327 valid V2 rows and the 196
+rows below: 0 disagreements. "Minimum N to D90 ≥ rx" therefore cannot
+prefer one objective over another; only the behaviour *below* N* can differ.
+
+**Finding 2 — §7.1 judged the D90 arm by V100** (circular), and its stall at
+6 of 8 tiles was greedy running out of feasible candidates (the same packing
+artefact the scout blamed on the solver for every other arm). Under SA a
+tail objective packs 8 and reaches V100 1.000 like the rest.
+
+**Term.** `T10` = weighted mean of `min(D, rx)/rx` over the coldest 10 % of
+the target weight (lower-tail / CVaR mean of the capped dose; `T10 ≤
+min(D90, rx)/rx`; `T10 = 1` iff `V100 = 1`; continuous where V100 steps).
+P1 becomes `V100 + λ_tail·T10 − hot − OAR`; soft adds the same term. Pure
+D90 as the objective is an order statistic with the same step problem and
+was not pursued beyond the first run below.
+
+### Run 1 — objectives under SA (`scratchpad objx/tail_vs_v100.py`; cached V2 instances h 4 mm / 6 spins / M_opt 1000, commit 93696e2; SA defaults, seed 1000 + N; influence-subsample metrics)
+
+Arms: `v100` (current), `tail` (T10 alone), `mix` (V100 + T10), `lex`
+(V100 + 0.05·T10). Cavities s1–s3 ×1.00 and s2 ×0.80, N = 4 … 12 (N ≥ 9
+unpackable at this grid except s2/s3 N = 9).
+
+| | min N with D90 ≥ rx (s1 / s2 / s3 ×1.00) |
+|---|---|
+| every arm | 7 / 8 / 8 |
+
+Below N* (N* from the `v100` arm; mean of 3 cavities; V100 / D90 cGy):
+
+| arm | N* − 2 | N* − 1 |
+|---|---|---|
+| v100 | 0.533 / 2479 | 0.776 / 4750 |
+| lex | 0.541 / 2480 | 0.782 / 4919 |
+| mix | 0.373 / 4006 | 0.704 / 5557 |
+| tail | 0.142 / 4577 | 0.660 / 5627 |
+
+V100 alone fully covers half the target two tiles short of N* while the
+coldest tenth sits near 40 % of rx; the tail alone doses everything to
+~75 % rx and covers almost nothing to prescription. That is a cold-spot vs
+uniform-under-dose choice (a planning decision, resolved here in favour of
+D90 as the outcome-linked number), not a solver defect. Above N* every arm
+converges (V100 1.000, D90 6500–6800); the V100 arm then keeps raising
+V150 (0.13–0.24 at N = 9), which the saturating tail term would not restrain
+on its own — hence the sum, not a replacement.
+
+### Run 2 — tail weight (`weight_sweep.csv`; six ×1.00 cavities s1–s6, N = 5 … 8, same setup)
+
+Mean over the 6 cavities (V100 / D90 cGy / SA wall s):
+
+| N | v100 | λ_tail 0.5 | λ_tail 1 | λ_tail 2 |
+|---|---|---|---|---|
+| 5 | 0.412 / 1879 / 6.8 | 0.414 / 1961 / 6.4 | 0.287 / 2981 / 7.4 | 0.110 / 3658 / 7.2 |
+| 6 | 0.605 / 2917 / 7.2 | 0.571 / 3533 / 7.2 | 0.426 / 4516 / 8.1 | 0.342 / 4781 / 8.2 |
+| 7 | 0.859 / 5621 / 6.6 | 0.848 / 5863 / 7.0 | 0.845 / 5873 / 7.2 | 0.809 / 5812 / 6.8 |
+| 8 | 1.000 / 6598 / 5.0 | 0.996 / 6541 / 5.4 | 1.000 / 6588 / 5.1 | 1.000 / 6602 / 5.3 |
+
+Paired against `v100` (mean ΔV100 pp / ΔD90 cGy; cavities with higher D90):
+
+| λ_tail | N = 5 | N = 6 | N = 7 |
+|---|---|---|---|
+| 0.5 | +0.2 / +82 (5/6) | −3.4 / +616 (6/6) | −1.2 / +241 (6/6) |
+| 1 | −12.5 / +1102 (6/6) | −17.9 / +1598 (6/6) | −1.5 / +252 (6/6) |
+| 2 | −30.2 / +1779 (6/6) | −26.2 / +1864 (6/6) | −5.0 / +191 (3/6) |
+
+Minimum N (D90 ≥ rx): identical to `v100` for λ_tail 0.5 and 1 (7 on s1,
+8 elsewhere); λ_tail 2 loses N = 7 on s1 (V100 0.897). 0 rows where the two
+P2 criteria disagree.
+
+**Decision: `LAMBDA_TAIL = 1.0`** (`gtcore.plan.LAMBDA_TAIL`, `TAIL_Q =
+0.10`; `Objective(lambda_tail=0)` / `gt optimize --lambda-tail 0` restore the
+pure V100 form). It leaves N* and the above-N* result unchanged, costs ≈ 1.5
+pp V100 one tile short of N*, and lifts the coldest tenth of the target by
+≈ 1.1–1.6 Gy two tiles short. `solve_milp` drops the term for the call
+(`extra["lambda_tail_dropped"]`) so it stays the V100 reference. Cost: one
+argsort per evaluated dose vector (≈ +0.5 s on a 7 s SA run; `gains_all`
+pays a (chunk × M) argsort per greedy step).
+
+**Not re-run with the new default:** the V2–V8 campaign tables above and the
+README snapshot (all V100-objective numbers, commit 93696e2). The planner
+`O` key and `gt optimize` now use the mixed objective; a reader comparing
+against the campaign should pass `lambda_tail=0`.
+
+Caveats: one SA seed per (cavity, N); influence-subsample metrics (M_opt
+1000), not the grid; the h 4 mm / 6-spin grid packs at most 8–9 tiles so
+N > 9 is untested; synthetic cavities only.

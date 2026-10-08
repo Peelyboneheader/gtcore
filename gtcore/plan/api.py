@@ -526,10 +526,14 @@ def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
              fixed_tiles: Sequence[PlacedTile] = (),
              candidates: Optional[CandidateSet] = None,
              log: Optional[Callable[[str], None]] = None,
-             time_budget_s: float = CONTINUOUS_TIME_BUDGET_S
+             time_budget_s: float = CONTINUOUS_TIME_BUDGET_S,
+             lambda_tail: Optional[float] = None
              ) -> Tuple[List[PlacedTile], OptimizeReport]:
     """Section 3 H entry point: candidates -> influence -> conflicts ->
     objective -> solver -> optional E5 refine -> report.
+
+    ``lambda_tail`` overrides the weight of the lower-tail coverage term of the
+    objective (``gtcore.plan.LAMBDA_TAIL`` when None; 0 = pure V100).
 
     ``solver="continuous"`` runs A3's ``solve_continuous`` (multi-start
     Nelder-Mead over continuous poses) from the discrete greedy result on a
@@ -628,7 +632,8 @@ def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
         kinds_required["half"] = n_half + n_fixed_half
     n_total = n_full + n_half + len(fixed)
 
-    objective = _plan.make_objective(infl_s, conf_s, rx_cgy=rx)
+    obj_kw = {} if lambda_tail is None else {"lambda_tail": float(lambda_tail)}
+    objective = _plan.make_objective(infl_s, conf_s, rx_cgy=rx, **obj_kw)
     # the solvers read candidate kinds/anchors from the objective when present
     # (kinds_required needs them; local/SA moves use the anchors)
     objective.candidates = cand_s
@@ -690,6 +695,7 @@ def optimize(mesh, n_full: int, n_half: int = 0, rx_cgy: float = DEFAULT_RX_CGY,
         "detached_mm": DETACHED_MM, "conflict_gap_mm": CONFLICT_GAP_MM,
         "m_opt_max": M_OPT_MAX, "tau_fraction": TAU_FRACTION, "tau_cgy": TAU_FRACTION * rx,
         "lambda_hot": LAMBDA_HOT, "v200_tol": V200_TOL, "lambda_oar": LAMBDA_OAR,
+        "lambda_tail": float(objective.lambda_tail), "tail_q": float(objective.tail_q),
         "solver": solver, "seed": seed, "local_radius_mm": LOCAL_RADIUS_MM,
         "sa_alpha": SA_ALPHA, "sa_moves_per_tile_per_sweep": SA_MOVES_PER_TILE_PER_SWEEP,
         "sa_n_sweeps": SA_N_SWEEPS, "sa_n_restarts": SA_N_RESTARTS,

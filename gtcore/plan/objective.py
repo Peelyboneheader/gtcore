@@ -13,10 +13,18 @@ Definitions (``D`` = dose vector of a selection, ``w`` = target weights,
 - ``V100 = sum(w * [D >= rx]) / W``; ``V150``, ``V200`` likewise at 1.5 and
   2.0 rx; ``Dmean = sum(w * D) / W``; ``D90 = weighted_quantile(D, w, 0.10)``;
   ``oar_dmax_<name> = max`` of the OAR dose vector.
-- hard (P1): ``V100 - lambda_hot * max(0, V200 - v200_tol)
-  - sum_j lambda_oar * max(0, Dmax_j - L_j)`` over the OARs that have a
-  limit in ``influence.oar_limits``.
-- soft: ``sum(w * sigmoid((D - rx) / tau)) / W`` minus the same penalties.
+- ``tail_mean = sum over the coldest tail_q of the target weight of
+  w * min(D, rx) / rx, divided by tail_q * W`` (the lower-tail / CVaR mean of
+  the capped dose; in [0, 1]; ``<= min(D90, rx) / rx`` for ``tail_q = 0.10``,
+  and 1 exactly when V100 = 1).  Continuous in D where V100 is a step, and
+  it rewards lifting the coldest points, which V100 does not: with too few
+  tiles V100 alone clusters them and leaves one cold patch (docs/
+  optimize-notes.md, "Objective: lower-tail term").
+- hard (P1): ``V100 + lambda_tail * tail_mean - lambda_hot * max(0, V200 -
+  v200_tol) - sum_j lambda_oar * max(0, Dmax_j - L_j)`` over the OARs that
+  have a limit in ``influence.oar_limits``.
+- soft: ``sum(w * sigmoid((D - rx) / tau)) / W`` plus the same tail term
+  minus the same penalties.
 - gain / gains_all: incremental ``hard(sel + c) - hard(sel)`` from the cached
   dose vector of ``sel``; a candidate already in ``sel`` has gain 0.
 
@@ -48,7 +56,8 @@ GAINS_CHUNK_ROWS = 256
 # Rows of the (C, M) temporaries evaluated at once in gains_all: 256 x 4000
 # float64 = 8 MB per temporary, cache friendly and far below the 100 MB cap.
 
-_OBJECTIVE_WEIGHT_KEYS = ("lambda_hot", "v200_tol", "lambda_oar", "tau_cgy", "rx_cgy")
+_OBJECTIVE_WEIGHT_KEYS = ("lambda_hot", "v200_tol", "lambda_oar", "tau_cgy", "rx_cgy",
+                          "lambda_tail", "tail_q")
 
 
 # ------------------------------------------------------------- quantiles
@@ -85,6 +94,49 @@ def weighted_quantile(values, weights, q: float) -> float:
     thresh -= 4.0 * np.finfo(float).eps * total
     i = int(np.searchsorted(cw, thresh, side="left"))
     return float(v[min(i, v.size - 1)])
+
+
+def tail_rows(block, weights, rx_cgy: float, q: float) -> np.ndarray:
+    """Lower-tail mean of the capped dose, one value per row of ``block``.
+
+    For each row ``D`` (``(M,)`` or ``(k, M)``): the weighted mean of
+    ``min(D, rx) / rx`` over the coldest ``q`` of the total target weight
+    (the last point counted fractionally, so the result is continuous in
+    ``D``).  Returns ``(k,)`` float64 in [0, 1]; 0 when the weights sum to 0.
+    O(k M log M) (one argsort per row).
+    """
+    d = np.asarray(block, dtype=np.float64)
+    if d.ndim == 1:
+        d = d[None, :]
+    w = np.asarray(weights, dtype=np.float64).reshape(-1)
+    total = float(w.sum())
+    if d.shape[1] == 0 or total <= 0.0:
+        return np.zeros(d.shape[0], dtype=float)
+    rx = float(rx_cgy)
+    d = np.minimum(d, rx) / rx
+    order = np.argsort(d, axis=1, kind="stable")
+    ds = np.take_along_axis(d, order, axis=1)
+    ws = w[order]                                        # (k, M)
+    cw = np.cumsum(ws, axis=1)
+    k_w = float(q) * total
+    # fraction of each point's weight that lies inside the coldest k_w
+    frac = np.clip((k_w - (cw - ws)) / np.where(ws > 0, ws, 1.0), 0.0, 1.0)
+    return (frac * ws * ds).sum(axis=1) / k_w
+
+
+def tail_mean(dose, weights, rx_cgy: float, q: float = 0.10) -> float:
+    """Scalar :func:`tail_rows` of one dose vector."""
+    return float(tail_rows(np.asarray(dose, dtype=float).reshape(-1), weights, rx_cgy, q)[0])
+
+
+def _tail_term(objective: Objective, d) -> np.ndarray:
+    """``lambda_tail * tail_rows(d)`` (``(k,)``; zeros without the term)."""
+    d = np.asarray(d)
+    k = 1 if d.ndim == 1 else d.shape[0]
+    if not objective.lambda_tail:
+        return np.zeros(k, dtype=float)
+    return objective.lambda_tail * tail_rows(d, objective.influence.target.weights,
+                                             objective.rx_cgy, objective.tail_q)
 
 
 # --------------------------------------------------------------- metrics
@@ -160,7 +212,8 @@ def hard(objective: Objective, selection) -> float:
     ids = _as_ids(selection, inf.n_candidates)
     d = inf.dose_of(ids)
     v100, v200 = _coverage_terms(objective, d)
-    return v100 - _hot_penalty(objective, v200) - _oar_penalty(objective, _oar_dmax(objective, ids))
+    return v100 + float(_tail_term(objective, d)[0]) - _hot_penalty(objective, v200) \
+        - _oar_penalty(objective, _oar_dmax(objective, ids))
 
 
 def soft_coverage(objective: Objective, d: np.ndarray) -> float:
@@ -179,8 +232,8 @@ def soft(objective: Objective, selection) -> float:
     ids = _as_ids(selection, inf.n_candidates)
     d = inf.dose_of(ids)
     _v100, v200 = _coverage_terms(objective, d)
-    return soft_coverage(objective, d) - _hot_penalty(objective, v200) \
-        - _oar_penalty(objective, _oar_dmax(objective, ids))
+    return soft_coverage(objective, d) + float(_tail_term(objective, d)[0]) \
+        - _hot_penalty(objective, v200) - _oar_penalty(objective, _oar_dmax(objective, ids))
 
 
 def _f32_threshold(thr: np.ndarray) -> np.ndarray:
@@ -204,7 +257,8 @@ def _base_state(objective: Objective, selection, dose_vec):
     oar_base = {name: inf.oar_dose_of(name, ids) for name in inf.oar_limits}
     v100, v200 = _coverage_terms(objective, base)
     dmax_base = {name: (float(v.max()) if v.size else 0.0) for name, v in oar_base.items()}
-    base_hard = v100 - _hot_penalty(objective, v200) - _oar_penalty(objective, dmax_base)
+    base_hard = v100 + float(_tail_term(objective, base)[0]) - _hot_penalty(objective, v200) \
+        - _oar_penalty(objective, dmax_base)
     return ids, base, oar_base, base_hard
 
 
@@ -250,7 +304,11 @@ def gains_all(objective: Objective, selection, dose_vec: Optional[np.ndarray] = 
             v100 = np.zeros(i1 - i0)
             v200 = np.zeros(i1 - i0)
         hot = objective.lambda_hot * np.maximum(0.0, v200 - objective.v200_tol)
-        out[i0:i1] = v100 - hot - _pen_rows(objective, oar_base, np.arange(i0, i1)) - base_hard
+        tail = 0.0
+        if objective.lambda_tail:
+            tail = _tail_term(objective, block.astype(np.float64) + base[None, :])
+        out[i0:i1] = v100 + tail - hot - _pen_rows(objective, oar_base, np.arange(i0, i1)) \
+            - base_hard
     out[ids] = 0.0
     return out
 
@@ -274,7 +332,8 @@ def gain(objective: Objective, selection, candidate: int) -> float:
     else:
         v100 = v200 = 0.0
     pen = float(_pen_rows(objective, oar_base, np.array([c]))[0])
-    return v100 - _hot_penalty(objective, v200) - pen - base_hard
+    tail = float(_tail_term(objective, row.astype(np.float64) + base)[0])
+    return v100 + tail - _hot_penalty(objective, v200) - pen - base_hard
 
 
 def soft_gains_all(objective: Objective, selection, dose_vec: Optional[np.ndarray] = None
@@ -288,23 +347,28 @@ def soft_gains_all(objective: Objective, selection, dose_vec: Optional[np.ndarra
     rx, tau = objective.rx_cgy, objective.tau_cgy
     _v100, v200_b = _coverage_terms(objective, base)
     dmax_base = {name: (float(v.max()) if v.size else 0.0) for name, v in oar_base.items()}
-    base_soft = soft_coverage(objective, base) - _hot_penalty(objective, v200_b) \
-        - _oar_penalty(objective, dmax_base)
+    base_soft = soft_coverage(objective, base) + float(_tail_term(objective, base)[0]) \
+        - _hot_penalty(objective, v200_b) - _oar_penalty(objective, dmax_base)
     thr200 = _f32_threshold(2.0 * rx - base)
     c_n = inf.n_candidates
     out = np.empty(c_n, dtype=float)
     for i0 in range(0, c_n, GAINS_CHUNK_ROWS):
         i1 = min(i0 + GAINS_CHUNK_ROWS, c_n)
         block = inf.dose[i0:i1]                                  # (k, M) float32 view
+        tail = 0.0
         if total > 0.0:
-            s = expit((block.astype(np.float64) + base[None, :] - rx) / tau)
+            tot = block.astype(np.float64) + base[None, :]
+            s = expit((tot - rx) / tau)
             cov = (s @ w) / total
             v200 = ((block >= thr200[None, :]) @ w) / total
+            if objective.lambda_tail:
+                tail = _tail_term(objective, tot)
         else:
             cov = np.zeros(i1 - i0)
             v200 = np.zeros(i1 - i0)
         hot = objective.lambda_hot * np.maximum(0.0, v200 - objective.v200_tol)
-        out[i0:i1] = cov - hot - _pen_rows(objective, oar_base, np.arange(i0, i1)) - base_soft
+        out[i0:i1] = cov + tail - hot - _pen_rows(objective, oar_base, np.arange(i0, i1)) \
+            - base_soft
     out[ids] = 0.0
     return out
 
@@ -315,7 +379,7 @@ def make_objective(influence: InfluenceMatrix, conflicts: ConflictGraph,
     """Construct an :class:`Objective`.
 
     ``weights`` may override ``lambda_hot``, ``v200_tol``, ``lambda_oar``,
-    ``tau_cgy`` and ``rx_cgy``; ``rx_cgy`` defaults to ``influence.rx_cgy``
+    ``tau_cgy``, ``lambda_tail``, ``tail_q`` and ``rx_cgy``; ``rx_cgy`` defaults to ``influence.rx_cgy``
     (the prescription the matrix was built for).  Unknown keys raise
     ``TypeError``.
     """
@@ -346,7 +410,7 @@ def evaluate(objective: Objective, selection) -> Dict[str, Any]:
 
 
 __all__ = [
-    "weighted_quantile", "metrics_from_dose", "dose_of", "metrics", "hard",
+    "weighted_quantile", "tail_rows", "tail_mean", "metrics_from_dose", "dose_of", "metrics", "hard",
     "soft", "soft_coverage", "gain", "gains_all", "soft_gains_all",
     "make_objective", "evaluate", "GAINS_CHUNK_ROWS",
 ]

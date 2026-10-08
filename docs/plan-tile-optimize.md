@@ -88,12 +88,21 @@ count = inventory (fixed-N).
 
 **Problem forms**
 - **P1 (fixed N):** maximize
-  *V100 − λ_hot·max(0, V200 − v200_tol) − Σ_j λ_oar·max(0, Dmax(O_j) − L_j)*.
-  Defaults λ_hot = 0.5, v200_tol = 0.10, λ_oar = 1e3 per cGy over limit.
+  *V100 + λ_tail·T10 − λ_hot·max(0, V200 − v200_tol) − Σ_j λ_oar·max(0, Dmax(O_j) − L_j)*,
+  where *T10* = weighted mean of *min(D_m, rx)/rx* over the coldest 10 % of
+  the target weight (the lower-tail / CVaR mean of the capped dose; *T10 ≤
+  min(D90, rx)/rx*, and *T10 = 1* iff *V100 = 1*).
+  Defaults λ_tail = 1.0 (added 2026-10-08, see `optimize-notes.md`
+  "Objective: lower-tail term"; 0 restores the original pure-V100 form),
+  λ_hot = 0.5, v200_tol = 0.10, λ_oar = 1e3 per cGy over limit.
   Every λ is a named, swept parameter.
 - **P2 (minimum N):** smallest *N* with the P1 optimum satisfying
   *D90(T) ≥ rx* (also report the *V100 ≥ 0.90* criterion). Solved by
   sweeping P1 over *N* and reporting the full coverage-vs-N curve.
+  Note: the two criteria are the same statement — *D90 ≥ rx* holds exactly
+  when at most 10 % of the target weight is below rx, i.e. *V100 ≥ 0.90*
+  (0 disagreements in the 327 V2 rows) — so the sweep reports one minimum
+  N; the objective choice cannot move it, only the below-N* behaviour.
 
 **Discretization.** Once anchors and spins are sampled, the problem is a
 combinatorial selection with pairwise conflicts and a coverage objective,
