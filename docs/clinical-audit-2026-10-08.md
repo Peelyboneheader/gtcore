@@ -202,3 +202,25 @@ cavity in the planner is the honest answer.
   (fixable); tile inference 6/8.
 - Cavity: 0.63-0.66 Dice today; the mechanism and a tested path to ~0.80
   are in section 5.
+
+## 7. The clinical target is derivable from the implant
+
+`CTV_GT` is not an arbitrary hand trim: 90 % of its voxels lie within
+10.3 mm of a seed (max 13.5 mm). Taking the full 5 mm rind of `Cav_Post`
+and keeping only the part within `d` of any of the 32 seeds, clipped to the
+`Brain` contour:
+
+| d | volume | Dice vs `CTV_GT` | covers `CTV_GT` | RTDOSE D90 / V100 (unclipped) |
+|---|---|---|---|---|
+| 8 mm | 8.5 cc | 0.58 | 42 % | 8112 cGy / 99 % |
+| **10 mm** | 16.9 cc | **0.88** | 83 % | 6699 cGy / 96 % |
+| 12 mm | 25.2 cc | 0.85 | 98 % | 5787 cGy / 87 % |
+| 14 mm | 31.7 cc | 0.74 | 99 % | 5091 cGy / 74 % |
+| full rind | 35.4 cc | 0.69 | 99 % | 4528 cGy / 67 % |
+
+(`CTV_GT`: 19.0 cc, D90 6365 cGy.) So "the tiled wall plus 5 mm" is the
+clinical convention, and it is a function of the seed positions, which
+gtcore measures. An automatic HR-CTV defined this way reproduces the
+physician's target to Dice 0.85-0.88 with no hand editing, and its D90
+brackets the clinical value. This is the natural target definition for the
+intraoperative use case: the wall the tiles were placed to treat.
