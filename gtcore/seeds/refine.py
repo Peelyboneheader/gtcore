@@ -127,7 +127,7 @@ off the volume).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -409,6 +409,7 @@ class GreyCentroid:
     cov_noise: Optional[np.ndarray] = None
     slab_var_ijk: Optional[np.ndarray] = None
     bg_shift: Optional[np.ndarray] = None   # delta (module docstring), RAS mm
+    window: Optional[_Neighbourhood] = field(default=None, repr=False)
 
 
 def _grey_centroid(grid, center, axis, others_c, others_a, *, n_iter=3,
@@ -491,7 +492,221 @@ def _grey_centroid(grid, center, axis, others_c, others_a, *, n_iter=3,
     cov = cov_noise + grid.vox_to_ras_cov(var_ijk) + np.outer(bg_shift, bg_shift)
     return GreyCentroid(c, ax, cov, b, sig_n, wsum, int(nb.in_roi.sum()), n_sat,
                         "ok", cov_noise=cov_noise, slab_var_ijk=var_ijk,
-                        bg_shift=bg_shift)
+                        bg_shift=bg_shift, window=nb)
+
+
+# ----------------------------------------------------------------- stage 7
+# Maximum-likelihood fit of a blurred line source (plan-localization stage 7,
+# opt-in ``method="model"``).  Model of the voxel value at x (RAS):
+#
+#     v(x) = b0 + g . (x - c) + A * < f(x - c - delta e_k) >_slice
+#     f(r) = exp(-(r^T P r - (u^T P r)^2 / alpha) / 2)
+#            * [erf(k (l/2 - t0)) + erf(k (l/2 + t0))] / 2,
+#     P = S^-1, alpha = u^T P u, t0 = u^T P r / alpha, k = sqrt(alpha / 2):
+#
+# the closed-form integral of the Gaussian N(0, S) along a segment
+# [-l/2, l/2] u (the "whitened anisotropic Gaussian (x) segment", erf form).
+# S = D diag(sigma^2 + s_i^2/12, sigma^2 + s_j^2/12, sigma^2) D^T
+#     + (D_seed^2/16)(I - u u^T)
+# holds the scanner blur, the in-plane pixel box and the capsule's
+# cross-section (a disc of diameter D_seed has variance D^2/16 per axis).
+# The segment length l is ``MODEL_SEGMENT_MM`` = 4.25 mm, NOT the nominal
+# 4.5 mm capsule length: the uniform segment with the same axial variance
+# as a cylinder of length L - D_seed with hemispherical end caps
+# (``capsule_equivalent_length`` = 4.246 mm for 4.5 x 0.8 mm), the same
+# moment matching the Gaussian cross-section uses.  Measured on supersampled
+# capsules (notes, stage 7): l = 4.5 mm leaves a phase-dependent through-
+# slab bias (mean error 3-4x larger, z NEES 21-35); l = 4.25 mm gives
+# chi^2_red 1.02 and NEES 1.4-1.6.  Physically, 4.25 mm is the effective
+# length of the radio-opaque core the CT sees, not the capsule's outer
+# length; it is to be confirmed on the with-truth phantom (open question
+# in the notes) before the paper quotes it.
+# The slice box along k (DICOM SliceThickness when the header gives one,
+# else the slice spacing) is integrated numerically (midpoint rule,
+# <= 0.4 mm steps) instead of being replaced by a Gaussian of variance
+# s_k^2/12 (``box="gauss"``, the protocol's approximation, kept for
+# comparison): at 2-3 mm slices that flat-topped box is what carries the
+# sub-slab position.
+# Saturated voxels (>= ceiling - 1) and voxels on interpolated gap slices
+# (``vol.meta["interpolated_k"]``) are EXCLUDED from the residuals -- the
+# conventional treatment, not a censored likelihood.
+# Parameters: centre (3), axis (2: a tilt of the stage-2 axis), A, b0,
+# g (3), sigma (bounded [0.2, 1.5] mm).  A, b0 and g enter linearly and are
+# solved exactly inside every residual evaluation (variable projection,
+# Golub-Pereyra): same minimum as the joint fit, about half the Jacobian
+# cost.  scipy least_squares (trf, 2-point Jacobian, max_nfev=100) from the
+# stage-2 centroid; covariance s^2 (J^T J)^-1, centre block, of the
+# projected problem (equal to the joint fit's centre block at the optimum),
+# s^2 = reduced chi^2 of the noise-whitened residuals.  Falls back to the
+# stage-2 centroid when the fit does not converge, A <= 0, the centre moves
+# more than max_shift_mm from the centroid, sigma ends on a bound, or the
+# Jacobian is singular (a parameter the data does not determine).  The
+# reduced chi^2 is REPORTED (``info["refine_model_chi2"]``), not gated: the
+# plan's "chi^2_red > 4" rule rejected every fit on the voxel-painted head
+# phantom (median chi^2_red 100-400, a rendering mismatch, not a bad
+# centre), and on real scans the residual carries streaks and correlated
+# noise that no white-noise chi^2 can judge.
+# CALIBRATION: the harness (notes, stage 7) found the model covariance
+# over-confident on G1 / G2 (NEES 3.6-6.4) and calibrated only on G4 (1.8);
+# ``cov_ras`` from this method is therefore labelled uncalibrated
+# (``info["refine_model_cov"]``) until that is resolved.
+MODEL_SIGMA_BOUNDS = (0.2, 1.5)
+MODEL_MAX_NFEV = 100
+MODEL_SEGMENT_MM = 4.25        # line-source length (see above; nominal L = 4.5)
+MODEL_SLAB_STEP_MM = 0.4
+MODEL_MIN_RCOND = 1e-6         # smallest/largest singular value of J
+MODEL_COV_NOTE = ("uncalibrated: NEES 3.6-6.4 on harness grids G1/G2 "
+                  "(1.8 on G4); see docs/localization-notes.md, stage 7")
+
+
+def capsule_equivalent_length(length_mm=None, diameter_mm=None):
+    """Length of the uniform segment with the same axial variance as a
+    capsule (cylinder of length L - D with hemispherical caps of radius
+    D/2): the line-source length of the stage-7 model."""
+    L = float(_geom.SEED_LENGTH_MM if length_mm is None else length_mm)
+    R = float(_geom.SEED_DIAMETER_MM if diameter_mm is None else diameter_mm) / 2.0
+    a = max(L - 2.0 * R, 0.0)
+    z0 = a / 2.0
+    if R <= 0.0:
+        return L
+    mass = np.pi * R ** 2 * a + 4.0 / 3.0 * np.pi * R ** 3
+    m2 = (np.pi * R ** 2 * a ** 3 / 12.0
+          + 2.0 * np.pi * (z0 ** 2 * 2.0 * R ** 3 / 3.0 + z0 * R ** 4 / 2.0
+                           + 2.0 * R ** 5 / 15.0))
+    return float(np.sqrt(12.0 * m2 / mass))
+
+
+@dataclass
+class LineFit:
+    """Result of the stage-7 line-source fit for one seed."""
+
+    center_ras: np.ndarray
+    axis_ras: np.ndarray
+    cov_ras: np.ndarray
+    amplitude: float
+    sigma_mm: float
+    chi2_red: float
+    nfev: int
+    n_used: int
+    status: str            # "ok" or the reason the centroid is kept
+
+
+def _segment_profile(r, u, P, length):
+    """Gaussian N(0, S = P^-1) integrated along the segment
+    [-length/2, length/2] u, at offsets ``r`` (n, 3); ~1 at its centre."""
+    from scipy.special import erf
+
+    Pr = r @ P
+    alpha = float(u @ P @ u)
+    beta = Pr @ u
+    q = np.einsum("ij,ij->i", Pr, r) - beta ** 2 / alpha
+    t0 = beta / alpha
+    k = np.sqrt(alpha / 2.0)
+    h = length / 2.0
+    return (np.exp(-0.5 * np.clip(q, 0.0, None))
+            * 0.5 * (erf(k * (h - t0)) + erf(k * (h + t0))))
+
+
+def _fit_line_source(grid, gc, *, saturation=None, interpolated_k=(),
+                     slice_thickness=None, box="exact", fit_sigma=True,
+                     max_shift_mm=1.5):
+    from scipy.optimize import least_squares
+
+    nb = gc.window
+    X, V = nb.pts, nb.vals
+    keep = np.ones(len(V), dtype=bool)
+    if saturation is not None:
+        keep &= V < float(saturation) - 1.0
+    if len(interpolated_k):
+        keep &= ~np.isin(nb.kji[:, 0], np.asarray(list(interpolated_k), int))
+    X, V = X[keep], V[keep]
+    c0 = np.asarray(gc.center_ras, float)
+    u0 = np.asarray(gc.axis_ras, float)
+    u0 = u0 / np.linalg.norm(u0)
+    e1 = np.cross(u0, [1.0, 0.0, 0.0])
+    if np.linalg.norm(e1) < 0.5:
+        e1 = np.cross(u0, [0.0, 1.0, 0.0])
+    e1 /= np.linalg.norm(e1)
+    e2 = np.cross(u0, e1)
+    T = float(grid.spacing[2] if not slice_thickness else slice_thickness)
+    if box == "exact":
+        n_sub = max(1, int(np.ceil(T / MODEL_SLAB_STEP_MM)))
+        delta = ((np.arange(n_sub) + 0.5) / n_sub - 0.5) * T
+        box_var = np.array([grid.spacing[0] ** 2, grid.spacing[1] ** 2, 0.0]) / 12.0
+    else:
+        delta = np.zeros(1)
+        box_var = np.array([grid.spacing[0] ** 2, grid.spacing[1] ** 2,
+                            T ** 2]) / 12.0
+    sub = delta[:, None] * grid.D[:, 2][None, :]          # (m, 3) RAS offsets
+    Dm, cs = grid.D, grid.Dseed ** 2 / 16.0
+    seg = float(MODEL_SEGMENT_MM)
+    sig_n = max(float(gc.sigma_noise_hu), 1.0)
+    n_lin, n_nl = 5, (6 if fit_sigma else 5)
+    n_par = n_lin + n_nl
+
+    def unpack(p):
+        u = u0 + p[3] * e1 + p[4] * e2
+        u = u / np.linalg.norm(u)
+        return p[0:3], u, (p[5] if fit_sigma else grid.psf)
+
+    def design(p):
+        c, u, sigma = unpack(p)
+        S = (Dm @ np.diag(sigma ** 2 + box_var) @ Dm.T
+             + cs * (np.eye(3) - np.outer(u, u)))
+        P = np.linalg.inv(S)
+        r = X - c[None, :]
+        prof = np.zeros(len(X))
+        for d in sub:
+            prof += _segment_profile(r - d[None, :], u, P, seg)
+        return np.column_stack([prof / len(sub), np.ones(len(X)), r])
+
+    def solve(p):
+        Phi = design(p)
+        beta = np.linalg.lstsq(Phi, V, rcond=None)[0]
+        return Phi, beta
+
+    def resid(p):
+        Phi, beta = solve(p)
+        return (Phi @ beta - V) / sig_n
+
+    def result(status, c=c0, u=u0, cov=gc.cov_ras, A=np.nan, sigma=np.nan,
+               chi2=np.nan, nfev=0):
+        return LineFit(np.asarray(c, float), np.asarray(u, float), cov,
+                       float(A), float(sigma), float(chi2), int(nfev),
+                       int(len(V)), status)
+
+    if len(V) <= n_par + 1:
+        return result("too_few_voxels")
+    p0 = np.r_[c0, 0.0, 0.0]
+    lo, hi = np.full(5, -np.inf), np.full(5, np.inf)
+    if fit_sigma:
+        p0 = np.r_[p0, float(np.clip(grid.psf, *MODEL_SIGMA_BOUNDS))]
+        lo = np.r_[lo, MODEL_SIGMA_BOUNDS[0]]
+        hi = np.r_[hi, MODEL_SIGMA_BOUNDS[1]]
+    res = least_squares(resid, p0, bounds=(lo, hi), method="trf",
+                        jac="2-point", x_scale="jac", max_nfev=MODEL_MAX_NFEV)
+    c, u, sigma = unpack(res.x)
+    A = float(solve(res.x)[1][0])
+    chi2 = 2.0 * float(res.cost) / max(1, len(V) - n_par)
+    if not res.success:
+        return result("not_converged", nfev=res.nfev, chi2=chi2)
+    if not A > 0.0:
+        return result("amplitude", A=A, nfev=res.nfev, chi2=chi2)
+    if float(np.linalg.norm(c - c0)) > float(max_shift_mm):
+        return result("shift", A=A, nfev=res.nfev, chi2=chi2)
+    if fit_sigma and (sigma <= MODEL_SIGMA_BOUNDS[0] + 1e-3
+                      or sigma >= MODEL_SIGMA_BOUNDS[1] - 1e-3):
+        return result("sigma_bound", A=A, sigma=sigma, nfev=res.nfev,
+                      chi2=chi2)
+    J = res.jac
+    sv = np.linalg.svd(J, compute_uv=False)
+    if not (sv[-1] > MODEL_MIN_RCOND * sv[0]):
+        # a parameter the data does not determine (e.g. z when only one
+        # measured slice holds the seed): no finite covariance exists
+        return result("singular", A=A, sigma=sigma, nfev=res.nfev, chi2=chi2)
+    cov_p = np.linalg.inv(J.T @ J) * chi2
+    return result("ok", c=c, u=u, cov=cov_p[:3, :3], A=A, sigma=sigma,
+                  chi2=chi2, nfev=res.nfev)
 
 
 def grey_centroid(vol, center, axis=None, others=None, n_iter=3,
@@ -528,7 +743,8 @@ def refine_seed_candidates(vol, cands: SeedCandidates, method="centroid",
                            n_iter=3, bg_shell_mm=BG_SHELL_MM, mask="voronoi",
                            roi="capsule", slab="bound",
                            max_bg_shift_mm=MAX_BACKGROUND_SHIFT_MM,
-                           update_axes=False) -> SeedCandidates:
+                           update_axes=False, box="exact",
+                           fit_sigma=True) -> SeedCandidates:
     """Re-localize every candidate on the RAW (not metal-inpainted) volume.
 
     Returns a new :class:`SeedCandidates` (every other field carried by
@@ -552,8 +768,17 @@ def refine_seed_candidates(vol, cands: SeedCandidates, method="centroid",
     voxel-quantization covariance ``s_a^2/12``, when the grey centroid is not
     usable (module docstring) or moves farther than ``max_shift_mm`` from the
     detection.
+
+    ``method="model"`` (stage 7, opt-in, EXPERIMENTAL) then fits the blurred
+    line source (stage-7 block above) from the centroid: status "ok" means
+    the model was kept, ``"centroid:<reason>"`` that the fit was rejected
+    and the centroid kept (never an exception).  ``info`` gains
+    ``refine_model_chi2`` (reported, not gated), ``refine_model_sigma_mm``,
+    ``refine_model_nfev`` and ``refine_model_cov`` (the calibration label).
+    The slice box is ``vol.meta["slice_thickness"]`` when the header gave
+    one.
     """
-    if method not in ("centroid",):
+    if method not in ("centroid", "model"):
         raise ValueError("unknown refinement method %r" % (method,))
     _check_options(roi, slab, mask)
     n = len(cands)
@@ -569,6 +794,14 @@ def refine_seed_candidates(vol, cands: SeedCandidates, method="centroid",
     shift, bg, sig = np.zeros(n), np.zeros(n), np.zeros(n)
     bgs = np.full(n, np.nan)
     nsat = np.zeros(n, dtype=int)
+    m_chi2, m_sig = np.full(n, np.nan), np.full(n, np.nan)
+    m_nfev = np.zeros(n, dtype=int)
+    meta = getattr(vol, "meta", None) or {}
+    interp_k = tuple(meta.get("interpolated_k", ()) or ())
+    try:
+        thick = float(meta.get("slice_thickness") or 0.0) or None
+    except (TypeError, ValueError):
+        thick = None
     for i in range(n):
         r = _grey_centroid(grid, centers[i], axes[i],
                            np.delete(centers, i, axis=0),
@@ -578,7 +811,19 @@ def refine_seed_candidates(vol, cands: SeedCandidates, method="centroid",
                            max_bg_shift_mm=max_bg_shift_mm,
                            max_shift_mm=max_shift_mm)
         st = r.status
-        if st == "ok":
+        if st == "ok" and method == "model":
+            fit = _fit_line_source(grid, r, saturation=saturation,
+                                   interpolated_k=interp_k,
+                                   slice_thickness=thick, box=box,
+                                   fit_sigma=fit_sigma,
+                                   max_shift_mm=max_shift_mm)
+            m_chi2[i], m_sig[i], m_nfev[i] = fit.chi2_red, fit.sigma_mm, fit.nfev
+            if fit.status == "ok":
+                r.center_ras, r.axis_ras, r.cov_ras = (
+                    fit.center_ras, fit.axis_ras, fit.cov_ras)
+            else:
+                st = "centroid:" + fit.status
+        if st == "ok" or st.startswith("centroid:"):
             new_c[i], cov[i] = r.center_ras, r.cov_ras
             ref_a[i] = r.axis_ras
             if update_axes:
@@ -601,5 +846,8 @@ def refine_seed_candidates(vol, cands: SeedCandidates, method="centroid",
         refine_n_saturated=nsat,
         refine_axis_ras=ref_a,
     )
+    if method == "model":
+        info.update(refine_model_chi2=m_chi2, refine_model_sigma_mm=m_sig,
+                    refine_model_nfev=m_nfev, refine_model_cov=MODEL_COV_NOTE)
     out.centers_ras, out.axes_ras, out.cov_ras, out.info = new_c, new_a, cov, info
     return out
