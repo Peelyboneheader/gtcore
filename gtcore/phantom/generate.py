@@ -45,6 +45,9 @@ Surgery, layered on top of that:
 Imaging physics is deliberately minimal but in the right order: seeds are
 painted at full metal HU, then a Gaussian PSF is applied, then i.i.d. Gaussian
 noise. Optional qualitative FBP streaks can be layered on afterwards.
+``seed_render="analytic"`` instead adds each seed after the anatomy blur as an
+exactly integrated capsule patch (:mod:`gtcore.phantom.seed_render`), and
+``saturate_hu`` clips at the scanner ceiling; the defaults are unchanged.
 """
 from __future__ import annotations
 
@@ -549,6 +552,9 @@ def make_head_phantom(
     rng_seed=0,
     fov_mm=200.0,
     n_half_tiles=0,
+    seed_render="binary",
+    saturate_hu=None,
+    metal_hu=None,
 ):
     """Build a synthetic post-implant head CT and its exact ground truth.
 
@@ -571,11 +577,29 @@ def make_head_phantom(
         volumes and identical truth.
     fov_mm : float
         Side of the cubic field of view in mm.
+    seed_render : {"binary", "analytic"}
+        ``"binary"`` (default, historical, bit-identical): seeds are painted
+        as voxelized capsules at ``HU_SEED`` before the PSF blur.
+        ``"analytic"``: the anatomy is blurred WITHOUT seeds and each seed is
+        then added as an exactly integrated 4.5 x 0.8 mm capsule patch
+        (:func:`gtcore.phantom.seed_render.add_rendered_seeds`: fine-grid
+        capsule, PSF blur, block average over the voxel footprint), before
+        the noise.  ``truth.masks["seeds"]`` is the painted mask either way.
+    saturate_hu : float, optional
+        Clip the final volume at this ceiling (e.g. 3071, the 12-bit scanner
+        limit).  ``None`` (default) leaves values unclipped.
+    metal_hu : float, optional
+        Capsule contrast above the local tissue for ``"analytic"``; default
+        :data:`gtcore.phantom.seed_render.METAL_HU_PRINTED` (the saturating,
+        printed-phantom-like regime, which is also where the binary seeds
+        sit: 0.7 mm peaks ~4000 HU unclipped).
 
     Returns
     -------
     (Volume, PhantomTruth)
     """
+    if seed_render not in ("binary", "analytic"):
+        raise ValueError("seed_render must be 'binary' or 'analytic'")
     rng = np.random.default_rng(rng_seed)
     n = int(round(fov_mm / spacing))
     shape = (n, n, n)
@@ -679,16 +703,30 @@ def make_head_phantom(
             seed_mask, az, ay, ax, s.center_ras, s.axis_ras,
             SEED_LENGTH_MM, seed_radius,
         )
-    hu[seed_mask] = np.float32(HU_SEED)
+    if seed_render == "binary":
+        hu[seed_mask] = np.float32(HU_SEED)
 
     # -- imaging physics ----------------------------------------------------
     sigma_vox = PSF_SIGMA_MM / float(spacing)
     if sigma_vox > 0.0:
         ndimage.gaussian_filter(hu, sigma=sigma_vox, output=hu, mode="nearest")
+    if seed_render == "analytic":
+        from .seed_render import METAL_HU_PRINTED, add_rendered_seeds
+
+        add_rendered_seeds(
+            hu, affine,
+            np.array([s.center_ras for s in seeds]),
+            np.array([s.axis_ras for s in seeds]),
+            length_mm=SEED_LENGTH_MM, diameter_mm=_geom.SEED_DIAMETER_MM,
+            metal_hu=METAL_HU_PRINTED if metal_hu is None else float(metal_hu),
+            psf_sigma_mm=PSF_SIGMA_MM,
+        )
     if streaks:
         _add_metal_streaks(hu, seed_mask, spacing)
     if noise_hu and noise_hu > 0.0:
         hu += rng.standard_normal(shape, dtype=np.float32) * np.float32(noise_hu)
+    if saturate_hu is not None:
+        np.minimum(hu, np.float32(saturate_hu), out=hu)
 
     # -- truth --------------------------------------------------------------
     brain &= ~cavity
@@ -711,5 +749,9 @@ def make_head_phantom(
     meta = {"phantom": True, "modality": "CT", "n_tiles": int(n_tiles)}
     if n_half_tiles:
         meta["n_half_tiles"] = int(n_half_tiles)
+    if seed_render != "binary":
+        meta["seed_render"] = seed_render
+    if saturate_hu is not None:
+        meta["saturate_hu"] = float(saturate_hu)
     vol = Volume(hu, affine, meta)
     return vol, truth

@@ -23,6 +23,7 @@ __all__ = [
     "load_dicom_series",
     "load_volume",
     "save_volume",
+    "fill_slice_grid",
 ]
 
 # LPS <-> RAS.  Self-inverse, so the same matrix converts both ways.
@@ -177,6 +178,35 @@ def _unit_normal(iop):
     return n / np.linalg.norm(n)
 
 
+def fill_slice_grid(z, stack, zt, dz):
+    """Place present slices on a regular grid, linearly filling the gaps.
+
+    ``z`` (ascending, mm) are the positions of the present slices
+    ``stack[i]``; ``zt`` the target grid positions with step ``dz``.  A grid
+    slice within ``0.25 * dz`` of a present slice is a COPY of the nearest
+    one; every other grid slice is the linear interpolation between the
+    bracketing present slices.  Returns ``(out, interpolated)`` with
+    ``interpolated`` a bool array over the grid.  This is the single gap-fill
+    rule of the loader; :func:`gtcore.phantom.seed_render.drop_and_interpolate`
+    reuses it so synthetic gap volumes match real ones by construction.
+    """
+    z = np.asarray(z, dtype=float)
+    zt = np.asarray(zt, dtype=float)
+    out = np.empty((len(zt),) + tuple(stack.shape[1:]), dtype=np.float32)
+    interpolated = np.zeros(len(zt), dtype=bool)
+    for k, t in enumerate(zt):
+        i1 = int(np.clip(np.searchsorted(z, t), 0, len(z) - 1))
+        i0 = max(i1 - 1, 0)
+        if i0 == i1 or min(abs(z[i1] - t), abs(z[i0] - t)) < 0.25 * dz:
+            src = i1 if abs(z[i1] - t) <= abs(z[i0] - t) else i0
+            out[k] = stack[src]
+        else:
+            w = (t - z[i0]) / (z[i1] - z[i0])
+            out[k] = (1.0 - w) * stack[i0] + w * stack[i1]
+            interpolated[k] = True
+    return out, interpolated
+
+
 def _load_series_resampled(geo):
     """Rebuild a series with missing/irregular slices onto its TRUE geometry.
 
@@ -217,18 +247,8 @@ def _load_series_resampled(geo):
 
     nz = int(round((z[-1] - z[0]) / dz)) + 1
     zt = z[0] + dz * np.arange(nz)
-    out = np.empty((nz,) + stack.shape[1:], dtype=np.float32)
-    n_copied = 0
-    for k, t in enumerate(zt):
-        i1 = int(np.clip(np.searchsorted(z, t), 0, len(z) - 1))
-        i0 = max(i1 - 1, 0)
-        if i0 == i1 or min(abs(z[i1] - t), abs(z[i0] - t)) < 0.25 * dz:
-            src = i1 if abs(z[i1] - t) <= abs(z[i0] - t) else i0
-            out[k] = stack[src]
-            n_copied += 1
-        else:
-            w = (t - z[i0]) / (z[i1] - z[i0])
-            out[k] = (1.0 - w) * stack[i0] + w * stack[i1]
+    out, interpolated = fill_slice_grid(z, stack, zt, dz)
+    n_copied = int(nz - interpolated.sum())
 
     iop, ps = geo["iop"], geo["ps"]
     row_dir, col_dir = iop[:3], iop[3:]
@@ -250,6 +270,9 @@ def _load_series_resampled(geo):
         "slices_present": int(len(z)),
         "slices_on_grid": int(nz),
         "slices_interpolated": int(n_interp),
+        # which grid slices (k indices) were filled by interpolation, so a
+        # seed localizer can tell measured from invented slices
+        "interpolated_k": [int(k) for k in np.flatnonzero(interpolated)],
     })
     if n_interp > 0.5 * nz:
         vol.meta["z_gap_unreliable"] = True
