@@ -41,7 +41,7 @@ a bending fit and fall back to the rigid pose with zero curvature.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
 import numpy as np
@@ -88,10 +88,45 @@ class DeformableFit:
     axis_err_deg: float
     assignment: Tuple[int, ...]     # observed i <-> canonical assignment[i]
     n_evals: int = 0
+    # Gauss-Newton uncertainty (plan-localization stage 6), filled by
+    # compute_uncertainty() -- lazily, so the per-quad cost of the
+    # configuration search is unchanged; None until computed, and for the
+    # 2-seed rigid fallback (no least-squares solution to linearise).
+    cov_x: Optional[np.ndarray] = None       # (9, 9) over x = (rotvec, t,
+                                             # kappa1, kappa2, psi)
+    center_cov: Optional[np.ndarray] = None  # (3, 3) mm^2, mean model seed
+    normal_sigma_deg: Optional[float] = None  # RMS tilt of pose.normal
+    cov_cond: Optional[float] = None         # condition number of the
+                                             # column-scaled J^T J
+    cov_rank: Optional[int] = None           # identifiable directions (<= 9)
+    _solution: object = field(default=None, repr=False, compare=False)
 
     @property
     def bending_energy(self) -> float:
         return self.params.bending_energy
+
+    def compute_uncertainty(self) -> "DeformableFit":
+        """Fill ``cov_x``, ``center_cov`` and ``normal_sigma_deg`` in place
+        (returns ``self``; a no-op once computed or without a solution).
+
+        * ``cov_x = s^2 (J^T J)^-1`` -- the standard Gauss-Newton covariance
+          of a least-squares fit -- with ``J`` the solver Jacobian of the
+          winning start and ``s^2 = 2 cost / (m - 9)`` the residual variance
+          (``m`` residual rows: seed positions, axis terms, curvature prior).
+          ``J^T J`` is column-scaled before inversion and inverted as a
+          pseudo-inverse over the directions whose scaled eigenvalue exceeds
+          ``_COV_RCOND`` of the largest: ``psi`` has no effect on a
+          near-flat or equal-curvature sheet, and that null direction must
+          not blow up the pose block.
+        * ``center_cov = J_c cov_x J_c^T`` with ``J_c`` the forward-difference
+          Jacobian (9 evaluations) of the mean predicted seed position.
+        * ``normal_sigma_deg = sqrt(trace(J_n cov_x J_n^T))`` in degrees: the
+          RMS tilt of the pose normal (both tangent directions together),
+          ``J_n`` again by forward differences over the rotation vector.
+        """
+        if self.cov_x is None and self._solution is not None:
+            _gn_uncertainty(self)
+        return self
 
     def seed_points(self) -> np.ndarray:
         return deformed_seed_points(self.pose, self.params)
@@ -261,6 +296,61 @@ def _bowl_sign(P, A, pose, uv):
     return float(np.sum(np.sign(uv[:, 0]) * (aligned @ n)))
 
 
+_COV_RCOND = 1e-10              # pseudo-inverse cut on the scaled J^T J
+_FD_STEP = np.array([1e-6] * 3 + [1e-6] * 3 + [1e-7] * 2 + [1e-6])
+
+
+def _model_center_normal(x, R0, uv0):
+    """Mean predicted seed position and pose normal of solution vector x."""
+    R = R0 @ _rodrigues(x[:3])
+    pts, _tu = _sheet_and_tangent(uv0, x[6], x[7], x[8])
+    return (pts @ R.T).mean(axis=0) + x[3:6], R[:, 2]
+
+
+def _gn_uncertainty(fit: "DeformableFit") -> None:
+    """Gauss-Newton covariance of a bent-tile fit (see
+    :meth:`DeformableFit.compute_uncertainty`)."""
+    x, R0, uv0, jac, cost, m = fit._solution
+    J = np.asarray(jac, dtype=float)
+    p = J.shape[1]
+    dof = int(m) - p
+    if dof <= 0 or not np.all(np.isfinite(J)):
+        return
+    s2 = 2.0 * float(cost) / dof
+    JtJ = J.T @ J
+    d = np.sqrt(np.clip(np.diag(JtJ), 0.0, None))
+    ok = d > 1e-12 * max(float(d.max()), 1e-300)
+    scale = np.zeros_like(d)
+    scale[ok] = 1.0 / d[ok]           # unidentifiable column -> variance 0
+    C = JtJ * scale[:, None] * scale[None, :]
+    w, V = np.linalg.eigh(C)
+    wmax = float(w.max())
+    if not np.isfinite(wmax) or wmax <= 0.0:
+        return
+    keep = w > _COV_RCOND * wmax
+    fit.cov_cond = float(wmax / max(float(w.min()), 1e-300)) \
+        if float(w.min()) > 0.0 else float("inf")
+    fit.cov_rank = int(keep.sum())
+    Cinv = (V[:, keep] / w[keep]) @ V[:, keep].T
+    cov = s2 * Cinv * scale[:, None] * scale[None, :]
+    cov = 0.5 * (cov + cov.T)
+    fit.cov_x = cov
+    # forward-difference Jacobians of the centre (9 evaluations) and of the
+    # normal (its 3 rotation columns are a subset of the same evaluations)
+    c0, n0 = _model_center_normal(x, R0, uv0)
+    Jc = np.zeros((3, p))
+    Jn = np.zeros((3, p))
+    for i in range(p):
+        xi = np.array(x, dtype=float)
+        xi[i] += _FD_STEP[i]
+        ci, ni = _model_center_normal(xi, R0, uv0)
+        Jc[:, i] = (ci - c0) / _FD_STEP[i]
+        Jn[:, i] = (ni - n0) / _FD_STEP[i]
+    fit.center_cov = Jc @ cov @ Jc.T
+    fit.normal_sigma_deg = float(np.degrees(np.sqrt(max(
+        0.0, float(np.trace(Jn @ cov @ Jn.T))))))
+
+
 def fit_deformable(seed_pts, seed_axes=None, kind: Optional[str] = None,
                    kappa_range=KAPPA_RANGE, w_axis=_W_AXIS_MM_PER_RAD,
                    w_bend=_W_BEND_MM_MM, hinge_starts=True) -> DeformableFit:
@@ -333,7 +423,7 @@ def fit_deformable(seed_pts, seed_axes=None, kind: Optional[str] = None,
             return
         n_evals += int(sol.nfev)
         if best is None or sol.cost < best[0]:
-            best = (sol.cost, sol.x, R0, uv0)
+            best = (sol.cost, sol.x, R0, uv0, sol)
 
     for R0, uv0, kap in starts:
         _run(R0, uv0, kap)
@@ -343,7 +433,7 @@ def fit_deformable(seed_pts, seed_axes=None, kind: Optional[str] = None,
         for R0, uv0, kap in hinges:
             _run(R0, uv0, kap)
 
-    _cost, x, R0, uv0 = best
+    _cost, x, R0, uv0, sol = best
     R, t, params = _unpack(x, R0)
     pose = TilePose6(R, t, kind, 1.0)
     pts, tu = _sheet_and_tangent(uv0, params.kappa1, params.kappa2, params.psi)
@@ -360,4 +450,8 @@ def fit_deformable(seed_pts, seed_axes=None, kind: Optional[str] = None,
     return DeformableFit(pose=pose, params=params,
                          rms_mm=float(np.sqrt(np.mean(res ** 2))),
                          residuals_mm=res, axis_err_deg=aerr,
-                         assignment=assignment, n_evals=n_evals)
+                         assignment=assignment, n_evals=n_evals,
+                         # what compute_uncertainty() linearises (stage 6)
+                         _solution=(np.array(x, dtype=float), R0, uv0,
+                                    sol.jac, float(sol.cost),
+                                    int(np.size(sol.fun))))
