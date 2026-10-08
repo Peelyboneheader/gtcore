@@ -128,8 +128,8 @@ from .fit import (
 )
 from .model import fit_rigid
 
-__all__ = ["LAMBDA_FULL", "LAMBDA_HALF", "LAMBDA_COVER", "ScorePoint",
-           "AutoFitResult", "ImplantPrior", "fit_tiles_auto",
+__all__ = ["LAMBDA_FULL", "LAMBDA_HALF", "LAMBDA_COVER", "AMBIGUOUS_MARGIN",
+           "ScorePoint", "AutoFitResult", "ImplantPrior", "fit_tiles_auto",
            "fit_tiles_prior", "spacing_tolerance", "deformable_score",
            "to_placed_tiles"]
 
@@ -142,6 +142,16 @@ DEF_E_FREE = 0.02               # bending energy (1/mm^2) with no penalty
 DEF_W_E = 30.0                  # score per unit of bending energy beyond it
 DEF_AXIS_SOFT_DEG = 15.0
 DEF_W_AXIS = 2.0                # per radian beyond the soft angle
+
+# Partition margin (plan-localization stage 6): a selected tile whose best
+# same-count alternative scores within this of the chosen configuration is
+# flagged ambiguous.  The bent-tile score falls by DEF_W_RMS = 2 per mm of
+# seed RMS, so 1.0 score unit = 0.5 mm of bent-tile RMS on ONE tile: two
+# groupings closer than that differ by less than the per-tile residual
+# spread of real tiles (printed phantom 0.26-0.87 mm), i.e. the seed cloud
+# does not decide between them.  Same number on the counted chord path,
+# where W_RESIDUAL = 1.5/mm makes it ~0.67 mm of chord RMS.
+AMBIGUOUS_MARGIN = 0.5 * DEF_W_RMS
 
 # admission of quads that fail the standard chord gates (crumpled tiles)
 LOOSE_CHORD_MM = (3.5, 16.5)
@@ -273,6 +283,7 @@ class AutoFitResult(TileFitResult):
     clutter_indices: List[int] = field(default_factory=list)     # far away
     spacing_tol: float = 1.0
     capped: bool = False            # the exact search hit its node cap
+    score_rule: str = "deformable"  # bent-tile scores (chord: deformable=False)
     n_requested: Optional[int] = None  # OR count when one was given
     prior: Optional["ImplantPrior"] = None
 
@@ -421,6 +432,27 @@ def _fit_axes(seed_cov, tol):
     """Whether bent-tile fits carry the axis term (module docstring): always
     without seed_cov (historical), else only where axes are reliable."""
     return seed_cov is None or tol <= AXES_RELIABLE_DZ_MM
+
+def _per_count_margins(items, chosen, n_sel, best_n_sel):
+    """Partition margin of every selected item (plan-localization stage 6):
+    re-run the per-count search with that one item removed (its seeds stay
+    available to every other grouping) and compare the best total at the
+    SAME count ``n_sel``.  ``inf`` when no other grouping of ``n_sel``
+    tiles exists.  Returns ``({pos: (margin, alt positions or None)},
+    capped)``."""
+    out, capped = {}, False
+    for p in chosen:
+        keep = [j for j in range(len(items)) if j != p]
+        sel = _PerCountSelector([(items[j][0], items[j][1], items[j][2])
+                                 for j in keep], n_sel)
+        best, sets = sel.run()
+        capped |= sel.capped
+        if not np.isfinite(best[n_sel]):
+            out[p] = (float("inf"), None)
+        else:
+            out[p] = (float(best_n_sel - best[n_sel]),
+                      [keep[j] for j in sets[n_sel]])
+    return out, capped
 
 
 # ------------------------------------------------------- deformable tier
@@ -724,7 +756,7 @@ def fit_tiles_auto(centers_ras, axes_ras, cavity_center_ras=None,
                    lambda_half=LAMBDA_HALF, max_tiles=None,
                    deformable=True, mesh=None, spacing_mm=None,
                    cover=True, lambda_cover=LAMBDA_COVER,
-                   seed_cov=None) -> AutoFitResult:
+                   seed_cov=None, margins=False) -> AutoFitResult:
     """Infer the tile configuration from the seed cloud alone.
 
     Parameters
@@ -763,6 +795,14 @@ def fit_tiles_auto(centers_ras, axes_ras, cavity_center_ras=None,
         Per-candidate position covariance (mm^2, indexed like
         ``centers_ras``).  Forwarded to every bent-tile fit (hierarchical
         weighting, module docstring); ``None`` = unweighted (historical).
+    margins : bool
+        Partition margins (plan-localization stage 6): for every selected
+        tile, re-run the per-count search without it at the chosen count;
+        ``partition_margins[tile_id]`` = best total minus the best total
+        without that tile (``inf`` when no other grouping of that count
+        exists), ``partition_alternatives[tile_id]`` = that alternative's
+        seed groups, ``ambiguous_tiles`` = margin < :data:`AMBIGUOUS_MARGIN`.
+        One extra selector run per tile; default off.
 
     Returns
     -------
@@ -790,7 +830,8 @@ def fit_tiles_auto(centers_ras, axes_ras, cavity_center_ras=None,
     tol = spacing_tolerance(spacing_mm)
     fit_axes = _fit_axes(seed_cov, tol)
     result = AutoFitResult(lambda_full=float(lambda_full),
-                           lambda_half=float(lambda_half), spacing_tol=tol)
+                           lambda_half=float(lambda_half), spacing_tol=tol,
+                           score_rule="deformable" if deformable else "chord")
     result.score_curve = [ScorePoint(0, 0.0, 0.0, 0.0, 0, 0)]
     result.rejected_indices = list(range(n))
     result.clutter_indices = list(range(n))
@@ -839,6 +880,8 @@ def fit_tiles_auto(centers_ras, axes_ras, cavity_center_ras=None,
         result.half_candidates = sorted(
             [(s, idx) for s, idx, _r in leftover_pairs],
             key=lambda p: (-p[0], p[1]))
+        if margins:
+            result.partition_margins, result.partition_alternatives = {}, {}
         return result  # no supported tile -> no implant region to cover
 
     n_max = min(n_max, len(items))
@@ -870,6 +913,7 @@ def fit_tiles_auto(centers_ras, axes_ras, cavity_center_ras=None,
 
     tiles = []
     assigned = set()
+    tile_of = {}
     for kind in ("full", "half"):
         for i in chosen:
             s, _fs, _pen, k, idx, payload, degraded = items[i]
@@ -884,9 +928,22 @@ def fit_tiles_auto(centers_ras, axes_ras, cavity_center_ras=None,
             else:
                 pose = _half_pose(len(tiles), idx, centers, axes, payload,
                                   cavity_center)
+            tile_of[i] = pose.tile_id
             tiles.append(pose)
             assigned.update(idx)
     result.tiles = tiles
+    if margins:
+        per_item, c2 = _per_count_margins(items, chosen, n_sel, best[n_sel])
+        result.capped = result.capped or c2
+        result.partition_margins, result.partition_alternatives = {}, {}
+        for i, (margin, alt) in per_item.items():
+            tid = tile_of[i]
+            result.partition_margins[tid] = margin
+            result.partition_alternatives[tid] = None if alt is None else \
+                sorted(tuple(int(v) for v in items[j][4]) for j in alt)
+            if margin < AMBIGUOUS_MARGIN:
+                result.ambiguous_tiles.append(tid)
+        result.ambiguous_tiles.sort()
     result.rejected_indices = [i for i in range(n) if i not in assigned]
     result.half_candidates = sorted(
         [(s, idx) for s, idx, _r in leftover_pairs
@@ -923,6 +980,13 @@ def _finish(result, centers, axes, dist, assigned, cavity_center, mesh,
         near, far = _split_leftovers(centers, leftovers, tile_centers)
     result.unassigned_indices = near
     result.clutter_indices = far
+    # pose uncertainty (plan-localization stage 6) for the reported tiles
+    # only -- never inside the search.  A triplet-completed tile is skipped:
+    # its 4th "seed" was placed ON the model, so s^2 and J^T J would both be
+    # optimistic.
+    for pose in result.all_tiles:
+        if pose.deform is not None and pose.inferred_seed_ras is None:
+            pose.deform.compute_uncertainty()
     if mesh is not None and len(getattr(mesh, "faces", [])) > 0:
         from .surface import fit_on_surface
 
@@ -943,15 +1007,18 @@ def _finish(result, centers, axes, dist, assigned, cavity_center, mesh,
 def fit_tiles_prior(centers_ras, axes_ras, prior: ImplantPrior,
                     cavity_center_ras=None, mesh=None, spacing_mm=None,
                     cover=True, lambda_cover=LAMBDA_COVER,
-                    complete_degraded=True, seed_cov=None) -> AutoFitResult:
+                    complete_degraded=True, seed_cov=None, margins=False) -> AutoFitResult:
     """Tile inference driven by what the OR team knows (:class:`ImplantPrior`).
 
     * count known -> the count-constrained exact fit
-      (:func:`gtcore.tiles.fit.fit_tiles`, degraded completion on), then --
-      only if it fell short of the count -- the cover pass on the leftovers
-      inside the implant region, capped at the shortfall;
+      (:func:`gtcore.tiles.fit.fit_tiles`, degraded completion on) scored
+      with the bent-tile rule auto mode uses (``score="deformable"``,
+      plan-localization stage 4), then -- only if it fell short of the
+      count -- the cover pass on the leftovers inside the implant region,
+      capped at the shortfall;
     * count unknown -> :func:`fit_tiles_auto` (no half tiles, cover pass).
 
+    ``margins`` forwards to either path (partition margins, stage 6).
     Always returns an :class:`AutoFitResult` so callers read one shape.
     ``seed_cov`` (``(N, 3, 3)``, optional) is forwarded to every bent-tile
     fit, as in :func:`fit_tiles_auto`; the counted selection itself
@@ -962,7 +1029,7 @@ def fit_tiles_prior(centers_ras, axes_ras, prior: ImplantPrior,
                              cavity_center_ras=cavity_center_ras,
                              allow_half=False, mesh=mesh, spacing_mm=spacing_mm,
                              cover=cover, lambda_cover=lambda_cover,
-                             seed_cov=seed_cov)
+                             seed_cov=seed_cov, margins=margins)
         res.prior = prior
         return res
 
@@ -976,10 +1043,16 @@ def fit_tiles_prior(centers_ras, axes_ras, prior: ImplantPrior,
     seed_cov = _check_seed_cov(seed_cov, centers.shape[0])
     counted = fit_tiles(centers, axes, prior.n_full, prior.n_half,
                         cavity_center_ras=cavity_center,
-                        complete_degraded=complete_degraded)
+                        complete_degraded=complete_degraded,
+                        score="deformable", margins=margins)
     tol = spacing_tolerance(spacing_mm)
     result = AutoFitResult(spacing_tol=tol, auto=False, prior=prior,
-                           n_requested=int(prior.n_full))
+                           n_requested=int(prior.n_full),
+                           capped=counted.capped,
+                           score_rule=counted.score_rule,
+                           partition_margins=counted.partition_margins,
+                           partition_alternatives=counted.partition_alternatives,
+                           ambiguous_tiles=list(counted.ambiguous_tiles))
     result.tiles = list(counted.tiles)
     for pose in result.tiles:
         if pose.deform is None and pose.kind == "full":
