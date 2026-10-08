@@ -125,6 +125,7 @@ class DeformableFit:
     # whitening, mm along the best-determined direction) and r_i' C_i^-1 r_i
     weighted_residuals_mm: Optional[np.ndarray] = None
     mahalanobis_sq: Optional[np.ndarray] = None
+    axes_fitted: bool = True        # False: positions-only fit (no axis term)
     n_evals: int = 0
     # Gauss-Newton uncertainty (plan-localization stage 6), filled by
     # compute_uncertainty() -- lazily, so the per-quad cost of the
@@ -443,7 +444,8 @@ def _gn_uncertainty(fit: "DeformableFit") -> None:
 def fit_deformable(seed_pts, seed_axes=None, kind: Optional[str] = None,
                    kappa_range=KAPPA_RANGE, w_axis=_W_AXIS_MM_PER_RAD,
                    w_bend=_W_BEND_MM_MM, hinge_starts=True,
-                   seed_cov=None, slack_mm=SLACK_MM) -> DeformableFit:
+                   seed_cov=None, slack_mm=SLACK_MM,
+                   use_axes=True) -> DeformableFit:
     """Fit the bent-tile model to 4 observed seeds (2 -> rigid fallback).
 
     Returns the best of several starts by total cost; ``rms_mm`` is the
@@ -456,10 +458,18 @@ def fit_deformable(seed_pts, seed_axes=None, kind: Optional[str] = None,
     ``chi_rms`` then report the weighted residual.  The correspondence and
     the starts still come from the unweighted similarity fit.  ``None``
     (default) is bit-identical to the unweighted fit.
+
+    ``use_axes=False`` fits positions only, exactly as ``seed_axes=None``
+    (no axis residual term, no axis evidence in the correspondence or the
+    bowl/dome start, ``axis_err_deg = 0``): the caller's rule for scans
+    whose per-seed PCA axes are degenerate
+    (:data:`gtcore.tiles.auto.AXES_RELIABLE_DZ_MM`,
+    :data:`gtcore.tiles.auto.DROP_AXIS_TERM_ON_COARSE`).  ``axes_fitted``
+    on the result says which fit was done.
     """
     P = np.asarray(seed_pts, dtype=float).reshape(-1, 3)
     k = P.shape[0]
-    A = None if seed_axes is None else _unit_rows(seed_axes)
+    A = None if (seed_axes is None or not use_axes) else _unit_rows(seed_axes)
     W = C_inv = None
     if seed_cov is not None:
         seed_cov = np.asarray(seed_cov, dtype=float)
@@ -479,6 +489,7 @@ def fit_deformable(seed_pts, seed_axes=None, kind: Optional[str] = None,
                              rms_mm=float(np.sqrt(np.mean(res ** 2))),
                              residuals_mm=res, axis_err_deg=rigid.axis_err_deg,
                              assignment=rigid.assignment,
+                             axes_fitted=A is not None,
                              **_weighted_stats(d, W, C_inv))
 
     uv = RigidTile(kind).seed_uv[list(rigid.assignment)]
@@ -558,6 +569,7 @@ def fit_deformable(seed_pts, seed_axes=None, kind: Optional[str] = None,
                          rms_mm=float(np.sqrt(np.mean(res ** 2))),
                          residuals_mm=res, axis_err_deg=aerr,
                          assignment=assignment, n_evals=n_evals,
+                         axes_fitted=A is not None,
                          **_weighted_stats(d, W, C_inv),
                          # what compute_uncertainty() linearises (stage 6)
                          _solution=(np.array(x, dtype=float), R0, uv0,
