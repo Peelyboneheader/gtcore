@@ -194,21 +194,26 @@ seeds at 2.8 mm (recall 0.92, partition 0/5).
 
 | Stage | Gate | Result | Commit | Shipped as |
 |---|---|---|---|---|
-| 2 | Head phantom: 2.1/2.8 mm mean >= 15 % better, 0.7 mm not worse by > 0.02 mm. Threshold sensitivity <= 0.1 mm and >= 2x smaller. NEES in [0.5, 2]. Recall unchanged. <= 5 ms/seed. Harness: G1 mean <= 0.8x, G2/G4 z RMS <= 0.85x | Head phantom: PASS (2.1 mm -56 %, 2.8 mm -42 %, 0.7 mm -26 %; worst seed +0.08 mm). Threshold: PASS (median 0.000-0.002 mm vs 0.035-0.373). NEES: PASS on supersampled seeds (0.75-1.34, 5 grids); FAIL in 3D on the binary head phantom (10^2-10^3, caused by its voxelized capsules, not the estimator); z NEES 0.59 / 0.69 at 2.1 / 2.8 mm. Recall: unchanged by construction. Runtime: 1.7-3.4 ms/seed. Harness G1-G4: PENDING (stand-in grids: G1 mean 0.11x, G2 z RMS 0.24x, G4 z RMS 0.34x) | 234f3e5, 7afa8c2 | `reconstruct(refine_seeds="centroid")`; default stays `None` until the harness gate runs |
+| 2 | G1 mean <= 0.8x; G2/G4 z RMS <= 0.85x; threshold sensitivity <= 0.1 mm and >= 2x smaller; NEES in [0.5, 2]; recall unchanged; <= 5 ms/seed; head phantom 2.1/2.8 mm mean >= 15 % better, 0.7 mm not worse by > 0.02 mm | Harness (rng 0-4, 200 seeds per grid and layout, sparse / crowded): G1 mean 0.13 -> 0.006 / 0.007 mm (0.05x) **PASS**. G2 z RMS 0.40 -> 0.24 / 0.42 -> 0.24 (0.60x / 0.57x) **PASS**; G4 z RMS 0.64 -> 0.34 / 0.64 -> 0.35 (0.53x / 0.55x) **PASS** (G3, not in the gate: 0.78 -> 0.58 / 0.68 -> 0.45). Threshold shift 0.09-0.52 -> 0.00 mm on every grid; head phantom median 0.035-0.373 -> 0.000-0.002 mm **PASS**. NEES G1 1.77 / 1.85, G2 1.63 / 1.75, G4 1.24 / 1.24 **PASS** (95 % ellipsoid coverage 0.76-0.90: heavier tails than Gaussian); G3 528 / 531 **FAIL** (gap-filled volume: in-plane error 0.31 mm RMS coupled to the slice gaps is not modelled); binary head phantom 3D **FAIL** (its voxel-painted capsules; z NEES 0.59 / 0.69 at 2.1 / 2.8 mm). Recall identical **PASS**. 1.7-3.0 ms/seed **PASS**. Head phantom 2.1 / 2.8 mm: binary 0.50 -> 0.22 (-56 %), 0.70 -> 0.41 (-41 %); analytic 0.54 -> 0.14 (-74 %), 0.74 -> 0.39 (-47 %) **PASS**. 0.7 mm: binary 0.20 -> 0.15, worst seed +0.08 mm; analytic 0.10 -> 0.04, worst seed +0.000 mm **PASS**. Tile partition (not a stage-2 criterion): binary 2/5 -> 3/5 at 2.1 and 2.8 mm, analytic 2.8 mm 0/5 -> 1/5, never worse. Real-data proxies: not run on this branch | 234f3e5, 7afa8c2, f00ccea | `reconstruct(refine_seeds="centroid")`, default `None`: every plan criterion passes except NEES on G3; switching the default is the coordinator's call after the real-data proxies |
 | 5 — hierarchical WLS + posterior seeds | identical fit without covariance; head phantom 2.1 / 2.8 mm mean 3D error ≥ 15 % below raw; tile centre / normal not worse; 2.8 mm partition ≥ 3/5; posterior NEES in [0.5, 2]; stable across slack 0.1–0.5 mm | **PENDING-COVARIANCE** (stand-in: analytic slab covariance). Identity: bit-identical (max diff 0.0 over 288 fits vs 3cf35af; frozen reference in the tests) ✓. 2.1 mm: −0.3 % ✗. 2.8 mm: −15.2 % (borderline ✓). Centre unchanged; normal 3.77→2.66° (2.1) and 6.44→2.85° (2.8) ✓. Partition 2.8 mm 5/5 (raw also 5/5); 2.1 mm 2/5, same as raw (split-fragment detections). NEES conditional 2.02 / 3.00 ✗, PEV 1.25 / 1.76 ✓ (input covariance itself 1.19 / 1.86). Slack sweep: 2.1 / 2.8 mm within 2.5 % ✓; 0.7 mm at slack 0.1 is 16 % worse than raw ✗ | b09cb39 | opt-in `reconstruct(fuse_tiles=True)`, default off |
 | 4 | counted = automatic partition on every auto test case | **PASS** 30/30 synthetic layouts (rng 0–5 × 1–5 tiles, truth seeds), counted (deformable) = auto = truth; `capped` False on all 30 and True on the constructed lattice with a 20-node cap. Printed phantom: counted (deformable) = auto on all 8 tiles; counted chord differs on the 25/31 pair | d81b45d | `fit_tiles(score="deformable")` opt-in; `fit_tiles_prior` (planner) uses it; `fit_tiles` default and `assess_implant` / `reconstruct` stay `"chord"` |
 | 6 | margins > 2 on clean cases; constructed shared-seed case < 1 and flagged; normal σ grows with seed noise; centre covariance within 2× of the empirical scatter; planner cost < 0.5 s | **PASS** clean margins all `inf` (no same-count alternative); shared-seed case 4·10⁻⁶, flagged; normal σ 0.1 < 0.3 < 0.6 mm monotone; centre-covariance ratio 1.13–1.32 when every residual row carries the same noise (0.45–0.53 with noise-free axes, 3.8–4.1 with 10° axis noise, see below); margins 2–4 ms + uncertainty 6 ms on the printed phantom. Printed 25/31 pair: margin 1.87 under the bent-tile score → **not** flagged (0.27, flagged, under the chord score) | d81b45d | `margins=False` opt-in on `fit_tiles` / `fit_tiles_auto` / `fit_tiles_prior`; planner suggest calls `margins=True`; `DeformableFit.compute_uncertainty()` lazy, run for reported tiles in `_finish` |
 
 ## Stage 2 — grey-level centroid + analytic covariance (branch loc/refine)
 
-Code at 7afa8c2 (stage 2 is 234f3e5; 7afa8c2 checks the shift trust region inside the
-iteration and adds `scripts/sweep_seed_refine.py`; every number below is from 7afa8c2).
+Code: stage 2 is 234f3e5; 7afa8c2 checks the shift trust region inside the
+iteration and adds `scripts/sweep_seed_refine.py`; f00ccea (after merging
+`loc/integration` 4d3f833 / c071f1a, the stage-0 harness) adds the
+interpolated-slice rule, the close-neighbour fallback, ROI-only truncation
+and keeps the detection axes. The head-phantom and analytic-grid tables
+below are identical at 7afa8c2 and f00ccea (rerun, diffed); the harness
+tables and the threshold table are from f00ccea.
 `gtcore/seeds/refine.py`: `estimate_saturation`, `seed_roi`, `grey_centroid`,
 `refine_seed_candidates(vol, cands, method="centroid", max_shift_mm=1.5,
 psf_sigma_mm=0.45)`; `pipeline.reconstruct(..., refine_seeds=None)` refines
 on the RAW volume after the vault filter and the threshold search, before the
 implant assessment, and logs per-seed status in `vol.meta["seed_refine"]`.
-Tests: `tests/test_seeds_refine.py` (19 tests, ~9 s).
+Tests: `tests/test_seeds_refine.py` (23 tests, ~10 s).
 
 Commands (every table below):
 
@@ -353,15 +358,16 @@ Notes on this table:
 | Slices | Seeds (both refined ok) | Detection median / P90 (mm) | Refined median / P90 | Refined <= 0.1 mm |
 |---|---|---|---|---|
 | 0.7 | 60 (52) | 0.035 / 0.094 | 0.000 / 0.046 | 97 % |
-| 1.4 | 58 (50) | 0.244 / 0.577 | 0.000 / 0.207 | 86 % |
-| 2.1 | 43 (33) | 0.335 / 0.988 | 0.001 / 1.006 | 63 % |
-| 2.8 | 28 (20) | 0.373 / 0.903 | 0.002 / 0.890 | 68 % |
+| 1.4 | 58 (49) | 0.244 / 0.577 | 0.000 / 0.207 | 86 % |
+| 2.1 | 43 (25) | 0.335 / 0.988 | 0.001 / 1.113 | 63 % |
+| 2.8 | 28 (19) | 0.373 / 0.903 | 0.002 / 0.890 | 68 % |
 
-Pairs where both thresholds refined OK agree to <= 0.001 mm, with one
-exception. At 2000 HU a coarse-slice seed can split into fragments
-(0.7-1.0 mm^3). The Voronoi cut then halves the seed, and each fragment
-refines toward its own half (up to 1.6 mm). That is the stage-3 duplicate
-problem, and refinement does not repair it.
+At 2000 HU a coarse-slice seed can split into fragments (0.7-1.0 mm^3,
+2.5-3 mm apart). Before f00ccea the Voronoi cut halved such a seed and each
+fragment refined toward its own half (up to 1.6 mm apart); since f00ccea
+two candidates closer than one seed length (4.5 mm) both keep their
+detections (`fallback:close_neighbour`), which is why fewer pairs are "both
+ok" at 1.4-2.8 mm. Merging the fragments is stage 3's job.
 
 ### Supersampled seeds (calibration), 72 random seeds per grid, 20 HU noise
 
@@ -405,11 +411,93 @@ stage-0 harness renderer.
 The phantom's true blur is 0.45 mm. The estimate is insensitive to the
 assumed PSF; the covariance's z term follows it, as it should.
 
+### Stage-0 harness and the merged follow-ups (f00ccea)
+
+Commands (clean tree at f00ccea; outputs under `output/`):
+
+    python scripts/validation_seed_localization.py --methods baseline,centroid --tag s2_centroid
+    python scripts/validation_spacing.py --refine none|centroid --seed-render binary|analytic --realizations 5
+
+Changes forced by the harness, each measured:
+
+1. **Interpolated gap slices** (`vol.meta["interpolated_k"]`): kept in the
+   centroid; the through-slice variance becomes the uniform-slab
+   `s_k^2/12` whenever the window touches one. Excluding them was tried
+   first. On G3 (1 mm slabs at irregular steps re-gridded at 2 mm),
+   excluding left 3D error 0.83 / 0.72 mm (detection 0.86 / 0.78, sparse /
+   crowded) with 46 % fallbacks. Keeping them gave 0.54 / 0.49 mm.
+   - Why keeping is right: linear interpolation hands each measured slice
+     to its two bracketing grid slices with weights summing to 1 and
+     positions averaging to its true z. The blend therefore preserves the
+     first moment of the measured data.
+   - On a loader grid, whole runs of grid slices are interpolated whenever
+     the measured slices sit between grid positions; excluding those runs
+     removes the seed.
+   - An axis-correlated in-plane term (z error moving the centroid along a
+     tilted seed) did not reduce G3's NEES and was not kept.
+2. **Close candidates**: another candidate within one seed length (4.5 mm)
+   means `fallback:close_neighbour`. On G2, the 14 seeds per 187 with a
+   second detection 2.5-3.0 mm away (threshold-split fragments) had refined
+   errors of 0.9-1.2 mm with an in-plane sd of 0.01 mm. That gave NEES
+   73 / 92; after the fix it is 1.63 / 1.75.
+3. **Truncation**: only the ROI leaving the volume triggers the fallback.
+   Before, a shell cut by the harness volume edge (seeds 8 mm from it)
+   dropped 22 of 187 G2 seeds.
+4. **Axes**: `axes_ras` keeps the detection axes by default
+   (`update_axes=True` replaces them; the grey-level axis is always in
+   `info["refine_axis_ras"]`).
+   - The grey axis is the more accurate one. Median error on the binary
+     head phantom: 2.9 / 3.7 / 8.9 / 12.7 deg vs 3.2 / 8.7 / 16.4 / 23.9 for
+     detection. On the analytic phantom: 0.1 / 0.6 / 6.8 / 10.1 vs
+     2.9 / 10.7 / 13.6 / 23.9.
+   - Handing the grey axes to the tile fitter, whose gates and scores were
+     calibrated on detection axes, lost one correct partition in five at
+     2.8 mm (binary) and at 2.1 mm (analytic).
+   - Refined centres with detection axes instead gain partitions (see
+     below). Re-tuning the fitter is outside this stage.
+
+Harness, baseline -> centroid (sparse / crowded):
+
+| Grid | Recall | 3D mean (mm) | P95 | RMS i / j / k after | z RMS before -> after | NEES (in 95 %) | thr shift | ms/seed |
+|---|---|---|---|---|---|---|---|---|
+| G1 0.59x0.59x1.0 (96 % saturated) | 1.00 / 1.00 | 0.13 -> 0.01 / 0.13 -> 0.01 | 0.37 -> 0.01 | 0.00 / 0.00 / 0.00 | 0.11 -> 0.00 / 0.12 -> 0.00 | 1.77 (0.76) / 1.85 (0.78) | 0.09 -> 0.00 | 2.6-3.0 |
+| G2 0.5x0.5x2.0 | 0.94 / 0.96 | 0.45 -> 0.13 / 0.47 -> 0.14 | 1.30 -> 1.19 | 0.16 / 0.17 / 0.24 | 0.40 -> 0.24 / 0.42 -> 0.24 | 1.63 (0.88) / 1.75 (0.89) | 0.39-0.52 -> 0.00 | 2.3-2.5 |
+| G3 PostOp-like gaps | 0.76 / 0.78 | 0.86 -> 0.54 / 0.78 -> 0.49 | 1.90 -> 1.88 | 0.31 / 0.34 / 0.58 | 0.78 -> 0.58 / 0.68 -> 0.45 | 528 (0.14) / 531 (0.13) | 0.21-0.28 -> 0.00 | 1.7-1.9 |
+| G4 0.7x0.7x2.8 | 0.91 / 0.85 | 0.68 -> 0.23 / 0.70 -> 0.23 | 1.42 -> 0.89 | 0.18 / 0.14 / 0.34 | 0.64 -> 0.34 / 0.64 -> 0.35 | 1.24 (0.90) / 1.24 (0.88) | 0.10-0.14 -> 0.00 | 1.8-2.0 |
+
+- The G2 / G4 P95 and max stay high because of the fallback seeds
+  (fragments, `close_neighbour`), which keep their detection error.
+- The in-plane RMS after refinement (0.14-0.18 mm on G2 / G4) comes from
+  those seeds as well: refined seeds alone are at 0.01-0.02 mm in-plane.
+- G3's NEES fails. Its in-plane errors (0.31 mm RMS, along and across the
+  axis) come from the gap geometry: slices snapped to the grid by the
+  loader within dz/4, and partial capture of tilted seeds. The covariance
+  does not model them. This is the PostOp case, so state it.
+
+Head phantom, `validation_spacing.py`, 5 realizations, adaptive detection,
+mean 3D error (mm) / z RMS / partition:
+
+| Slices | Binary: detection | Binary: centroid | Analytic: detection | Analytic: centroid |
+|---|---|---|---|---|
+| 0.7 | 0.20 / 0.09 / 5/5 | 0.15 / 0.07 / 5/5 | 0.10 / 0.06 / 5/5 | 0.04 / 0.04 / 5/5 |
+| 1.4 | 0.29 / 0.18 / 4/5 | 0.19 / 0.12 / 4/5 | 0.34 / 0.26 / 5/5 | 0.10 / 0.15 / 5/5 |
+| 2.1 | 0.50 / 0.39 / 2/5 | 0.22 / 0.19 / 3/5 | 0.54 / 0.49 / 3/5 | 0.14 / 0.17 / 3/5 |
+| 2.8 | 0.70 / 0.62 / 2/5 | 0.41 / 0.42 / 3/5 | 0.74 / 0.72 / 0/5 | 0.39 / 0.47 / 1/5 |
+
+- Analytic worst seed vs detection: +0.000 / +0.000 / +0.000 / +0.009 mm.
+- Analytic fallbacks: 8 / 10 / 11 / 15 of 60 / 60 / 58 / 55. Mostly
+  air-level seeds (`no_signal`, `background`), plus 1-3 split fragments
+  (`close_neighbour`).
+- The thin-slice gate holds on both renderings.
+
 ### Limitations to disclose
 
 - Seeds at an air-fluid level or a bone edge fall back to the detected
   centre (no gain, no loss); the fallback rate on real scans is unknown.
-- Split-blob duplicates (stage 3) are refined as separate seeds.
+- Split-blob duplicates (stage 3) keep their detections
+  (`close_neighbour`); two genuine seeds closer than 4.5 mm do too.
+- Gap-filled (PostOp-like) volumes: accuracy improves, covariance is not
+  calibrated (G3 NEES ~530).
 - The covariance assumes white noise. Real CT noise is spatially
   correlated, which makes the noise term optimistic; the sampling term is
   unaffected.
@@ -904,6 +992,13 @@ positives.
 | 2026-10-08 | `python scripts/sweep_seed_refine.py --part threshold` | rng 0-4 | 7afa8c2 | ~15 s |
 | 2026-10-08 | `python scripts/sweep_seed_refine.py --part analytic` | layout rng 1, noise rng 2 | 7afa8c2 | ~15 s |
 | 2026-10-08 | `python -m pytest tests/test_seeds_refine.py -s` | rng 0-2 | 7afa8c2 | 9 s |
+| 2026-10-08 | `python scripts/validation_seed_localization.py --methods baseline,centroid --tag s2_centroid` | layout rng 0-4 x 40 x sparse/crowded x G1-G4 | f00ccea | 31 s |
+| 2026-10-08 | `python scripts/validation_spacing.py --refine none --seed-render binary --realizations 5` | phantom rng 0-4 | f00ccea | 11 s |
+| 2026-10-08 | `python scripts/validation_spacing.py --refine centroid --seed-render binary --realizations 5` | phantom rng 0-4 | f00ccea | 12 s |
+| 2026-10-08 | `python scripts/validation_spacing.py --refine none --seed-render analytic --realizations 5` | phantom rng 0-4 | f00ccea | 11 s |
+| 2026-10-08 | `python scripts/validation_spacing.py --refine centroid --seed-render analytic --realizations 5` | phantom rng 0-4 | f00ccea | 12 s |
+| 2026-10-08 | `python scripts/sweep_seed_refine.py --part all` | rng 0-4 | f00ccea | ~60 s |
+| 2026-10-08 | `python -m pytest tests/test_seeds_refine.py` (23 tests) + `tests/test_seeds_unit.py tests/test_integration.py tests/test_localization_plumbing.py` (17) | fixed | f00ccea | 10 s + 13 s |
 | 2026-10-08 | `python scripts/validation_fuse.py --mc --csv ...` (stage 5, stand-in covariance) | phantom rng 0-4; MC rng 0 | b09cb39 | 166 s |
 | 2026-10-08 | `pytest tests/test_tiles_fuse.py` (13 tests) + `tests/test_tiles*.py tests/test_localization_plumbing.py` | fixed | b09cb39 | 17 s; 151 passed in 147 s |
 
