@@ -190,6 +190,10 @@ class TileFitResult:
     partition_margins: Optional[Dict[int, float]] = None
     partition_alternatives: Optional[Dict[int, List[Tuple[int, ...]]]] = None
     ambiguous_tiles: List[int] = field(default_factory=list)  # margin < 1
+    # plan-localization stage 8 (gtcore.tiles.verify): tile_id -> image
+    # evidence at an inferred 4th seed ("recovered" / "no image evidence");
+    # None until verify_inferred_seeds() ran, {} when nothing was inferred
+    verification: Optional[Dict[int, dict]] = None
 
 
 # ------------------------------------------------------------------ helpers

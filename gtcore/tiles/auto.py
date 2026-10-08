@@ -322,6 +322,12 @@ class AutoFitResult(TileFitResult):
         if self.n_inferred_seeds:
             extra.append("%d inferred seed%s" % (
                 self.n_inferred_seeds, "" if self.n_inferred_seeds == 1 else "s"))
+            ver = getattr(self, "verification", None)
+            if ver:
+                n_rec = sum(1 for r in ver.values()
+                            if r.get("status") == "recovered")
+                extra.append("image check: %d recovered, %d without evidence"
+                             % (n_rec, len(ver) - n_rec))
         if self.unassigned_indices:
             extra.append("%d seed%s unassigned" % (
                 len(self.unassigned_indices),

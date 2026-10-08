@@ -267,6 +267,12 @@ def reconstruct(vol: Volume, verbose: bool = True,
     signal being measured), and before the implant assessment, so every
     consumer downstream sees the refined centres.  Per-seed status
     ("ok" / "fallback:<reason>") is logged in ``vol.meta["seed_refine"]``.
+    With ``refine_seeds`` set and tiles fitted, every inferred 4th seed of a
+    tentative tile is also checked against the raw image
+    (:func:`gtcore.tiles.verify.verify_inferred_seeds`, plan stage 8):
+    ``tiles.verification`` and ``vol.meta["seed_verify"]`` record
+    "recovered" (with the grey-centroid position) or "no image evidence";
+    the tile stays tentative either way.
 
     ``fuse_tiles=True`` (plan stage 5, opt-in) needs fitted tiles AND a
     per-seed covariance (``seeds.cov_ras``, from the seed refinement of
@@ -577,6 +583,24 @@ def reconstruct(vol: Volume, verbose: bool = True,
                          if finfo["n_fused"] else 0.0,
                          float(finfo["shift_mm"].max()) if len(post) else 0.0,
                          finfo["n_passthrough"]))
+    if refine_seeds is not None and tiles is not None:
+        # stage 8: image evidence at inferred seeds, on the RAW volume (the
+        # inpainted one has exactly that signal removed); the candidates
+        # passed are the detections, not the fused posteriors
+        from .tiles.verify import verification_summary, verify_inferred_seeds
+
+        det = meta.get("seeds_unfused", seeds)
+        ver = stage("inferred-seed check",
+                    lambda: verify_inferred_seeds(tiles, vol, det))
+        vol.meta["seed_verify"] = verification_summary(ver)
+        meta["seed_verify"] = vol.meta["seed_verify"]
+        if verbose and ver:
+            for tid, r in ver.items():
+                extra_ = ""
+                if r["status"] == "recovered":
+                    extra_ = " (grey centroid %.2f mm from the inferred position, %s)" % (
+                        r["shift_mm"], r["refine_status"])
+                print("  inferred seed of tile %d: %s%s" % (tid, r["status"], extra_))
     if fuse_tiles:
         if fusion is None:
             fusion = dict(applied=False,

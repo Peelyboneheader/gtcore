@@ -21,6 +21,7 @@ from .deform import (
 from .fit import TileFitResult, TilePose, fit_tiles
 from .model import RigidFit, RigidTile, TilePose6, fit_rigid
 from .surface import SurfaceFit, fit_on_surface
+from .verify import verify_inferred_seeds
 
 __all__ = ["fit_tiles", "TilePose", "TileFitResult",
            "fit_tiles_auto", "fit_tiles_prior", "ImplantPrior",
@@ -29,4 +30,5 @@ __all__ = ["fit_tiles", "TilePose", "TileFitResult",
            "RigidTile", "TilePose6", "RigidFit", "fit_rigid",
            "DeformParams", "DeformableFit", "fit_deformable",
            "deformed_points", "deformed_seed_points", "deformed_footprint",
-           "deformed_surface_grid", "SurfaceFit", "fit_on_surface"]
+           "deformed_surface_grid", "SurfaceFit", "fit_on_surface",
+           "verify_inferred_seeds"]
