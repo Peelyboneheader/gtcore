@@ -70,7 +70,7 @@ Planner controls (the same legend is on screen; `?` collapses it):
    reach and clipped 3 mm beyond the seed sheet (the tile's tissue face), then
    closed by 3 mm and filled. On the first clinical CT the old
    "dark component the seeds touch" rule returned cavity + oedema + both
-   ventricles (193 cc); the sheet rule gives 41 cc against the physician's
+   ventricles (193 cc); the sheet rule gives 40 cc against the physician's
    35 cc contour (Dice 0.65) and 0.85 Dice on the synthetic phantom. The
    full validation against the TPS structure set and dose, including why the
    clinical CTV's 63 Gy D90 is a partial-rind figure, is in

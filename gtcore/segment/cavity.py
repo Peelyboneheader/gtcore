@@ -212,8 +212,9 @@ def _cavity_from_seed_sheet(vol, arr, low, interior, centers, reach_mm,
     # sit at the wall (1-3 mm either side of it), so a one-sided implant's
     # hull is a thin slab that need not itself contain cavity voxels
     pad_vox = max(1, int(round(tol_mm / float(np.min(spacing)))))
-    start = ndimage.binary_dilation(hull, iterations=pad_vox) & inside_sheet
-    grow_mask = (low_box | start) & inside_sheet
+    padded = ndimage.binary_dilation(hull, iterations=pad_vox) & low_box
+    start = (hull | padded) & inside_sheet
+    grow_mask = (low_box | hull) & inside_sheet
     iters = max(1, int(round(reach_mm / float(np.min(spacing)))))
     grown = ndimage.binary_dilation(start, iterations=iters, mask=grow_mask)
 

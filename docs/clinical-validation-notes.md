@@ -29,6 +29,15 @@ eloquent cortex), and that choice, not dosimetry, is what lifts the clinical
 D90 from 46 Gy to 64 Gy. An automatic HR-CTV that takes the whole rind must
 therefore be compared with the 46 Gy figure, not the 64 Gy one.
 
+Is `CTV_GT` "cavity + 5 mm clipped to the brain"? No: the 5 mm expansion of
+`Cav_Post` clipped to the TPS `Brain` contour is 35.4 cc and contains 99 % of
+`CTV_GT`, but `CTV_GT` fills only 53 % of it (Dice 0.69). The clinical target
+was trimmed by hand beyond any geometric rule, so no automatic expansion can
+reproduce it exactly; the geometric definition Jacob specified -- the cavity
+expanded by 5 mm -- is what `gtcore.dose.hrctv` builds, and its clinical
+counterpart is the full-rind row (4593 cGy), with `CTV_GT` as the upper
+reference.
+
 ## 2. Seed detection
 
 | | |
@@ -74,11 +83,10 @@ beyond the seed sheet, 3 mm closing) gives:
 
 | reach | phantom Dice | clinical cavity | Dice vs `Cav_Post` | covers / inside |
 |---|---|---|---|---|
-| 10 mm | 0.759 | 35.4 cc | 0.698 | 70 % / 70 % |
-| 12 mm | 0.808 | 38.3 cc | 0.676 | 71 % / 65 % |
-| **14 mm** (default) | **0.851** | **41.0 cc** | **0.652** | 71 % / 61 % |
-| 16 mm | 0.886 | 43.9 cc | 0.630 | 71 % / 57 % |
-| 20 mm | 0.924 | 49.4 cc | 0.589 | 71 % / 50 % |
+| 12 mm | 0.808 | 37.7 cc | 0.677 | 70 % / 65 % |
+| **14 mm** (default) | **0.851** | **40.5 cc** | **0.654** | 70 % / 61 % |
+| 16 mm | 0.886 | 43.4 cc | 0.632 | 71 % / 57 % |
+| 20 mm | 0.924 | 48.8 cc | 0.590 | 71 % / 51 % |
 
 Coverage of the physician's cavity saturates at 71 % whatever the reach: the
 remaining 29 % is cavity content above the fluid threshold (clot, debris)
@@ -86,11 +94,11 @@ that the physician contoured across and the intensity rule cannot. Growth
 beyond ~12 mm only adds oedema. 14 mm balances this case against the
 synthetic phantom (one-sided implant, whose far wall needs the reach).
 
-HR-CTV (5 mm rind of the gtcore cavity, `gtcore.dose.hrctv`, 49 cc at reach
-14) under the clinical RTDOSE: D90 **2848 cGy**, V100 37 %. The full rind of
+HR-CTV (5 mm rind of the gtcore cavity, `gtcore.dose.hrctv`, 49.9 cc at
+reach 14) under the clinical RTDOSE: D90 **2863 cGy**, V100 38 %. The full rind of
 the physician's own cavity gets 4593 cGy / 66 % from the same dose, so about
 two thirds of the gap to `CTV_GT` is the partial-rind definition and one
-third is our cavity being 6 cc too big and 10 cc misplaced. Open items, in
+third is our cavity being 5 cc too big and 10 cc misplaced. Open items, in
 order of value:
 
 1. Let the HR-CTV follow the clinical convention: score only the rind
