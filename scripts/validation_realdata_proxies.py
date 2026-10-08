@@ -498,6 +498,7 @@ def split_half(ctx, vol, ref_centers):
             ax: dict(bias=float(bias[a]), sd=float(sd[a]),
                      loa_lo=float(bias[a] - 1.96 * sd[a]),
                      loa_hi=float(bias[a] + 1.96 * sd[a]),
+                     median_abs=float(np.median(np.abs(d[:, a]))),
                      precision=float(np.sqrt((d[:, a] ** 2).mean())
                                      / np.sqrt(2.0)))
             for a, ax in enumerate("ijk")}
@@ -721,11 +722,13 @@ def to_markdown(rep, header):
             L += ["", "Odd − even, %d seeds found in both halves:"
                   % s["n_pairs"], "",
                   "| axis | Bland–Altman bias (mm) | SD | 95 % LoA (mm) "
-                  "| disagreement/√2 (mm) |", "|---|---|---|---|---|"]
+                  "| disagreement/√2 (mm) | median abs diff (mm) |",
+                  "|---|---|---|---|---|---|"]
             for ax, b in s["bland_altman"].items():
-                L.append("| %s | %s | %s | %s to %s | %s |" % (
+                L.append("| %s | %s | %s | %s to %s | %s | %s |" % (
                     ax, fmt(b["bias"], 3), fmt(b["sd"], 3), fmt(b["loa_lo"]),
-                    fmt(b["loa_hi"]), fmt(b["precision"], 3)))
+                    fmt(b["loa_hi"]), fmt(b["precision"], 3),
+                    fmt(b["median_abs"], 3)))
             L.append("")
             L.append("3-D |odd − even|: mean %s mm, P95 %s mm; 3-D "
                      "disagreement/√2 = %s mm."

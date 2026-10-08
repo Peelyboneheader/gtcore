@@ -140,6 +140,8 @@ def seed_errors(t, est, prefix):
         for k in ("err_mean", "err_sd", "err_p95", "err_max", "z_bias",
                   "z_rms", "xy_rms"):
             out[prefix + k] = np.nan
+        out["_E" if not prefix else "_E_" + prefix.rstrip("_")] = \
+            np.zeros((0, 3))
         return out, (r, c)
     E = est[c] - t[r]
     e3 = np.linalg.norm(E, axis=1)
@@ -151,6 +153,7 @@ def seed_errors(t, est, prefix):
         prefix + "z_bias": float(E[:, 2].mean()),
         prefix + "z_rms": float(np.sqrt((E[:, 2] ** 2).mean())),
         prefix + "xy_rms": float(np.sqrt((E[:, :2] ** 2).sum(axis=1).mean())),
+        "_E" if not prefix else "_E_" + prefix.rstrip("_"): E,
     })
     return out, (r, c)
 
@@ -236,15 +239,30 @@ def fmt(x, nd=2):
     return "–" if x is None or not np.isfinite(x) else ("%%.%df" % nd) % x
 
 
+def pooled(E):
+    """Per-seed statistics of pooled error rows (N, 3)."""
+    E = np.asarray(E, float).reshape(-1, 3)
+    if len(E) == 0:
+        return dict(n=0, mean=np.nan, sd=np.nan, p95=np.nan, max=np.nan,
+                    z_bias=np.nan, z_rms=np.nan, xy_rms=np.nan)
+    e3 = np.linalg.norm(E, axis=1)
+    return dict(n=len(E), mean=float(e3.mean()),
+                sd=float(e3.std(ddof=1)) if len(e3) > 1 else 0.0,
+                p95=float(np.percentile(e3, 95)), max=float(e3.max()),
+                z_bias=float(E[:, 2].mean()),
+                z_rms=float(np.sqrt((E[:, 2] ** 2).mean())),
+                xy_rms=float(np.sqrt((E[:, :2] ** 2).sum(axis=1).mean())))
+
+
 def summary_md(rows, header, fuse):
     dzs = sorted(set(r["dz"] for r in rows))
     lines = [header, "",
-             "| slices (mm) | recall adaptive / fixed | err mean ± SD (mm) "
-             "| P95 | max | z bias | z RMS | xy RMS | partition | tile centre "
-             "err (mm) | normal err (°) |" + (
-                 " fused mean | fused z RMS | fused max | fused partition |"
-                 if fuse else ""),
-             "|---|---|---|---|---|---|---|---|---|---|---|" + (
+             "| slices (mm) | recall adaptive / fixed | seeds | 3D mean ± SD "
+             "(mm) | P95 | max | z bias | z RMS | xy RMS | partition | tile "
+             "centre err (mm) | normal err (°) |" + (
+                 " fused mean ± SD | fused z RMS | fused max | fused "
+                 "partition |" if fuse else ""),
+             "|---|---|---|---|---|---|---|---|---|---|---|---|" + (
                  "---|---|---|---|" if fuse else "")]
     for d in dzs:
         a = [r for r in rows if r["dz"] == d and r["mode"] == "adaptive"]
@@ -254,25 +272,31 @@ def summary_md(rows, header, fuse):
             v = [r.get(key, np.nan) for r in rr]
             v = [x for x in v if x is not None and np.isfinite(x)]
             return fn(v) if v else np.nan
-        line = ("| %.1f | %s / %s | %s ± %s | %s | %s | %s | %s | %s | %d/%d "
-                "| %s | %s |" % (
-                    d, fmt(m("recall")), fmt(m("recall", f)),
-                    fmt(m("err_mean")), fmt(m("err_mean", fn=np.std)),
-                    fmt(m("err_p95")), fmt(m("err_max", fn=np.max)),
-                    fmt(m("z_bias"), 3), fmt(m("z_rms")), fmt(m("xy_rms")),
+        P = pooled(np.vstack([r["_E"] for r in a if "_E" in r]
+                             or [np.zeros((0, 3))]))
+        line = ("| %.1f | %s / %s | %d | %s ± %s | %s | %s | %s | %s | %s "
+                "| %d/%d | %s | %s |" % (
+                    d, fmt(m("recall")), fmt(m("recall", f)), P["n"],
+                    fmt(P["mean"]), fmt(P["sd"]), fmt(P["p95"]),
+                    fmt(P["max"]), fmt(P["z_bias"], 3), fmt(P["z_rms"]),
+                    fmt(P["xy_rms"]),
                     sum(bool(r["partition_ok"]) for r in a), len(a),
                     fmt(m("tile_center_err")),
                     fmt(m("tile_normal_err_deg"), 1)))
         if fuse:
-            line += " %s | %s | %s | %d/%d |" % (
-                fmt(m("fused_err_mean")), fmt(m("fused_z_rms")),
-                fmt(m("fused_err_max", fn=np.max)),
+            F = pooled(np.vstack([r["_E_fused"] for r in a if "_E_fused" in r]
+                                 or [np.zeros((0, 3))]))
+            line += " %s ± %s | %s | %s | %d/%d |" % (
+                fmt(F["mean"]), fmt(F["sd"]), fmt(F["z_rms"]), fmt(F["max"]),
                 sum(bool(r.get("fused_partition_ok")) for r in a), len(a))
         lines.append(line)
     lines.append("")
-    lines.append("err mean ± SD = mean over realizations of the per-scan "
-                 "mean 3-D error ± SD across realizations; P95 = mean of the "
-                 "per-scan P95; max = worst seed over all realizations.")
+    lines.append("Seed errors pooled over the matched seeds of all "
+                 "realizations (adaptive detection): mean ± SD, P95, max of "
+                 "the 3-D error; z = slice axis.  Tile errors: mean over the "
+                 "correctly partitioned scans; the truth normal is the radial "
+                 "direction from the cavity centre (generator definition), so "
+                 "~7° is a floor, not a fit error.")
     return "\n".join(lines)
 
 
@@ -353,13 +377,22 @@ def main(argv=None):
     keys = []
     for row in rows:
         for k in row:
-            if k not in keys:
+            if k not in keys and not k.startswith("_"):
                 keys.append(k)
     csv_path = os.path.join(args.out, "validation_spacing_%s.csv" % tag)
     with open(csv_path, "w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=keys)
+        w = csv.DictWriter(fh, fieldnames=keys, extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
+    with open(os.path.join(args.out, "validation_spacing_%s_seeds.csv" % tag),
+              "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["dz", "rng", "mode", "kind", "err_x", "err_y", "err_z"])
+        for row in rows:
+            for key, kind in (("_E", "raw"), ("_E_fused", "fused")):
+                for e in row.get(key, []):
+                    w.writerow([row["dz"], row["rng"], row["mode"], kind,
+                                "%.5f" % e[0], "%.5f" % e[1], "%.5f" % e[2]])
 
     cmd = "python scripts/validation_spacing.py " + " ".join(
         sys.argv[1:] if argv is None else argv)
