@@ -74,7 +74,9 @@ def sweep_n(mesh, target: TargetSet, n_max: int, rx_cgy: float = DEFAULT_RX_CGY,
     needed then).  Extra ``kw`` are forwarded to the solver (e.g.
     ``n_sweeps``, ``n_restarts``, ``radius_mm``, ``max_evals``); objective
     weights may be passed as ``lambda_hot``, ``v200_tol``, ``lambda_oar``,
-    ``tau_cgy``.
+    ``tau_cgy``, ``lambda_tail``, ``tail_q``.  The two P2 criteria are the
+    same statement (``D90 >= rx`` <=> at most 10 % of the target weight is
+    below rx <=> ``V100 >= 0.90``); both are kept for the report.
     """
     from . import build_candidates, build_conflicts, build_influence
     from .solvers import solve_continuous, solve_greedy, solve_local, solve_sa
@@ -96,7 +98,8 @@ def sweep_n(mesh, target: TargetSet, n_max: int, rx_cgy: float = DEFAULT_RX_CGY,
     if conflicts is None:
         conflicts = build_conflicts(candidates)
 
-    obj_kw = {k: kw.pop(k) for k in ("lambda_hot", "v200_tol", "lambda_oar", "tau_cgy")
+    obj_kw = {k: kw.pop(k) for k in ("lambda_hot", "v200_tol", "lambda_oar", "tau_cgy",
+                                     "lambda_tail", "tail_q")
               if k in kw}
     objective = Objective(influence, conflicts, rx_cgy=float(rx_cgy), **obj_kw)
 

@@ -150,6 +150,8 @@ def cmd_optimize(args):
         kw = dict(rx_cgy=args.rx, solver=args.solver, seed=args.seed, h_mm=args.h,
                   n_spins=args.spins, eligible_faces=eligible,
                   time_budget_s=float(args.budget))
+        if args.lambda_tail is not None:
+            kw["lambda_tail"] = float(args.lambda_tail)
         n_full = n_tiles
         if args.min_n:
             from .plan.api import default_target
@@ -277,6 +279,9 @@ def main(argv=None):
                    help="wall-time budget in s for --solver continuous (default 60)")
     o.add_argument("--seed", type=int, default=0, help="RNG seed (stochastic solvers)")
     o.add_argument("--rx", type=float, default=6000.0, help="prescription dose in cGy")
+    o.add_argument("--lambda-tail", type=float, default=None, dest="lambda_tail",
+                   help="weight of the lower-tail (D90-directed) coverage term in the "
+                        "objective (default gtcore.plan.LAMBDA_TAIL; 0 = pure V100)")
     o.add_argument("--h", type=float, default=2.5, help="candidate anchor spacing in mm")
     o.add_argument("--spins", type=int, default=None,
                    help="spins per anchor (default 6 full / 12 half)")

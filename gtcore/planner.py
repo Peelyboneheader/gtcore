@@ -185,7 +185,8 @@ _GHOST_OVERLAP_COLOR = "orange"
 # (background, text colour) pairs cycled by 'B'; text follows so the legend,
 # status, panel and ghost stay legible on every one of them
 _BACKGROUNDS = (("black", "white"), ("#1e2a38", "white"),
-                ("dimgray", "white"), ("white", "black"))
+                ("dimgray", "white"), ("white", "black"),
+                ("pink", "black"))
 _SHELL_COLOR = ("deepskyblue", "black", "gray")  # DVH chart lines
 
 

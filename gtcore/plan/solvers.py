@@ -43,11 +43,13 @@ import numpy as np
 from . import (
     DEFAULT_RX_CGY,
     LAMBDA_HOT,
+    LAMBDA_TAIL,
     LOCAL_RADIUS_MM,
     SA_ALPHA,
     SA_MOVES_PER_TILE_PER_SWEEP,
     SA_N_RESTARTS,
     SA_N_SWEEPS,
+    TAIL_Q,
     TAU_FRACTION,
     V200_TOL,
     CandidateSet,
@@ -106,6 +108,8 @@ class _HardEval:
         self.v200_tol = float(objective.v200_tol)
         self.lam_oar = float(objective.lambda_oar)
         self.tau = float(objective.tau_cgy) if objective.tau_cgy else TAU_FRACTION * self.rx
+        self.lam_tail = float(getattr(objective, "lambda_tail", 0.0) or 0.0)
+        self.tail_q = float(getattr(objective, "tail_q", 0.10) or 0.10)
         self.oar = {name: np.asarray(mat) for name, mat in inf.oar.items()}
         self.oar_limits = {name: float(inf.oar_limits[name])
                            for name in self.oar if name in inf.oar_limits}
@@ -160,16 +164,26 @@ class _HardEval:
     def coverage(self, dose: np.ndarray, level: float) -> float:
         return float(self.wn @ (dose >= level * self.rx))
 
+    def tail(self, dose) -> np.ndarray:
+        """``lambda_tail * tail_rows(dose)`` for a ``(M,)`` or ``(k, M)`` dose
+        (:func:`gtcore.plan.objective.tail_rows`); zeros without the term."""
+        dose = np.asarray(dose)
+        if not self.lam_tail:
+            return np.zeros(1 if dose.ndim == 1 else dose.shape[0], dtype=float)
+        from .objective import tail_rows
+        return self.lam_tail * tail_rows(dose, self.w, self.rx, self.tail_q)
+
     def hard_from_dose(self, dose: np.ndarray, oar_pen: float = 0.0) -> float:
         v100 = self.coverage(dose, 1.0)
         v200 = self.coverage(dose, 2.0)
-        return v100 - float(self.hot_penalty(v200)) - oar_pen
+        return v100 + float(self.tail(dose)[0]) - float(self.hot_penalty(v200)) - oar_pen
 
     def soft_from_dose(self, dose: np.ndarray, oar_pen: float = 0.0) -> float:
         z = (dose - self.rx) / self.tau
         sig = 1.0 / (1.0 + np.exp(-np.clip(z, -60.0, 60.0)))
         v200 = self.coverage(dose, 2.0)
-        return float(self.wn @ sig) - float(self.hot_penalty(v200)) - oar_pen
+        return float(self.wn @ sig) + float(self.tail(dose)[0]) \
+            - float(self.hot_penalty(v200)) - oar_pen
 
     def metrics_from_dose(self, dose: np.ndarray, oar_doses: Dict[str, np.ndarray]
                           ) -> Dict[str, float]:
@@ -201,6 +215,8 @@ class _HardEval:
             v100 = (tot >= self.rx) @ self.wn
             v200 = (tot >= 2.0 * self.rx) @ self.wn
             out[sl] = v100 - self.hot_penalty(v200)
+            if self.lam_tail:
+                out[sl] += self.tail(block.astype(np.float64) + base_dose[None, :])
         if self.oar_limits:
             out -= self.oar_penalty_all(oar_doses, rows)
         return out
@@ -218,6 +234,8 @@ class _HardEval:
             sig = 1.0 / (1.0 + np.exp(-z))
             v200 = (tot >= 2.0 * self.rx) @ self.wn
             out[sl] = sig @ self.wn - self.hot_penalty(v200)
+            if self.lam_tail:
+                out[sl] += self.tail(tot)
         if self.oar_limits:
             out -= self.oar_penalty_all(oar_doses, rows)
         return out
@@ -947,6 +965,10 @@ class _ContinuousCore:
         self.v200_tol = float(objective.v200_tol) if objective is not None else V200_TOL
         self.tau = (float(objective.tau_cgy) if objective is not None and objective.tau_cgy
                     else TAU_FRACTION * self.rx)
+        self.lam_tail = (float(getattr(objective, "lambda_tail", LAMBDA_TAIL))
+                         if objective is not None else LAMBDA_TAIL)
+        self.tail_q = (float(getattr(objective, "tail_q", TAIL_Q))
+                       if objective is not None else TAIL_Q)
         sub, _idx = target.subsample(int(m_opt), rng_seed=int(rng_seed))
         self.pts = np.asarray(sub.points, dtype=float)
         w = np.asarray(sub.weights, dtype=float)
@@ -972,12 +994,18 @@ class _ContinuousCore:
         v200 = float(self.wn @ (dose >= 2.0 * self.rx))
         return self.lam_hot * max(0.0, v200 - self.v200_tol)
 
+    def tail(self, dose: np.ndarray) -> float:
+        if not self.lam_tail:
+            return 0.0
+        from .objective import tail_mean
+        return self.lam_tail * tail_mean(dose, self.w, self.rx, self.tail_q)
+
     def soft(self, dose: np.ndarray) -> float:
         z = np.clip((dose - self.rx) / self.tau, -60.0, 60.0)
-        return float(self.wn @ (1.0 / (1.0 + np.exp(-z)))) - self.hot(dose)
+        return float(self.wn @ (1.0 / (1.0 + np.exp(-z)))) + self.tail(dose) - self.hot(dose)
 
     def hard(self, dose: np.ndarray) -> float:
-        return float(self.wn @ (dose >= self.rx)) - self.hot(dose)
+        return float(self.wn @ (dose >= self.rx)) + self.tail(dose) - self.hot(dose)
 
     def v100(self, dose: np.ndarray) -> float:
         return float(self.wn @ (dose >= self.rx))

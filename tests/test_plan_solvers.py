@@ -84,7 +84,9 @@ def test_hard_eval_matches_direct_definition(toy30):
     w = inst["target"].weights
     v100 = (w * (dose >= inst["rx_cgy"])).sum() / w.sum()
     v200 = (w * (dose >= 2 * inst["rx_cgy"])).sum() / w.sum()
-    expect = v100 - obj.lambda_hot * max(0.0, v200 - obj.v200_tol)
+    from gtcore.plan.objective import tail_mean
+    expect = v100 + obj.lambda_tail * tail_mean(dose, w, inst["rx_cgy"], obj.tail_q) \
+        - obj.lambda_hot * max(0.0, v200 - obj.v200_tol)
     assert h.hard_from_dose(dose) == pytest.approx(expect)
     m = h.metrics_from_dose(dose, {})
     assert m["V100"] == pytest.approx(v100) and m["V200"] == pytest.approx(v200)
@@ -170,7 +172,8 @@ def test_greedy_ties_break_lexicographically(toy30):
     no single tile reaches it, step 1 ties on hard gain for every candidate
     and the soft gain must decide (not simply id 0)."""
     inst = toy30
-    obj = Objective(inst["influence"], inst["conflicts"], rx_cgy=1e6)
+    # pure coverage: the tail term would already separate the candidates at step 1
+    obj = Objective(inst["influence"], inst["conflicts"], rx_cgy=1e6, lambda_tail=0.0)
     r = solve_greedy(obj, 1)
     h = _HardEval(obj)
     soft = h.soft_all(np.zeros(h.M), {})
@@ -583,7 +586,8 @@ def test_sweep_continuous(flat_cont):
     sw = sweep_n(f["mesh"], f["target"], 2, rx_cgy=f["rx"], solver="continuous",
                  candidates=f["candidates"], influence=f["objective"].influence,
                  conflicts=f["conflicts"], n_starts=1, n_passes=1, max_iter=10,
-                 engine=f["engine"], m_opt=300)
+                 engine=f["engine"], m_opt=300, lambda_tail=0.0)
+    # (pure coverage keeps the N = 1 tile inside the N = 2 answer on this flat wall)
     assert [r["N"] for r in sw.rows] == [1, 2]
     assert all(r["solver"] == "continuous" for r in sw.rows)
     for res in sw.results:
