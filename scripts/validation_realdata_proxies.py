@@ -291,8 +291,12 @@ def run_pipeline(ctx, name, vol, path, tiles):
         if tiles:
             from gtcore.tiles import fit_tiles
 
+            # same call as reconstruct(): cavity centre from its cavity mask
+            cav = np.asarray(res.cavity_mask)
+            cav_c = vol.index_to_ras(np.argwhere(cav).mean(axis=0)[::-1]) \
+                if cav.any() else None
             tiles_res = fit_tiles(seeds.centers_ras, seeds.axes_ras, "auto",
-                                  0, cavity_center_ras=None,
+                                  0, cavity_center_ras=cav_c,
                                   mesh=res.meshes.get("cavity"),
                                   spacing_mm=vol.spacing)
     fused = None
