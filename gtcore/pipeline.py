@@ -193,6 +193,7 @@ def reconstruct(vol: Volume, verbose: bool = True,
                 n_half_tiles: int = 0,
                 complete_degraded: bool = True,
                 n_seeds_expected: Optional[int] = None,
+                refine_seeds: Optional[str] = None,
                 fuse_tiles: bool = False) -> PipelineResult:
     """Run the full reconstruction pipeline on one CT volume.
 
@@ -213,6 +214,16 @@ def reconstruct(vol: Volume, verbose: bool = True,
     merely allows half tiles to be selected) and ``PipelineResult.tiles`` is
     an :class:`~gtcore.tiles.auto.AutoFitResult` with the score curve.
 
+    ``refine_seeds`` (``None`` = off, the default; ``"centroid"``) re-measures
+    every surviving candidate after the vault filter and the threshold
+    search with :func:`gtcore.seeds.refine.refine_seed_candidates` -- the
+    threshold-free background-subtracted centroid with a per-seed analytic
+    covariance (``PipelineResult.seeds.cov_ras``).  It runs on the RAW
+    volume, never the metal-inpainted one (inpainting erases the very seed
+    signal being measured), and before the implant assessment, so every
+    consumer downstream sees the refined centres.  Per-seed status
+    ("ok" / "fallback:<reason>") is logged in ``vol.meta["seed_refine"]``.
+
     ``fuse_tiles=True`` (plan stage 5, opt-in) needs fitted tiles AND a
     per-seed covariance (``seeds.cov_ras``, from the seed refinement of
     stage 2): the tiles are fitted with the hierarchical weighting
@@ -227,6 +238,9 @@ def reconstruct(vol: Volume, verbose: bool = True,
     raw detections stay in ``PipelineResult.meta["seeds_unfused"]``.
     Without ``cov_ras`` nothing is fused and the reason is recorded.
     """
+    if refine_seeds not in (None, "centroid"):
+        raise ValueError("refine_seeds must be None or 'centroid', got %r"
+                         % (refine_seeds,))
     timings = {}
     meta = {}
     fusion = None           # vol.meta["seed_posterior"] when fuse_tiles
@@ -336,6 +350,23 @@ def reconstruct(vol: Volume, verbose: bool = True,
                   " (recall %.2f)" % (have, expected,
                                       min(1.0, have / float(expected))))
     vol.meta["seed_search"] = dict(expected=n_seeds_expected, steps=search_log)
+
+    if refine_seeds is not None:
+        from .seeds.refine import refine_seed_candidates
+
+        unrefined = seeds
+        seeds = stage("seed refinement", lambda: refine_seed_candidates(
+            vol, unrefined, method=refine_seeds))
+        status = [str(s_) for s_ in seeds.info["refine_status"]]
+        n_ok = sum(1 for s_ in status if s_ == "ok")
+        vol.meta["seed_refine"] = dict(
+            method=refine_seeds, n=len(status), n_ok=n_ok, status=status,
+            shift_mm=[round(float(x), 4) for x in seeds.info["refine_shift_mm"]],
+            saturation_hu=seeds.info["saturation_hu"])
+        if verbose:
+            print("  seed refinement (%s): %d/%d refined, %d kept the detected"
+                  " centre" % (refine_seeds, n_ok, len(status),
+                               len(status) - n_ok))
 
     # Implant assessment uses only candidates AWAY from bone: dense inner-
     # table spots pass every filter and even form chance quads with tile-like
