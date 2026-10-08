@@ -277,6 +277,45 @@ def test_segment_cavity_prior_rejects_the_decoy():
     assert (no_prior & decoy).sum() > (no_prior & true_cav).sum()
 
 
+def test_segment_cavity_sheet_prior_stops_at_a_connected_ventricle():
+    """The clinical failure: the cavity's low-density contents run through
+    oedema into a far larger fluid space (the ventricle) with no intensity
+    break.  The seed-sheet rule must keep the cavity and leave the ventricle,
+    even though both are ONE connected dark component."""
+    cav_c = np.array([12.0, 0.0, 0.0])
+    cav_r = 10.0
+    vent_c = np.array([-16.0, 0.0, 0.0])
+    vent_r = 13.0
+
+    x, y, z = ras_grid(HEAD_SHAPE, HEAD_AFFINE)
+    vol, true_interior, true_cav = build_head_ct(cavity=(cav_c, cav_r))
+    arr = np.array(vol.array)
+    vent = (np.sqrt((x - vent_c[0]) ** 2 + (y - vent_c[1]) ** 2
+                    + (z - vent_c[2]) ** 2) <= vent_r)
+    # a 6 mm-wide fluid channel joining the two pockets
+    chan = (x <= cav_c[0]) & (x >= vent_c[0]) & (np.abs(y) <= 3.0) & (np.abs(z) <= 3.0)
+    arr[vent | chan] = 10.0
+    vol = Volume(arr, HEAD_AFFINE)
+    seg = segment_head(vol)
+
+    # eight seeds on the cavity wall (two tiles' worth of corners, not coplanar)
+    dirs = np.array([[1.0, 0, 0], [0, 1.0, 0], [0, -1.0, 0], [0, 0, 1.0],
+                     [0, 0, -1.0], [0.7, 0.7, 0], [0.7, -0.7, 0], [0.7, 0, 0.7]])
+    seeds = cav_c + dirs * (cav_r - 3.0)
+
+    cav = segment_cavity(vol, seg["cranial_interior"], seg["brain"],
+                         seed_centers_ras=seeds)
+    assert dice(cav, true_cav) > 0.7, "cavity dice %.3f" % dice(cav, true_cav)
+    assert (cav & vent).sum() < 0.1 * vent.sum(), \
+        "the sheet rule let the cavity run into the ventricle"
+
+    # the old component rule (reachable by starving the sheet rule of seeds)
+    # takes the whole thing -- the behaviour this test guards against
+    old = segment_cavity(vol, seg["cranial_interior"], seg["brain"],
+                         seed_centers_ras=seeds[:3])
+    assert (old & vent).sum() > 0.5 * vent.sum()
+
+
 def test_segment_cavity_empty_when_nothing_dark():
     vol, true_interior, _ = build_head_ct()
     seg = segment_head(vol)

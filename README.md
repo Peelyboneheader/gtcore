@@ -44,6 +44,7 @@ Planner controls (the same legend is on screen; `?` collapses it):
 | | `+` `-` | prescription +/- 100 cGy, isodoses re-cut from the grid |
 | | `A` | inter-seed attenuation on/off for the next `U` (capsule shadowing; carriers excluded, see `docs/interference-notes.md`); the panel also reports the cavity-wall area fraction receiving >= rx at 5 mm depth |
 | | `I`, `C`, `D` | isodoses on/off, clear isodoses, dose panel on/off (also clickable buttons above the DVH chart) |
+| | `V` | **HR-CTV** on/off (`gt plan --hrctv` starts with it on): the 5 mm rind of tissue outside the wall, built as a 1 mm **voxel volume** by distance transform (`gtcore.dose.hrctv`; never folds in concavities, excludes the cavity and anything outside the cranial interior) and highlighted in gold. After `U` the panel gets an `HR-CTV` row with volumetric D90/D50/Dmin/V100/V150 evaluated with the **exact** engine at every voxel (not the 2 mm grid, whose interpolation error reaches tens of percent at the wall), plus an HR-CTV line in the DVH chart; `+`/`-` re-score it from the kept doses. Scripts read the same numbers from `app.hrctv_stats()`. Validated against the clinical RTSTRUCT/RTDOSE of the first case: see `docs/clinical-validation-notes.md` |
 | Export | `S` | save every seed (detected + placed, RAS mm + axis) to `output/plan_<timestamp>.csv` |
 | View | left/right/middle-drag, `R`, `G`, `B` | rotate (off tiles) / zoom / pan, reset camera, ghost preview on/off, background colour |
 
@@ -63,8 +64,18 @@ Planner controls (the same legend is on screen; `?` collapses it):
    isotropic resampling.
 4. **`gtcore.segment`** — skull/brain (craniotomy sealed by escalating
    physical-radius closing), then resection cavity using the seed cloud as a
-   spatial prior (tiles line the cavity wall by definition); marching-cubes
-   surface meshes with outward normals.
+   spatial prior (tiles line the cavity wall by definition). With four or
+   more seeds the **seed-sheet rule** applies: the cavity is grown from the
+   convex hull of the seeds through low-density voxels with a 12 mm geodesic
+   reach and clipped 3 mm beyond the seed sheet (the tile's tissue face), then
+   closed by 3 mm and filled. On the first clinical CT the old
+   "dark component the seeds touch" rule returned cavity + oedema + both
+   ventricles (193 cc); the sheet rule gives 41 cc against the physician's
+   35 cc contour (Dice 0.65) and 0.85 Dice on the synthetic phantom. The
+   full validation against the TPS structure set and dose, including why the
+   clinical CTV's 63 Gy D90 is a partial-rind figure, is in
+   `docs/clinical-validation-notes.md` (`scripts/validation_clinical.py`).
+   Marching-cubes surface meshes with outward normals.
 5. **`gtcore.tiles`** — tile-configuration inference: quad/pair enumeration
    with deformation-tolerant gates, exact branch-and-bound assignment for the
    known implant count (full + sliced 2×1 half tiles), per-tile pose +

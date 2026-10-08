@@ -5,7 +5,9 @@
 ``isodose_surfaces`` are the corrected, vectorized v2 engine (see
 docs/tg43-port-notes.md); ``metrics`` adds DVH, cavity-rind and wall-at-depth
 coverage statistics for the planner, and ``dvh`` the cheap cavity-shell
-(wall / +5 / +10 mm) statistics behind the planner's on-screen dose panel.
+(wall / +5 / +10 mm) statistics behind the planner's on-screen dose panel;
+``hrctv`` builds the 5 mm tissue rind as a voxel volume (the HR-CTV) and
+scores it with the exact engine for volumetric D90 / V100.
 
 ``InterferenceModel`` adds the effect TG-43 superposition cannot express:
 seeds and collagen tile carriers attenuating each other's primary fluence
@@ -27,12 +29,17 @@ from .interference import (
     tile_prescription_points,
     tile_shadowing,
 )
+from .hrctv import HRCTV, HRCTV_DEPTH_MM, build_hrctv, hrctv_stats
 from .metrics import DVH, dose_metrics, dvh, resample_mask_to, rind_mask, \
     surface_coverage, wall_dose
 from .tg43 import DoseInterpolator
 
 __all__ = [
     "DoseInterpolator",
+    "HRCTV",
+    "HRCTV_DEPTH_MM",
+    "build_hrctv",
+    "hrctv_stats",
     "SeedDataset",
     "DATASETS",
     "TG43U1S2_CONSENSUS",

@@ -71,6 +71,8 @@ def cmd_plan(args):
     extra = {}
     if getattr(args, "optimizer", DEFAULT_OPTIMIZER) != DEFAULT_OPTIMIZER:
         extra["solver"] = args.optimizer
+    if getattr(args, "hrctv", False):
+        extra["hrctv"] = True
     run_planner(result, rx_cgy=args.rx, suggest=bool(args.suggest), prior=prior, **extra)
     return 0
 
@@ -259,6 +261,9 @@ def main(argv=None):
                      default=DEFAULT_OPTIMIZER,
                      help="placement optimizer solver for the planner's 'O' key "
                           "(Shift+O cycles it in the window)")
+    pln.add_argument("--hrctv", action="store_true",
+                     help="start with the HR-CTV (5 mm tissue rind outside the "
+                          "wall) shown and scored as a volume (the 'V' key)")
     pln.set_defaults(fn=cmd_plan)
 
     o = sub.add_parser("optimize", help="run the pipeline and the opt-in placement "

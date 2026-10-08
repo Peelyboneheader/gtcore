@@ -71,6 +71,11 @@ DOSE_PAD_MM = 40.0
 DOSE_SPACING_MM = 2.0
 OVERLAP_THRESHOLD_MM = 1.0  # passed to interact.find_overlapping_tiles
 SHELL_OFFSETS_MM = (0.0, 5.0, 10.0)  # dose panel: wall, +5 mm, +10 mm tissue
+# HR-CTV (V key): the WALL_DEPTH_MM rind of tissue outside the wall as a voxel
+# volume (gtcore.dose.hrctv), scored with the exact engine, not the 2 mm grid
+HRCTV_SPACING_MM = 1.0
+HRCTV_COLOR = "gold"
+HRCTV_OPACITY = 0.22
 WALL_DEPTH_MM = 5.0         # GammaTile prescription depth (60 Gy at 5 mm)
 DOSE_PANEL_POS = (0.62, 0.99)  # viewport anchor (top-left corner) of the panel
 SHADOW_THRESHOLD_PCT = 2.0  # flag tiles shading this much of each other's dose
@@ -113,6 +118,9 @@ DOSE     U                   : compute TG-43 dose, isodoses + dose panel
          +  -                : prescription +/- 100 cGy (isodoses re-cut)
          I                   : isodoses on/off      C : clear isodoses
          D                   : dose panel on/off    (or click the buttons)
+         V                   : HR-CTV on/off: the 5 mm tissue rind outside the
+                               wall (gold); scored as a VOLUME with the exact
+                               engine -> D90/V100 row in the panel + DVH line
          isodose colours     : 100% red   50% orange   25% yellow
 EXPORT   S                   : save plan (seed coordinates) to output/*.csv
 VIEW     left-drag (off tiles) rotate   right-drag zoom   middle-drag pan   R reset
@@ -185,7 +193,8 @@ _GHOST_OVERLAP_COLOR = "orange"
 # (background, text colour) pairs cycled by 'B'; text follows so the legend,
 # status, panel and ghost stay legible on every one of them
 _BACKGROUNDS = (("black", "white"), ("#1e2a38", "white"),
-                ("dimgray", "white"), ("white", "black"))
+                ("dimgray", "white"), ("white", "black"),
+                ("pink", "black"))
 _SHELL_COLOR = ("deepskyblue", "black", "gray")  # DVH chart lines
 
 
@@ -368,6 +377,16 @@ class _PlannerApp:
         self._dvh_chart = None
         self._dvh_lines = {}
 
+        # HR-CTV (V key, opt-in): the 5 mm tissue rind as a voxel volume,
+        # built lazily on first toggle; scored with the exact engine over
+        # the seeds of the last U (doses kept so +/- re-score without a
+        # recompute)
+        self.hrctv_visible = False
+        self._hrctv = None            # gtcore.dose.hrctv.HRCTV
+        self._hrctv_doses = None      # (N,) cGy at the rind voxels, last U
+        self._hrctv_stats = None      # hrctv_stats(...) at the current rx
+        self._dose_seeds = None       # (centers, axes, interference) of last U
+
         self.pl = pv.Plotter(window_size=(1280, 900), title=title,
                              off_screen=off_screen)
         self._build_scene()
@@ -477,8 +496,9 @@ class _PlannerApp:
             ("iso", "isodoses", True, self._button_isodoses),
             ("clear", "clear isodoses", False, self._button_clear),
             ("panel", "dose panel", True, self._button_panel),
+            ("hrctv", "HR-CTV", False, self._button_hrctv),
         )
-        x = int(0.69 * w)
+        x = int(0.60 * w)   # four buttons must fit left of the window edge
         for name, label, state, cb in specs:
             try:
                 widget = pl.add_checkbox_button_widget(
@@ -514,6 +534,10 @@ class _PlannerApp:
         if bool(state) != self.dose_panel_visible:
             self._toggle_dose_panel()
 
+    def _button_hrctv(self, state):
+        if bool(state) != self.hrctv_visible:
+            self._toggle_hrctv()
+
     def _guarded(self, key, fn):
         """Wrap a key handler so an open tile-count prompt consumes the key
         instead (digits, Enter, Esc, BackSpace, H/M/S) and nothing else
@@ -532,6 +556,12 @@ class _PlannerApp:
     def _bind_interaction(self):
         pl = self.pl
         self._bind_pick_observers()
+        # pyvista binds 'v' to an isometric camera jump; the planner uses it
+        # for the HR-CTV toggle, so drop the default before adding ours
+        try:
+            pl.clear_events_for_key("v", raise_on_missing=False)
+        except Exception:
+            pass
         for keys, fn in (
             (("o", "O"), self._optimize_key),
             (("n", "N"), self.suggest_next_tile),
@@ -553,6 +583,7 @@ class _PlannerApp:
             (("BackSpace",), self.delete_all),
             (("b", "B"), self._cycle_background),
             (("u", "U"), self.update_dose),
+            (("v", "V"), self._toggle_hrctv),
             (("t", "T"), self.suggest_tiles),
             (("bracketleft", "["), lambda: self._rotate_selected(-ROTATE_STEP_RAD)),
             (("bracketright", "]"), lambda: self._rotate_selected(+ROTATE_STEP_RAD)),
@@ -1934,7 +1965,119 @@ class _PlannerApp:
         self._dose_n_seeds = int(centers.shape[0])
         self._dose_attenuated = model is not None
         self._dose_stale = False
+        self._dose_seeds = (centers, axes, model)
+        self._hrctv_doses = None      # seeds changed: re-score the rind
         self._refresh_from_dose_volume()
+
+    # ---------------------------------------------------------------- HR-CTV
+    def _ensure_hrctv(self):
+        """Build the HR-CTV rind for the wall once (None when no wall)."""
+        if self._hrctv is not None:
+            return self._hrctv
+        if not self._has_surface():
+            return None
+        from .dose.hrctv import build_hrctv
+        res = self.result
+        aff = res.volume.affine
+        on_cavity = self._surface_label == "cavity wall"
+        cav = getattr(res, "cavity_mask", None)
+        inside = cav if (on_cavity and cav is not None and np.any(cav)) else None
+        keep = None
+        masks = getattr(res, "masks", {}) or {}
+        for key in (("cranial_interior", "brain") if on_cavity else ("body",)):
+            m = masks.get(key)
+            if m is not None and np.any(m):
+                keep = m
+                break
+        self._hrctv = build_hrctv(
+            self.cavity, depth_mm=WALL_DEPTH_MM, spacing_mm=HRCTV_SPACING_MM,
+            side=+1 if on_cavity else -1,
+            inside_mask=inside, inside_affine=aff if inside is not None else None,
+            keep_mask=keep, keep_affine=aff if keep is not None else None,
+            source=self._surface_label)
+        return self._hrctv
+
+    def _toggle_hrctv(self):
+        """'V': show/hide the HR-CTV rind and its row in the dose panel."""
+        if not self.hrctv_visible and self._hrctv is None:
+            self._update_status("building the HR-CTV rind -- please wait")
+            try:
+                h = self._ensure_hrctv()
+            except Exception as exc:
+                self._set_button("hrctv", False)
+                self._update_status("HR-CTV failed: %s" % exc)
+                return
+            if h is None:
+                self._set_button("hrctv", False)
+                self._update_status("no wall in this scan -- no HR-CTV to build")
+                return
+        self.hrctv_visible = not self.hrctv_visible
+        self._set_button("hrctv", self.hrctv_visible)
+        self._draw_hrctv()
+        if self.hrctv_visible:
+            self._score_hrctv()
+            if self._dose_volume is not None:
+                self._draw_dose_panel()
+            self._update_status("%s%s" % (
+                self._hrctv.describe(),
+                "" if self._dose_volume is not None
+                else " -- press U to score it"))
+        else:
+            if self._dose_volume is not None:
+                self._draw_dose_panel()
+            self._update_status("HR-CTV hidden")
+
+    def _draw_hrctv(self):
+        try:
+            self.pl.remove_actor("hrctv", render=False)
+        except Exception:
+            pass
+        h = self._hrctv
+        if self.hrctv_visible and h is not None and h.mesh is not None \
+                and len(h.mesh.faces):
+            self.pl.add_mesh(_to_pv(self.pv, h.mesh), name="hrctv",
+                             color=HRCTV_COLOR, opacity=HRCTV_OPACITY,
+                             specular=0.2, pickable=False, reset_camera=False,
+                             render=False)
+        self._render()
+
+    def _score_hrctv(self):
+        """Exact-engine doses over the rind for the seeds of the last U, and
+        the statistics at the current rx.  Cheap enough to run on every
+        update; a no-op until both the rind and a dose update exist."""
+        self._hrctv_stats = None
+        if self._hrctv is None or self._dose_seeds is None:
+            self._hrctv_doses = None
+            return
+        try:
+            from .dose.hrctv import hrctv_stats
+            centers, axes, model = self._dose_seeds
+            if self._hrctv_doses is None:
+                self._hrctv_doses = self._hrctv.doses_exact(
+                    centers, axes, interference=model)
+            self._hrctv_stats = hrctv_stats(
+                self._hrctv_doses, self.rx_cgy, self._hrctv.voxel_volume_mm3)
+        except Exception:
+            self._hrctv_doses = None
+            self._hrctv_stats = None
+
+    def hrctv_stats(self):
+        """Volumetric HR-CTV statistics of the last dose update at the
+        current prescription (``D90``, ``D50``, ``Dmin``, ``Dmean``,
+        ``Dmax`` in cGy; ``V100``/``V150``/``V200`` fractions;
+        ``volume_cc``), or None before U / without a wall.  Built on demand
+        even while the rind is hidden, so scripts can read it directly."""
+        if self._dose_seeds is None:
+            return None
+        if self._hrctv is None:
+            try:
+                if self._ensure_hrctv() is None:
+                    return None
+            except Exception:
+                return None
+        if self._hrctv_stats is None:
+            self._score_hrctv()
+        return None if self._hrctv_stats is None else dict(self._hrctv_stats)
 
     def set_rx(self, rx_cgy: float):
         """Change the prescription; isodoses and panel re-cut from the grid."""
@@ -1959,6 +2102,10 @@ class _PlannerApp:
             return
         shown = self._draw_isodoses(surfaces)
         self._dose_report = self._compute_report(self._dose_volume)
+        if self.hrctv_visible:
+            self._score_hrctv()
+        else:
+            self._hrctv_stats = None   # re-scored on demand (V / hrctv_stats)
         self._draw_dose_panel()
         self._update_status(note or (
             "isodose over %d seeds: %s of rx %.0f cGy%s"
@@ -2093,6 +2240,19 @@ class _PlannerApp:
             from .dose.dvh import format_report
             body = format_report(self._dose_report, self.rx_cgy)
         lines = [header] + body.splitlines()
+        if self.hrctv_visible and self._hrctv is not None:
+            s = self._hrctv_stats
+            if s is None or not np.isfinite(s.get("D90", float("nan"))):
+                lines.append("HR-CTV  (%g mm rind, %.1f cc) -- not scored" % (
+                    self._hrctv.depth_mm, self._hrctv.volume_cc))
+            else:
+                # same columns as the shells; this row is a VOLUME scored
+                # with the exact engine (every 1 mm voxel counts equally)
+                lines.append("%-7s %6.0f %6.0f %6.0f  %4.0f%% %4.0f%%" % (
+                    "HR-CTV", s["D90"], s["D50"], s["Dmin"],
+                    100.0 * s["V100"], 100.0 * s["V150"]))
+                lines.append("  (HR-CTV: %g mm rind, %.1f cc, exact)"
+                             % (self._hrctv.depth_mm, s["volume_cc"]))
         if self._dose_stale:
             lines.append("STALE -- tiles changed, press u")
         return "\n".join(lines)
@@ -2156,6 +2316,26 @@ class _PlannerApp:
                     self._dvh_lines[off] = line
                 else:
                     line.update(x, y)
+            # HR-CTV volumetric curve (exact engine), only while the rind
+            # is shown; an existing line goes empty when it is hidden
+            s = self._hrctv_stats if self.hrctv_visible else None
+            if s is not None and self._hrctv_doses is not None \
+                    and self._hrctv_doses.size:
+                from .dose.dvh import DEFAULT_CURVE_FRACTIONS, dvh_curve
+                fr = np.asarray(DEFAULT_CURVE_FRACTIONS, dtype=float)
+                x = 100.0 * fr
+                y = 100.0 * dvh_curve(self._hrctv_doses, fr * self.rx_cgy)
+            else:
+                x = np.zeros(2)
+                y = np.zeros(2)
+            line = self._dvh_lines.get("hrctv")
+            if line is None:
+                if s is not None:
+                    self._dvh_lines["hrctv"] = chart.line(
+                        x, y, width=3, label="HR-CTV (volume)",
+                        color=HRCTV_COLOR)
+            else:
+                line.update(x, y)
             chart.visible = bool(self.dose_panel_visible)
         except Exception:
             self._dvh_chart = None
@@ -2188,16 +2368,20 @@ class _PlannerApp:
 
 
 def run_planner(result: PipelineResult, rx_cgy: float = 6000.0,
-                suggest: bool = False, prior=None, solver: str = "sa"):
+                suggest: bool = False, prior=None, solver: str = "sa",
+                hrctv: bool = False):
     """Open the interactive planner window (blocking).  ``suggest`` starts
     with the inferred tile configuration on the board; ``prior`` is an
     :class:`gtcore.tiles.auto.ImplantPrior` (OR counts, all optional);
     ``solver`` is the placement optimizer's initial solver for the 'O' key
-    (``"greedy"`` or ``"sa"``; Shift+O cycles it)."""
+    (``"greedy"`` or ``"sa"``; Shift+O cycles it); ``hrctv`` starts with the
+    5 mm HR-CTV rind shown and scored (the 'V' key)."""
     app = _PlannerApp(result, rx_cgy=rx_cgy, off_screen=False, prior=prior,
                       solver=solver)
     if suggest:
         app.suggest_tiles()
+    if hrctv:
+        app._toggle_hrctv()
     app.show()
     return app.tiles
 
@@ -2215,6 +2399,7 @@ def snapshot_planner(result: PipelineResult, actions: Sequence, path: str,
     - ``"suggest"``: infer tiles from the detected seeds (auto count).
     - ``"interference"`` or ``{"interference": True|False}``: toggle or set
       inter-seed attenuation for subsequent updates.
+    - ``"hrctv"``: toggle the HR-CTV rind (shown + scored on screen).
     """
     app = _PlannerApp(result, rx_cgy=rx_cgy, off_screen=True, prior=prior)
     try:
@@ -2226,6 +2411,8 @@ def snapshot_planner(result: PipelineResult, actions: Sequence, path: str,
                     app.suggest_tiles()
                 elif act == "interference":
                     app._toggle_interference()
+                elif act == "hrctv":
+                    app._toggle_hrctv()
                 continue
             if isinstance(act, dict):
                 if "interference" in act:

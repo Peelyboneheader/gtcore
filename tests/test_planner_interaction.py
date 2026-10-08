@@ -461,6 +461,56 @@ def test_dose_panel_reports_shells_and_goes_stale(app):
     assert not app._dose_stale and "STALE" not in app._dose_panel_text
 
 
+def test_hrctv_toggle_highlights_rind_and_scores_it_as_a_volume(app):
+    """'V' builds the 5 mm HR-CTV rind, shows it (gold actor), and after a
+    dose update the panel carries an HR-CTV row scored with the exact
+    engine; the stats are readable by scripts and follow the rx."""
+    assert not app.hrctv_visible and "hrctv" not in app.pl.actors
+    assert app.hrctv_stats() is None            # no dose update yet
+
+    app._toggle_hrctv()
+    assert app.hrctv_visible and app._hrctv is not None
+    assert "hrctv" in app.pl.actors
+    assert "HR-CTV" in app._last_status and "press U" in app._last_status
+    h = app._hrctv
+    assert abs(h.depth_mm - 5.0) < 1e-9 and h.volume_cc > 1.0
+    # the rind lies outside the cavity: no voxel centre inside the mask
+    pts = h.voxel_centers_ras()
+    from gtcore.volume import Volume
+    cav = Volume(app.result.cavity_mask.astype(np.uint8), app.result.volume.affine)
+    assert not np.any(np.asarray(cav.sample_ras(pts, order=0, fill=0.0)) > 0.5)
+
+    x, y = _cavity_aim(app)
+    _right_click(app, x, y)
+    app.update_dose()
+    if "dose engine" in app._last_status or "failed" in app._last_status:
+        pytest.skip("dose engine unavailable: %s" % app._last_status)
+    text = app._dose_panel_text
+    assert "HR-CTV" in text and "exact" in text
+    s = app.hrctv_stats()
+    assert s is not None
+    assert 0.0 <= s["V150"] <= s["V100"] <= 1.0
+    assert s["Dmin"] <= s["D90"] <= s["D50"] <= s["Dmax"]
+    assert abs(s["volume_cc"] - h.volume_cc) < 1e-9
+    assert "hrctv" in app._dvh_lines
+
+    # the exact engine, not the 2 mm grid, scores the rind
+    from gtcore.dose import dose_at_points
+    centers, axes, _m = app._dose_seeds
+    ref = dose_at_points(centers, axes, pts[:200])
+    assert np.allclose(app._hrctv_doses[:200], ref, rtol=1e-9)
+
+    # prescription changes re-score the V's from the kept doses
+    app.set_rx(app.rx_cgy + 3000.0)
+    s2 = app.hrctv_stats()
+    assert s2["V100"] <= s["V100"] and abs(s2["D90"] - s["D90"]) < 1e-9
+
+    app._toggle_hrctv()
+    assert not app.hrctv_visible and "hrctv" not in app.pl.actors
+    assert "HR-CTV" not in app._dose_panel_text
+    assert app.hrctv_stats() is not None        # still readable while hidden
+
+
 # ------------------------------------------------------------- key legend
 def test_every_bound_key_is_in_the_legend(app):
     """Physicists learn the tool from the on-screen legend: every key that
@@ -469,7 +519,8 @@ def test_every_bound_key_is_in_the_legend(app):
     from gtcore.planner import HELP_TEXT
     legend = HELP_TEXT
     for token in ("right-click", "P", "H", "Ctrl", "Tab", "arrows", "[  ]",
-                  "X / Del", "Z", "U", "+  -", "I", "D", "S", "R", "G", "?"):
+                  "X / Del", "Z", "U", "+  -", "I", "D", "V", "S", "R", "G",
+                  "?"):
         assert token in legend, "legend lacks %r" % token
     assert app.help_expanded
     app._toggle_help()
