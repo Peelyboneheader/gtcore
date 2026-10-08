@@ -2332,3 +2332,63 @@ _v7: 618 s wall; process RSS 1072 MB, peak 1619 MB._
 | empty mesh | final_report | raised ValueError | PASS | final_report: mesh is empty or None |
 
 _v8: 3 s wall; process RSS 1110 MB, peak 1619 MB._
+
+# Continuous refinement: profile and fixes (2026-10-08, branch `plan/continuous-perf`, from main cca2120)
+
+**Question.** Where does the E5 polish / continuous solver spend its time, and
+is the standalone continuous solver worth keeping? Instance: `output/cavity.ply`
+(synthetic cavity, 30,544 faces, 6302 mm²), whole-wall +5 mm shell target, h 4 mm
+/ 3 spins (231 candidates), rx 6000 cGy, M_opt 1000, SA seed 0. Endpoints from
+`api.target_metrics` on the FULL target (not the subsample); times on the laptop.
+
+**Profile of `refine_continuous` (N 8, 2 passes, 1527 NM evaluations, 28 ms each).**
+`conform_tile` geometry 82 % of wall (`trimesh.proximity.closest_point`, called
+4x per drape, 58 %; pure-numpy ray cast, no embree installed, 37 %); TG-43 dose on
+the 1000 points ≈ 2 %. The dose kernel is not the bottleneck; re-draping the tile
+on the mesh is. Not changed here (geometry module; a cached nearest-point query
+and an embree ray backend would cut E5 from ~40 s toward ~5 s with identical
+results).
+
+**Defects fixed (all in `gtcore/plan/solvers.py`).**
+1. *NM was blind to overlap.* The scout's cost charged +1e6 for overlapping
+   poses; the library version only tested conflicts after NM returned, so NM
+   converged on overlaps the acceptance test then discarded (4 of 10, 11 of 16
+   and 8 of 14 tile refinements rejected for overlap in the runs below). Now
+   `_ContinuousCore.moving_conflicts` (geometric proxy against every other tile,
+   planner footprint rule against tiles within `MOVING_NEAR_MM` = 45 mm) is
+   charged inside the NM cost; the acceptance test is unchanged and remains the
+   authority.
+2. *Deadline discarded work.* Hitting the wall-time budget raised out of NM and
+   dropped the interrupted tile's progress. `refine_tile` now tracks the best
+   feasible point and returns it (if it beats the start) when the deadline hits;
+   `descend` judges it like any other step and then stops.
+3. *Random starts stole budget.* `solve_continuous` skips a further start when
+   the remaining budget is below the measured cost of one coordinate-descent
+   pass (`per_start[i]["skipped"]` says so).
+4. `refine_tile` no longer re-drapes the final pose (one evaluation saved);
+   `info["nm_overlap_evals"]` counts penalised NM points.
+
+**Measurement (same SA selections for old and new; old = main cca2120).**
+
+| N | arm | V100 | D90 [cGy] | overlaps | s | accepted | rejected |
+|---|---|---|---|---|---|---|---|
+| 6 | sa | 0.5058 | 2339 | 0 | 1.9 | | |
+| 6 | E5 old | 0.5270 | 2238 | 0 | 34.9 | 6 | v100 2, overlap 4 |
+| 6 | E5 new | 0.5334 | 2201 | 0 | 35.1 | 11 | v100 1, overlap 0 (297 NM points penalised) |
+| 8 | sa | 0.8928 | 5969 | 0 | 1.9 | | |
+| 8 | E5 old | 0.9004 | 6001 | 0 | 38.3 | 3 | v100 2, overlap 11 |
+| 8 | E5 new | 0.9225 | 6098 | 0 | 42.4 | 10 | v100 5, soft 1, overlap 0 (293 penalised) |
+| 8 | continuous old, 60 s | 0.8904 | 5946 | 0 | 60.0 (time_limit) | greedy start 7, random start 0 passes | |
+| 8 | continuous new, 60 s | 0.8787 | 5894 | 0 | 45.0 (ok) | greedy start 13; both random starts skipped (15 s left < one 22 s pass) | |
+
+E5 gain over SA: +2.1 → +2.8 pp (N 6), +0.8 → +3.0 pp (N 8) at unchanged wall
+time. The standalone continuous solver is unchanged within subsample noise and
+still below SA (0.879–0.890 vs 0.893 at 30x the time): the verdict of the
+campaign stands (SA default; `solve_continuous` retained, not default; E5 is the
+discretization-error estimate and worth running when SA leaves headroom). The
+planner's Shift+O cycle still offers `continuous`; dropping it there would also
+coerce `gt plan --optimizer continuous` to SA, so it was left alone.
+
+Tests: `tests/test_plan_solvers.py` +3 (NM penalty agrees with
+`tiles_conflict`, NM never returns an overlapping pose, deadline keeps the
+best-so-far pose); full suite 674 passed / 14 skipped (504 s).

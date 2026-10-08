@@ -60,6 +60,12 @@ from ..interact import PlacedTile
 
 _EPS = 1e-12
 _CHUNK_ELEMS = 8_000_000      # rows per chunk of (C, M) temporaries ~ 64 MB float64
+MOVING_NEAR_MM = 45.0
+# Continuous refinement: the planner's footprint rule is only evaluated against
+# tiles whose anchor lies within this chord of the moving tile's anchor (two
+# 20 mm tiles have footprints no further than ~14 mm from their anchors, so
+# anchors further apart than this cannot touch; the geometric proxy, which is
+# microseconds, is always evaluated against every other tile).
 
 
 # ------------------------------------------------------------------ metrics
@@ -952,6 +958,7 @@ class _ContinuousCore:
         self.nm_runs = 0
         self.nm_seconds = 0.0
         self.nm_evals = 0
+        self.nm_overlap_evals = 0      # NM points charged the overlap penalty
 
     # ---- dose and objectives on the subsample
     def tile_dose(self, t: PlacedTile) -> np.ndarray:
@@ -985,10 +992,43 @@ class _ContinuousCore:
     def expired(self) -> bool:
         return self.deadline is not None and time.perf_counter() >= self.deadline
 
+    # ---- overlap of the moving tile against the fixed ones
+    def moving_conflicts(self, tile: PlacedTile, others: Sequence[PlacedTile]) -> bool:
+        """True when ``tile`` conflicts with any of ``others`` under the same
+        rule the acceptance test uses (``plan.tiles_conflict``: planner
+        footprint rule UNION geometric proxy), restricted to pairs that
+        involve the moving tile.  The proxy is evaluated against every other
+        tile (microseconds); the planner's footprint fit only against tiles
+        whose anchor lies within ``MOVING_NEAR_MM`` (two full tiles whose
+        anchors are further apart than that cannot touch)."""
+        from ..interact import find_overlapping_tiles
+        from .conflicts import PLANNER_THRESHOLD_MM, tile_pair_proxy_conflict
+        if not others:
+            return False
+        a = np.asarray(tile.anchor_ras, dtype=float)
+        for o in others:
+            if tile_pair_proxy_conflict(tile, o):
+                return True
+        for o in others:
+            if np.linalg.norm(np.asarray(o.anchor_ras, dtype=float) - a) <= MOVING_NEAR_MM:
+                if find_overlapping_tiles([tile, o], threshold_mm=PLANNER_THRESHOLD_MM):
+                    return True
+        return False
+
     # ---- one tile's Nelder-Mead
-    def refine_tile(self, tile: PlacedTile, others: np.ndarray):
+    def refine_tile(self, tile: PlacedTile, others: np.ndarray,
+                    other_tiles: Sequence[PlacedTile] = ()):
         """NM over (u, v, theta) for one tile with the others' dose fixed.
-        Returns ``(new_tile, new_dose, x)``; raises :class:`_Deadline`."""
+
+        Poses that overlap one of ``other_tiles`` (:meth:`moving_conflicts`)
+        or fail to conform cost ``+1e6`` inside NM, so the search is steered
+        to feasible poses instead of converging on an overlap that the
+        acceptance test then throws away.  Returns ``(new_tile, new_dose, x,
+        expired)`` for the best feasible point NM evaluated; ``expired`` is
+        True when the wall-time deadline cut NM short and the best point so
+        far is returned.  Raises :class:`_Deadline` when the deadline hits
+        before any feasible point improved on the start, and ``RuntimeError``
+        when no evaluated pose was feasible."""
         from scipy.optimize import minimize
         from ..interact import _rodrigues, conform_tile, snap_to_wall
 
@@ -999,6 +1039,9 @@ class _ContinuousCore:
         t2_0 /= max(np.linalg.norm(t2_0), 1e-12)
         kind = tile.kind
         mesh = self.mesh
+        other_tiles = list(other_tiles)
+        best: List[Any] = [np.inf, None, None, None]      # f, x, tile, dose
+        f_start = [np.inf]
 
         def _place(x):
             anchor = surf0 + x[0] * t1_0 + x[1] * t2_0
@@ -1014,22 +1057,37 @@ class _ContinuousCore:
                 t = _place(x)
             except Exception:
                 return 1e6
-            return -self.soft(others + self.tile_dose(t))
+            if self.moving_conflicts(t, other_tiles):
+                self.nm_overlap_evals += 1
+                return 1e6
+            dose = self.tile_dose(t)
+            f = -self.soft(others + dose)
+            if not np.any(x):
+                f_start[0] = f
+            if f < best[0]:
+                best[0], best[1], best[2], best[3] = f, np.asarray(x, dtype=float).copy(), t, dose
+            return f
 
         simplex0 = np.array([[0.0, 0.0, 0.0], [self.step_mm, 0.0, 0.0],
                              [0.0, self.step_mm, 0.0],
                              [0.0, 0.0, np.deg2rad(self.step_deg)]], dtype=float)
         t0 = time.perf_counter()
+        expired = False
         try:
-            sol = minimize(_cost, np.zeros(3), method="Nelder-Mead",
-                           options=dict(maxiter=self.max_iter, maxfev=2 * self.max_iter,
-                                        xatol=0.05, fatol=1e-6, initial_simplex=simplex0))
-            new_tile = _place(sol.x)
-            x = np.asarray(sol.x, dtype=float)
+            minimize(_cost, np.zeros(3), method="Nelder-Mead",
+                     options=dict(maxiter=self.max_iter, maxfev=2 * self.max_iter,
+                                  xatol=0.05, fatol=1e-6, initial_simplex=simplex0))
+        except _Deadline:
+            # keep the best feasible point seen so far if it beats the start
+            if best[2] is None or not best[0] < f_start[0]:
+                raise
+            expired = True
         finally:
             self.nm_runs += 1
             self.nm_seconds += time.perf_counter() - t0
-        return new_tile, self.tile_dose(new_tile), x
+        if best[2] is None:
+            raise RuntimeError("no feasible pose evaluated")
+        return best[2], best[3], best[1], expired
 
     # ---- coordinate descent over all tiles
     def descend(self, tiles: List[PlacedTile], n_passes: int) -> Tuple[List[PlacedTile], Dict[str, Any]]:
@@ -1056,8 +1114,10 @@ class _ContinuousCore:
                     if self.expired():
                         raise _Deadline()
                     others = total - doses[i]
+                    other_tiles = [t for j, t in enumerate(tiles) if j != i]
                     try:
-                        new_tile, new_dose, x = self.refine_tile(tiles[i], others)
+                        new_tile, new_dose, x, expired = self.refine_tile(
+                            tiles[i], others, other_tiles)
                     except _Deadline:
                         raise
                     except Exception:
@@ -1067,20 +1127,21 @@ class _ContinuousCore:
                     new_soft, new_v100 = self.soft(new_total), self.v100(new_total)
                     if new_v100 < v100_cur - _EPS:
                         rejected["v100"] += 1
-                        continue
-                    if new_soft <= soft_cur + 1e-9:
+                    elif new_soft <= soft_cur + 1e-9:
                         rejected["soft"] += 1
-                        continue
-                    trial = list(tiles)
-                    trial[i] = new_tile
-                    if tiles_conflict(trial):
-                        rejected["overlap"] += 1
-                        continue
-                    tiles, doses[i], total = trial, new_dose, new_total
-                    soft_cur, v100_cur = new_soft, new_v100
-                    offsets[i] = offsets[i] + x
-                    accepted += 1
-                    history.append((p, i, self.hard(total)))
+                    else:
+                        trial = list(tiles)
+                        trial[i] = new_tile
+                        if tiles_conflict(trial):
+                            rejected["overlap"] += 1
+                        else:
+                            tiles, doses[i], total = trial, new_dose, new_total
+                            soft_cur, v100_cur = new_soft, new_v100
+                            offsets[i] = offsets[i] + x
+                            accepted += 1
+                            history.append((p, i, self.hard(total)))
+                    if expired:
+                        raise _Deadline()
                 passes_done += 1
         except _Deadline:
             deadline_hit = True
@@ -1090,6 +1151,7 @@ class _ContinuousCore:
             "history": history, "passes_done": passes_done, "deadline_hit": deadline_hit,
             "offsets_uv_mm_theta_rad": [o.tolist() for o in offsets],
             "overlaps_after": list(tiles_conflict(tiles)),
+            "nm_overlap_evals": self.nm_overlap_evals,
         })
         return tiles, info
 
@@ -1111,15 +1173,20 @@ def refine_continuous(mesh, candidates: CandidateSet, selection, target: TargetS
     Inside NM the objective is the soft coverage (sigmoid, ``tau``) minus the
     hot-spot penalty with the other tiles' dose cached; the moving tile's
     dose comes from ``dose_at_points(exact=False)`` on ``target`` subsampled
-    to ``m_opt`` points.  A new pose is accepted only if hard V100 does not
-    decrease, the soft objective improves, and
+    to ``m_opt`` points.  Poses that overlap another tile (same rule as the
+    acceptance test, pairs involving the moving tile only) cost ``+1e6``
+    inside NM, so NM converges on feasible poses.  A new pose is accepted
+    only if hard V100 does not decrease, the soft objective improves, and
     ``plan.tiles_conflict(new_tiles) == []`` (planner rule + geometric proxy).
-    ``time_budget_s`` (optional)
-    aborts NM at the deadline and returns the tiles refined so far.
+    ``time_budget_s`` (optional) stops at the deadline: the tile being
+    refined keeps the best feasible pose NM had already found (if it beats
+    its start) and the tiles refined so far are returned.
 
     Returns ``(tiles, info)``; ``info`` has ``hard_before/after``,
     ``soft_before/after``, ``V100_before/after``, ``accepted``,
-    ``evaluations``, ``seconds``, per-tile offsets and NM cost.
+    ``rejected`` (per reason), ``nm_overlap_evals`` (NM points charged the
+    overlap penalty), ``evaluations``, ``seconds``, per-tile offsets and NM
+    cost.
     """
     t0 = time.perf_counter()
     deadline = None if time_budget_s is None else t0 + float(time_budget_s)
@@ -1175,10 +1242,13 @@ def solve_continuous(mesh, candidates: CandidateSet, target: TargetSet, rx_cgy: 
     NM; a tile move is accepted only if hard V100 does not drop, soft
     improves and ``plan.tiles_conflict`` stays empty); the start with the
     best final hard objective (then soft) wins.  ``time_budget_s`` is a
-    strict wall-time cap: NM is aborted at the deadline and the best so far
+    strict wall-time cap: NM is aborted at the deadline (the interrupted
+    tile keeps the best feasible pose found so far) and the best start
     returned (``status="time_limit"``; reproducibility from ``seed`` then
-    depends on the machine).  Recommended discrete start grid: h = 4 mm,
-    3 spins.
+    depends on the machine).  A further start is skipped, and says so in
+    ``extra["per_start"]``, when the remaining budget is below the measured
+    cost of one coordinate-descent pass.  Recommended discrete start grid:
+    h = 4 mm, 3 spins.
 
     Returns ``(tiles, result)``: the tiles are CONTINUOUS poses, not
     candidates; ``result.selection`` is the winning start's candidate ids,
@@ -1252,6 +1322,16 @@ def solve_continuous(mesh, candidates: CandidateSet, target: TargetSet, rx_cgy: 
             per_start.append({"start": s_idx, "origin": origin, "selection": sorted(ids),
                               "skipped": "time budget exhausted"})
             continue
+        if deadline is not None and best is not None and core.nm_runs:
+            # a start that cannot complete one coordinate-descent pass only
+            # steals budget from the start already refined
+            est_pass_s = n_tiles * core.nm_seconds / core.nm_runs
+            remaining = deadline - time.perf_counter()
+            if remaining < est_pass_s:
+                per_start.append({"start": s_idx, "origin": origin, "selection": sorted(ids),
+                                  "skipped": "remaining budget %.1f s < one pass (est. %.1f s)"
+                                             % (remaining, est_pass_s)})
+                continue
         tiles, info = core.descend(list(candidates.tiles_of(ids)), n_passes)
         deadline_hit = deadline_hit or info["deadline_hit"]
         key = (info["hard_after"], info["soft_after"])

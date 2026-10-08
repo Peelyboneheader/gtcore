@@ -590,3 +590,70 @@ def test_sweep_continuous(flat_cont):
         tiles = res.extra["tiles"]
         assert len(tiles) == res.selection.size and find_overlapping_tiles(tiles) == []
     assert set(sw.results[0].selection.tolist()) <= set(sw.results[1].selection.tolist())
+
+
+# ------------------------------- continuous: NM overlap penalty / deadline
+def _flat_pair(size_mm: float = 60.0, xs=(-12.0, 12.0)):
+    """Flat wall, two full tiles at ``xs`` on the x axis, 300 shell points."""
+    mesh = pf.flat_wall_mesh(size_mm=size_mm)
+    tiles = []
+    for x in xs:
+        surf, n_in = snap_to_wall(mesh, np.array([x, 0.0, 0.0]))
+        tiles.append(conform_tile(mesh, surf, n_in, np.array([1.0, 0.0, 0.0]), kind="full"))
+    rng = np.random.default_rng(0)
+    pts = np.column_stack([rng.uniform(-25, 25, 300), rng.uniform(-25, 25, 300),
+                           np.full(300, 5.0)])
+    return mesh, tiles, TargetSet.from_points(pts, name="flat+5mm")
+
+
+def test_moving_conflicts_matches_tiles_conflict_rule():
+    from gtcore.plan.conflicts import tiles_conflict
+    mesh, tiles, target = _flat_pair()
+    core = S._ContinuousCore(mesh, target, 3000.0, m_opt=300)
+    t0, t1 = tiles
+    assert core.moving_conflicts(t0, [t1]) is False and tiles_conflict(tiles) == []
+    assert core.moving_conflicts(t0, []) is False
+    # tile 0 slid to x = +2: 10 mm from tile 1 -> overlap under both rules
+    surf, n_in = snap_to_wall(mesh, np.array([2.0, 0.0, 0.0]))
+    t_over = conform_tile(mesh, surf, n_in, np.array([1.0, 0.0, 0.0]), kind="full")
+    assert core.moving_conflicts(t_over, [t1]) is True
+    assert tiles_conflict([t_over, t1]) != []
+
+
+def test_refine_tile_nm_never_returns_an_overlapping_pose():
+    # 2 mm gap and a 2 mm first simplex step: NM probes the overlapping pose
+    mesh, tiles, target = _flat_pair(xs=(-11.0, 11.0))
+    core = S._ContinuousCore(mesh, target, 3000.0, m_opt=300, step_mm=2.0, step_deg=10.0,
+                             max_iter=40)
+    others_dose = core.tile_dose(tiles[1])
+    new_tile, new_dose, x, expired = core.refine_tile(tiles[0], others_dose, [tiles[1]])
+    assert not expired and new_dose.shape == (300,) and x.shape == (3,)
+    assert core.nm_overlap_evals >= 1          # charged, not silently converged on
+    assert find_overlapping_tiles([new_tile, tiles[1]]) == []
+    assert not core.moving_conflicts(new_tile, [tiles[1]])
+    assert np.allclose(new_tile.seed_centers[:, 2], -3.0, atol=1e-6)
+
+
+def test_descend_deadline_keeps_best_so_far_pose(monkeypatch):
+    from gtcore.plan.conflicts import tiles_conflict
+    mesh, tiles, target = _flat_pair()
+    core = S._ContinuousCore(mesh, target, 3000.0, m_opt=300, max_iter=40,
+                             deadline=time.perf_counter() + 1e9)
+    calls = {"n": 0}
+
+    def fake_expired():
+        calls["n"] += 1
+        return calls["n"] > 15               # deadline after ~14 NM evaluations
+
+    monkeypatch.setattr(core, "expired", fake_expired)
+    new_tiles, info = core.descend(tiles, n_passes=2)
+    assert info["deadline_hit"] and info["passes_done"] == 0 and core.nm_runs == 1
+    assert core.nm_evals <= 15
+    # the interrupted tile is judged like any other (or dropped if nothing beat
+    # its start); nothing is lost and nothing infeasible is kept
+    assert info["accepted"] + sum(info["rejected"].values()) <= 1
+    assert len(info["history"]) == info["accepted"]
+    assert info["hard_after"] >= info["hard_before"] - 1e-12
+    assert info["soft_after"] >= info["soft_before"] - 1e-12
+    assert tiles_conflict(new_tiles) == [] and len(new_tiles) == 2
+    assert "nm_overlap_evals" in info
