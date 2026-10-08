@@ -11,7 +11,7 @@ ventricles -- interpret accordingly).
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Dict, Optional, Union
 
 import numpy as np
@@ -41,6 +41,9 @@ class PipelineResult:
     timings: Dict[str, float] = field(default_factory=dict)
     tiles: Optional[TileFitResult] = None  # set when n_full_tiles was given
     implant: Optional[Dict] = None         # assess_implant() verdict
+    # free-form extras; "seed_posterior" (fuse_tiles=True, plan stage 5)
+    # mirrors vol.meta["seed_posterior"]: raw AND posterior seed positions
+    meta: Dict = field(default_factory=dict)
 
 
 def filter_seed_shaped(cands: SeedCandidates,
@@ -190,7 +193,8 @@ def reconstruct(vol: Volume, verbose: bool = True,
                 n_half_tiles: int = 0,
                 complete_degraded: bool = True,
                 n_seeds_expected: Optional[int] = None,
-                refine_seeds: Optional[str] = None) -> PipelineResult:
+                refine_seeds: Optional[str] = None,
+                fuse_tiles: bool = False) -> PipelineResult:
     """Run the full reconstruction pipeline on one CT volume.
 
     ``n_seeds_expected`` (the implanted seed count, when the OR team knows
@@ -219,11 +223,27 @@ def reconstruct(vol: Volume, verbose: bool = True,
     signal being measured), and before the implant assessment, so every
     consumer downstream sees the refined centres.  Per-seed status
     ("ok" / "fallback:<reason>") is logged in ``vol.meta["seed_refine"]``.
+
+    ``fuse_tiles=True`` (plan stage 5, opt-in) needs fitted tiles AND a
+    per-seed covariance (``seeds.cov_ras``, from the seed refinement of
+    stage 2): the tiles are fitted with the hierarchical weighting
+    (``seed_cov``; counted mode goes through
+    :func:`~gtcore.tiles.auto.fit_tiles_prior` without its cover pass so
+    every tile carries the bent-tile fit) and the posterior seed positions
+    of :func:`gtcore.tiles.fuse.posterior_seed_positions` are computed.
+    Raw and posterior positions are kept in ``vol.meta["seed_posterior"]``
+    (and ``PipelineResult.meta``).  THE SWITCH: only with the flag on does
+    ``PipelineResult.seeds`` -- the feed of the dose engine, the planner and
+    ``to_placed_tiles`` -- carry the posterior centres and covariances; the
+    raw detections stay in ``PipelineResult.meta["seeds_unfused"]``.
+    Without ``cov_ras`` nothing is fused and the reason is recorded.
     """
     if refine_seeds not in (None, "centroid"):
         raise ValueError("refine_seeds must be None or 'centroid', got %r"
                          % (refine_seeds,))
     timings = {}
+    meta = {}
+    fusion = None           # vol.meta["seed_posterior"] when fuse_tiles
 
     def stage(name, fn):
         t0 = time.perf_counter()
@@ -422,6 +442,38 @@ def reconstruct(vol: Volume, verbose: bool = True,
                 complete_degraded=complete_degraded,
             )
 
+        fuse_cov = None
+        if fuse_tiles:
+            fuse_cov = getattr(seeds, "cov_ras", None)
+            if fuse_cov is None:
+                fusion = dict(
+                    applied=False,
+                    reason="seeds.cov_ras is None: no per-seed covariance "
+                           "(needs the stage-2 seed refinement)")
+            elif len(seeds):
+                _plain_fit = _fit
+
+                def _fit():
+                    from .tiles import ImplantPrior, fit_tiles_auto, fit_tiles_prior
+
+                    if auto:
+                        return fit_tiles_auto(
+                            seeds.centers_ras, seeds.axes_ras,
+                            cavity_center_ras=cavity_center,
+                            allow_half=bool(n_half_tiles),
+                            mesh=meshes.get("cavity"),
+                            spacing_mm=vol.spacing, seed_cov=fuse_cov)
+                    if int(n_full_tiles) <= 0 and int(n_half_tiles) <= 0:
+                        return _plain_fit()
+                    return fit_tiles_prior(
+                        seeds.centers_ras, seeds.axes_ras,
+                        ImplantPrior(n_full=int(n_full_tiles),
+                                     n_half=int(n_half_tiles)),
+                        cavity_center_ras=cavity_center,
+                        spacing_mm=vol.spacing, cover=False,
+                        complete_degraded=complete_degraded,
+                        seed_cov=fuse_cov)
+
         tiles = stage("tile fitting", _fit)
         if verbose and auto:
             print("  auto: %d tiles, %d candidates rejected; %s"
@@ -436,8 +488,48 @@ def reconstruct(vol: Volume, verbose: bool = True,
                   % (len(tiles.tiles), tiles.n_expected,
                      len(tiles.rejected_indices)))
 
+        if fuse_cov is not None and len(seeds):
+            from .tiles.fuse import posterior_seed_positions
+
+            def _fuse():
+                out = posterior_seed_positions(tiles, seeds.centers_ras,
+                                               fuse_cov)
+                # same mean; covariance that also carries the fitted-pose
+                # uncertainty (fuse docstring) -- kept for the NEES check
+                pev = posterior_seed_positions(tiles, seeds.centers_ras,
+                                               fuse_cov, cov_mode="pev")[1]
+                return out + (pev,)
+
+            post, post_cov, finfo, post_cov_pev = stage("tile fusion", _fuse)
+            fusion = dict(
+                applied=True,
+                raw_centers_ras=np.array(seeds.centers_ras, dtype=float),
+                raw_cov_ras=np.array(fuse_cov, dtype=float),
+                centers_ras=post, cov_ras=post_cov,
+                cov_ras_pev=post_cov_pev, info=finfo)
+            meta["seeds_unfused"] = seeds
+            info = dict(seeds.info or {})
+            info["fused"] = True
+            seeds = replace(seeds, centers_ras=post, cov_ras=post_cov,
+                            info=info)
+            if verbose:
+                print("  tile fusion: %d seeds moved toward their tile "
+                      "(mean %.2f mm, max %.2f mm), %d passed through"
+                      % (finfo["n_fused"],
+                         float(finfo["shift_mm"][finfo["tile_of"] >= 0].mean())
+                         if finfo["n_fused"] else 0.0,
+                         float(finfo["shift_mm"].max()) if len(post) else 0.0,
+                         finfo["n_passthrough"]))
+    if fuse_tiles:
+        if fusion is None:
+            fusion = dict(applied=False,
+                          reason="no tiles fitted (n_full_tiles is None) "
+                                 "or no seeds")
+        vol.meta["seed_posterior"] = fusion
+        meta["seed_posterior"] = fusion
+
     return PipelineResult(
         volume=vol, seeds=seeds, seeds_raw=seeds_raw, masks=masks,
         cavity_mask=cavity, meshes=meshes, timings=timings, tiles=tiles,
-        implant=implant,
+        implant=implant, meta=meta,
     )
