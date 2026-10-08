@@ -238,7 +238,10 @@ def add_rendered_seeds(array, affine, centers, axes,
     """Add the slab-integrated, blurred seed patches into ``array`` in place.
 
     ``array`` is ``[k, j, i]`` float; ``affine`` must be axis-aligned.  No
-    noise, no clipping (see :func:`render_seeds`).  Returns ``array``.
+    noise, no clipping (see :func:`render_seeds`).  ``metal_hu`` is the
+    capsule contrast over what it displaces: a scalar, or one value per seed
+    (e.g. metal minus the local tissue for seeds in fluid or air).  Returns
+    ``array``.
     """
     step = _axis_aligned_spacing(affine)
     origin = np.asarray(affine, dtype=float)[:3, 3]
@@ -251,7 +254,9 @@ def add_rendered_seeds(array, affine, centers, axes,
         raise ValueError("centers and axes disagree in length")
     radius = 0.5 * float(diameter_mm)
     shape = np.asarray(array.shape)
-    for c, u in zip(centers, axes):
+    contrast = np.broadcast_to(np.asarray(metal_hu, dtype=float),
+                               (centers.shape[0],))
+    for c, u, m_hu in zip(centers, axes, contrast):
         patch, (k0, j0, i0) = _seed_patch(c, u, step, origin, sig,
                                           float(length_mm), radius,
                                           float(fine_mm))
@@ -264,7 +269,7 @@ def add_rendered_seeds(array, affine, centers, axes,
         dst = tuple(slice(int(a), int(b)) for a, b in zip(clo, chi))
         src = tuple(slice(int(a - l), int(b - l))
                     for a, b, l in zip(clo, chi, lo))
-        array[dst] += (float(metal_hu) * patch[src]).astype(array.dtype)
+        array[dst] += (float(m_hu) * patch[src]).astype(array.dtype)
     return array
 
 

@@ -589,7 +589,9 @@ def make_head_phantom(
         Clip the final volume at this ceiling (e.g. 3071, the 12-bit scanner
         limit).  ``None`` (default) leaves values unclipped.
     metal_hu : float, optional
-        Capsule contrast above the local tissue for ``"analytic"``; default
+        Capsule contrast over a brain (35 HU) background for ``"analytic"``
+        (the capsule displaces the local tissue, so its contrast over fluid
+        or air is larger by the difference); default
         :data:`gtcore.phantom.seed_render.METAL_HU_PRINTED` (the saturating,
         printed-phantom-like regime, which is also where the binary seeds
         sit: 0.7 mm peaks ~4000 HU unclipped).
@@ -713,12 +715,20 @@ def make_head_phantom(
     if seed_render == "analytic":
         from .seed_render import METAL_HU_PRINTED, add_rendered_seeds
 
+        centers = np.array([s.center_ras for s in seeds]).reshape(-1, 3)
+        # The capsule DISPLACES the tissue it occupies: its contrast over the
+        # local (blurred) anatomy is (brain + metal_hu) - local, so a seed in
+        # the cavity's air pocket is as bright as one in fluid.  metal_hu is
+        # calibrated over a 35 HU (brain) background.
+        ijk = (centers - affine[:3, 3]) / np.diag(affine)[:3]
+        local = ndimage.map_coordinates(hu, ijk[:, ::-1].T, order=1,
+                                        mode="nearest")
+        m_hu = METAL_HU_PRINTED if metal_hu is None else float(metal_hu)
         add_rendered_seeds(
-            hu, affine,
-            np.array([s.center_ras for s in seeds]),
-            np.array([s.axis_ras for s in seeds]),
+            hu, affine, centers,
+            np.array([s.axis_ras for s in seeds]).reshape(-1, 3),
             length_mm=SEED_LENGTH_MM, diameter_mm=_geom.SEED_DIAMETER_MM,
-            metal_hu=METAL_HU_PRINTED if metal_hu is None else float(metal_hu),
+            metal_hu=HU_BRAIN + m_hu - local.astype(float),
             psf_sigma_mm=PSF_SIGMA_MM,
         )
     if streaks:
