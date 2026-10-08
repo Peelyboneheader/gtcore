@@ -387,7 +387,7 @@ class GreyCentroid:
 def _grey_centroid(grid, center, axis, others_c, others_a, *, n_iter=3,
                    bg_shell_mm=BG_SHELL_MM, mask="voronoi", roi="capsule",
                    slab="bound", saturation=None,
-                   max_bg_shift_mm=MAX_BACKGROUND_SHIFT_MM):
+                   max_bg_shift_mm=MAX_BACKGROUND_SHIFT_MM, max_shift_mm=None):
     c0 = np.asarray(center, dtype=float).reshape(3)
     ax0 = (np.array([0.0, 0.0, 1.0]) if axis is None
            else np.asarray(axis, dtype=float).reshape(3))
@@ -431,6 +431,9 @@ def _grey_centroid(grid, center, axis, others_c, others_a, *, n_iter=3,
             return fail("extended")
         pts = nb.pts[inr]
         c = (pts * w[:, None]).sum(axis=0) / wsum
+        if (max_shift_mm is not None
+                and float(np.linalg.norm(c - c0)) > float(max_shift_mm)):
+            return fail("shift")
         ax = _long_axis(pts, np.clip(w, 0.0, None), grid.quant_cov, ax)
 
     v = nb.vals[nb.in_roi]
@@ -456,7 +459,8 @@ def grey_centroid(vol, center, axis=None, others=None, n_iter=3,
                   bg_shell_mm=BG_SHELL_MM, *, others_axes=None,
                   psf_sigma_mm=PSF_SIGMA_MM, mask="voronoi", roi="capsule",
                   slab="bound", saturation=None,
-                  max_bg_shift_mm=MAX_BACKGROUND_SHIFT_MM) -> GreyCentroid:
+                  max_bg_shift_mm=MAX_BACKGROUND_SHIFT_MM,
+                  max_shift_mm=None) -> GreyCentroid:
     """Background-subtracted intensity-weighted centroid of one seed.
 
     See the module docstring for the estimator, its covariance and the
@@ -464,8 +468,10 @@ def grey_centroid(vol, center, axis=None, others=None, n_iter=3,
     starts from +z, which the PCA corrects after the first pass) and is
     returned unchanged on a fallback; ``others`` / ``others_axes`` are the
     other candidates (masked out of ROI and shell).  ``saturation`` (the
-    clip ceiling, :func:`estimate_saturation`) is only counted.  A fallback
-    returns the input centre, the voxel-quantization covariance and
+    clip ceiling, :func:`estimate_saturation`) is only counted.
+    ``max_shift_mm`` (``None``: unchecked) stops the iteration as soon as the
+    estimate leaves that radius around ``center``.  A fallback returns the
+    input centre, the voxel-quantization covariance and
     ``status = "fallback:<reason>"``.
     """
     _check_options(roi, slab, mask)
@@ -474,7 +480,8 @@ def grey_centroid(vol, center, axis=None, others=None, n_iter=3,
     return _grey_centroid(grid, center, axis, oc, oa, n_iter=n_iter,
                           bg_shell_mm=bg_shell_mm, mask=mask, roi=roi,
                           slab=slab, saturation=saturation,
-                          max_bg_shift_mm=max_bg_shift_mm)
+                          max_bg_shift_mm=max_bg_shift_mm,
+                          max_shift_mm=max_shift_mm)
 
 
 def refine_seed_candidates(vol, cands: SeedCandidates, method="centroid",
@@ -520,14 +527,12 @@ def refine_seed_candidates(vol, cands: SeedCandidates, method="centroid",
                            np.delete(axes, i, axis=0),
                            n_iter=n_iter, bg_shell_mm=bg_shell_mm, mask=mask,
                            roi=roi, slab=slab, saturation=saturation,
-                           max_bg_shift_mm=max_bg_shift_mm)
+                           max_bg_shift_mm=max_bg_shift_mm,
+                           max_shift_mm=max_shift_mm)
         st = r.status
-        d = float(np.linalg.norm(r.center_ras - centers[i]))
-        if st == "ok" and d > float(max_shift_mm):
-            st = "fallback:shift"
         if st == "ok":
-            new_c[i], new_a[i], cov[i], shift[i] = (r.center_ras, r.axis_ras,
-                                                    r.cov_ras, d)
+            new_c[i], new_a[i], cov[i] = r.center_ras, r.axis_ras, r.cov_ras
+            shift[i] = float(np.linalg.norm(r.center_ras - centers[i]))
         else:
             cov[i] = grid.quantization_cov()
         status.append(st)
