@@ -598,7 +598,7 @@ def _counted_margins(quads, pairs, n_full, n_half, chosen_q, chosen_p):
 
 def fit_tiles(centers_ras, axes_ras, n_full, n_half=0, cavity_center_ras=None,
               complete_degraded=False, mesh=None, spacing_mm=None,
-              score="chord", margins=False):
+              score="chord", margins=False, seed_cov=None):
     """Assign seed candidates to ``n_full`` full and ``n_half`` half tiles.
 
     Parameters
@@ -711,10 +711,18 @@ def fit_tiles(centers_ras, axes_ras, n_full, n_half=0, cavity_center_ras=None,
         from .auto import deformable_score
         from .deform import fit_deformable
 
+        # per-candidate covariances (stage 5 weighting) reach the counted
+        # score too, so counted == auto also when seed_cov is given
+        cov_all = None
+        if seed_cov is not None:
+            cov_all = np.asarray(seed_cov, dtype=float)
+            if cov_all.shape != (centers.shape[0], 3, 3):
+                raise ValueError("seed_cov must be (N, 3, 3), got %r" % (cov_all.shape,))
         rescored = []
         for _s, idx, _r in quads:
             fit = fit_deformable(centers[list(idx)], axes[list(idx)],
-                                 kind="full")
+                                 kind="full",
+                                 seed_cov=None if cov_all is None else cov_all[list(idx)])
             fits[idx] = fit
             rescored.append((max(_DEF_SCORE_FLOOR, deformable_score(fit)),
                              idx, fit.rms_mm))

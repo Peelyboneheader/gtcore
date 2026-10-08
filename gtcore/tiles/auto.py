@@ -1044,7 +1044,8 @@ def fit_tiles_prior(centers_ras, axes_ras, prior: ImplantPrior,
     counted = fit_tiles(centers, axes, prior.n_full, prior.n_half,
                         cavity_center_ras=cavity_center,
                         complete_degraded=complete_degraded,
-                        score="deformable", margins=margins)
+                        score="deformable", margins=margins,
+                        seed_cov=seed_cov)
     tol = spacing_tolerance(spacing_mm)
     result = AutoFitResult(spacing_tol=tol, auto=False, prior=prior,
                            n_requested=int(prior.n_full),
