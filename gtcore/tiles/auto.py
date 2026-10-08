@@ -630,7 +630,12 @@ def to_placed_tiles(result, centers_ras=None, axes_ras=None):
             seed_a = None
         if pose.deform is not None:
             fit = pose.deform
-            n = fit.pose.normal                      # toward the cavity
+            n = np.asarray(fit.pose.normal, dtype=float)   # toward the cavity
+            # near-flat fits (kappa ~ 0) leave the sheet normal's sign free:
+            # make it agree with the pose normal (which points AWAY from the
+            # cavity, fit.py convention) so placed tiles always face inward
+            if float(n @ np.asarray(pose.normal_ras, dtype=float)) > 0.0:
+                n = -n
             corners = deformed_footprint(fit.pose, fit.params, offset_mm=0.0)
             if seed_c is None:
                 seed_c = fit.seed_points()
@@ -908,6 +913,15 @@ def fit_tiles_prior(centers_ras, axes_ras, prior: ImplantPrior,
                 pose.deform = fit_deformable(c, a, kind=pose.kind)
             except Exception:
                 pose.deform = None
+        if pose.deform is not None:
+            # report the pose of the model that is drawn: to_placed_tiles
+            # builds the board tile from the bent-tile fit, so the normal and
+            # in-plane axis come from it too (oriented as _deformed_pose does);
+            # the centre (seed mean), ids and residual are unchanged
+            normal = _orient_normal(np.asarray(pose.deform.pose.normal, float).copy(),
+                                    pose.center_ras, cavity_center)
+            pose.normal_ras = normal
+            pose.axis_ras = _project_in_plane(pose.deform.pose.t1, normal)
     n_full_found = sum(1 for p in result.tiles if p.kind == "full")
     result.n_selected = n_full_found
     result.n_expected = int(prior.n_full) + int(prior.n_half)

@@ -534,7 +534,7 @@ def _complete_degraded_quads(centers, axes, dist, leftovers, missing_full,
 
 
 def fit_tiles(centers_ras, axes_ras, n_full, n_half=0, cavity_center_ras=None,
-              complete_degraded=False, mesh=None):
+              complete_degraded=False, mesh=None, spacing_mm=None):
     """Assign seed candidates to ``n_full`` full and ``n_half`` half tiles.
 
     Parameters
@@ -580,9 +580,13 @@ def fit_tiles(centers_ras, axes_ras, n_full, n_half=0, cavity_center_ras=None,
             raise ValueError("n_full must be an int or 'auto', got %r" % (n_full,))
         from .auto import fit_tiles_auto
 
+        # spacing_mm scales the cover-pass tolerance on coarse scans; it was
+        # dropped here before 2026-10-08, so reconstruct() ran auto mode at
+        # the 1 mm tolerance regardless of slice thickness
         return fit_tiles_auto(centers_ras, axes_ras,
                               cavity_center_ras=cavity_center_ras,
-                              allow_half=bool(n_half), mesh=mesh)
+                              allow_half=bool(n_half), mesh=mesh,
+                              spacing_mm=spacing_mm)
     centers = np.asarray(centers_ras, dtype=float).reshape(-1, 3)
     axes = _normalize_axes(axes_ras) if centers.size else \
         np.zeros((0, 3), dtype=float)

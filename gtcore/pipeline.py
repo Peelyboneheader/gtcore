@@ -56,13 +56,7 @@ def filter_seed_shaped(cands: SeedCandidates,
         (cands.volumes_mm3 >= min_mm3) & (cands.volumes_mm3 <= max_mm3)
         & (cands.elongations >= min_elong) & (cands.elongations <= max_elong)
     )
-    return SeedCandidates(
-        mask=cands.mask,
-        centers_ras=cands.centers_ras[keep],
-        axes_ras=cands.axes_ras[keep],
-        volumes_mm3=cands.volumes_mm3[keep],
-        elongations=cands.elongations[keep],
-    )
+    return cands.subset(keep)
 
 
 def _seed_scale_metal_mask(mask, spacing, max_mm3=SEED_MAX_MM3 + 5.0):
@@ -273,13 +267,7 @@ def reconstruct(vol: Volume, verbose: bool = True,
         inside = interior[kji[:, 0], kji[:, 1], kji[:, 2]]
         vault_info["applied"] = True
         vault_info["n_dropped"] = int(len(seeds) - int(inside.sum()))
-        seeds = SeedCandidates(
-            mask=seeds.mask,
-            centers_ras=seeds.centers_ras[inside],
-            axes_ras=seeds.axes_ras[inside],
-            volumes_mm3=seeds.volumes_mm3[inside],
-            elongations=seeds.elongations[inside],
-        )
+        seeds = seeds.subset(inside)
         if verbose:
             print("  vault filter: %d seeds inside the cranial interior" % len(seeds))
     vol.meta["vault_filter"] = vault_info
@@ -310,11 +298,7 @@ def reconstruct(vol: Volume, verbose: bool = True,
                 kji = np.clip(np.round(ijk[:, ::-1]).astype(int), 0,
                               np.array(interior.shape) - 1)
                 inside = interior[kji[:, 0], kji[:, 1], kji[:, 2]]
-                s2 = SeedCandidates(
-                    mask=s2.mask, centers_ras=s2.centers_ras[inside],
-                    axes_ras=s2.axes_ras[inside],
-                    volumes_mm3=s2.volumes_mm3[inside],
-                    elongations=s2.elongations[inside])
+                s2 = s2.subset(inside)
             near2 = _count_near(s2.centers_ras, ref, SEED_SEARCH_RADIUS_MM)
             keep = (near2 > have and near2 <= max(expected + 8, have)
                     and near2 <= SEED_SEARCH_MAX_CANDIDATES)
@@ -398,7 +382,8 @@ def reconstruct(vol: Volume, verbose: bool = True,
                 return fit_tiles(seeds.centers_ras, seeds.axes_ras,
                                  n_full_tiles, int(n_half_tiles),
                                  cavity_center_ras=cavity_center,
-                                 mesh=meshes.get("cavity"))
+                                 mesh=meshes.get("cavity"),
+                                 spacing_mm=vol.spacing)
             return fit_tiles(
                 seeds.centers_ras, seeds.axes_ras,
                 int(n_full_tiles), int(n_half_tiles),

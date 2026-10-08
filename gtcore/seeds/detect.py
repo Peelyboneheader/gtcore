@@ -35,6 +35,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from typing import Optional
+
 import numpy as np
 from scipy import ndimage
 
@@ -147,6 +149,11 @@ class SeedCandidates:
     elongations : ndarray (N,)
         ``sqrt(major / minor)`` PCA eigenvalue ratio; ~1 for a blob, large for
         a capsule.  Degenerate blobs report 1.0.
+    cov_ras : ndarray (N, 3, 3), optional
+        Per-seed position covariance in RAS mm^2 when a refinement step
+        (``gtcore.seeds.refine``) estimated one; ``None`` otherwise.
+    info : dict, optional
+        Free-form per-run diagnostics (e.g. refinement status per seed).
     """
 
     mask: np.ndarray
@@ -154,9 +161,38 @@ class SeedCandidates:
     axes_ras: np.ndarray
     volumes_mm3: np.ndarray
     elongations: np.ndarray
+    cov_ras: Optional[np.ndarray] = None
+    info: Optional[dict] = None
 
     def __len__(self):
         return int(self.centers_ras.shape[0])
+
+    def subset(self, keep) -> "SeedCandidates":
+        """Candidates selected by a bool mask or index array; every per-seed
+        field (including ``cov_ras``) is carried, the union ``mask`` and
+        ``info`` are shared.  Use this instead of rebuilding the dataclass
+        by hand so fields added later are never silently dropped."""
+        keep = np.asarray(keep)
+        if keep.dtype == bool:
+            idx = np.flatnonzero(keep)
+        else:
+            idx = keep.astype(int).reshape(-1)
+        info = self.info
+        if info is not None:
+            info = dict(info)
+            for key, val in list(info.items()):
+                arr = np.asarray(val) if isinstance(val, (list, np.ndarray)) else None
+                if arr is not None and arr.ndim >= 1 and arr.shape[0] == len(self):
+                    info[key] = arr[idx]
+        return SeedCandidates(
+            mask=self.mask,
+            centers_ras=self.centers_ras[idx],
+            axes_ras=self.axes_ras[idx],
+            volumes_mm3=self.volumes_mm3[idx],
+            elongations=self.elongations[idx],
+            cov_ras=None if self.cov_ras is None else self.cov_ras[idx],
+            info=info,
+        )
 
 
 def detect_seed_candidates(vol, hu_threshold=2000.0, min_mm3=0.2, max_mm3=120.0,
