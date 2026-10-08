@@ -198,6 +198,9 @@ seeds at 2.8 mm (recall 0.92, partition 0/5).
 | 5 — hierarchical WLS + posterior seeds | identical fit without covariance; head phantom 2.1 / 2.8 mm mean 3D error ≥ 15 % below raw; tile centre / normal not worse; 2.8 mm partition ≥ 3/5; posterior NEES in [0.5, 2]; stable across slack 0.1–0.5 mm | **PENDING-COVARIANCE** (stand-in: analytic slab covariance). Identity: bit-identical (max diff 0.0 over 288 fits vs 3cf35af; frozen reference in the tests) ✓. 2.1 mm: −0.3 % ✗. 2.8 mm: −15.2 % (borderline ✓). Centre unchanged; normal 3.77→2.66° (2.1) and 6.44→2.85° (2.8) ✓. Partition 2.8 mm 5/5 (raw also 5/5); 2.1 mm 2/5, same as raw (split-fragment detections). NEES conditional 2.02 / 3.00 ✗, PEV 1.25 / 1.76 ✓ (input covariance itself 1.19 / 1.86). Slack sweep: 2.1 / 2.8 mm within 2.5 % ✓; 0.7 mm at slack 0.1 is 16 % worse than raw ✗ | b09cb39 | opt-in `reconstruct(fuse_tiles=True)`, default off |
 | 4 | counted = automatic partition on every auto test case | **PASS** 30/30 synthetic layouts (rng 0–5 × 1–5 tiles, truth seeds), counted (deformable) = auto = truth; `capped` False on all 30 and True on the constructed lattice with a 20-node cap. Printed phantom: counted (deformable) = auto on all 8 tiles; counted chord differs on the 25/31 pair | d81b45d | `fit_tiles(score="deformable")` opt-in; `fit_tiles_prior` (planner) uses it; `fit_tiles` default and `assess_implant` / `reconstruct` stay `"chord"` |
 | 6 | margins > 2 on clean cases; constructed shared-seed case < 1 and flagged; normal σ grows with seed noise; centre covariance within 2× of the empirical scatter; planner cost < 0.5 s | **PASS** clean margins all `inf` (no same-count alternative); shared-seed case 4·10⁻⁶, flagged; normal σ 0.1 < 0.3 < 0.6 mm monotone; centre-covariance ratio 1.13–1.32 when every residual row carries the same noise (0.45–0.53 with noise-free axes, 3.8–4.1 with 10° axis noise, see below); margins 2–4 ms + uncertainty 6 ms on the printed phantom. Printed 25/31 pair: margin 1.87 under the bent-tile score → **not** flagged (0.27, flagged, under the chord score) | d81b45d | `margins=False` opt-in on `fit_tiles` / `fit_tiles_auto` / `fit_tiles_prior`; planner suggest calls `margins=True`; `DeformableFit.compute_uncertainty()` lazy, run for reported tiles in `_finish` |
+| 3 | side-by-side seeds 2.5–3.5 mm apart still split | pass: 6/6 fixed configurations within 0.21 mm (`tests/test_seeds_merge_split.py`); 90/90 random pairs within 0.19 mm with the weighted split (k-means++: 86/90, worst 1.53 mm) | 6eb4aa4 | split: windowed median + halves guard + weighted split, all default-on |
+| 3 | gap-slice fragment → 1 candidate | pass on the PostOp slab geometry (1 mm slices every 2 mm): 29/200 random seeds fragment, 0 stay fragmented at 4.0 mm, merged centre error 0.53 mean / 1.50 max. **Not met** on 2 mm slabs with interpolated gap slices (G3): there the fragments are tip pairs 4.2–4.7 mm apart, beyond the 4.0 mm cap (see stage 3, limits). Harness (`validation_seed_localization.py`, 200 seeds per grid and layout): FP 29 → 0 on G2, 53 → 32 on the loader-grid G3, 20 → 12 on G4, recall and 3D error unchanged or better | 6eb4aa4 | merge: pipeline default on for coarse scans with slices thinner than their spacing; opt-in in `detect_seed_candidates` |
+| 3 | 0 false splits among 30 noise blobs | pass (10 seeds + 30 one/two-voxel specks at 2200 HU, all `split_k == 1`) | 6eb4aa4 | — |
 
 ## Stage 2 — grey-level centroid + analytic covariance (branch loc/refine)
 
@@ -983,9 +986,6 @@ positives.
 4. **Near-flat threshold** (κ ≤ 0.04 /mm admits 2 of 8 printed tiles); the
    chord residual against the bent-tile model is the better proxy for the
    stage 2/5 comparisons.
-| 3 | side-by-side seeds 2.5–3.5 mm apart still split | pass: 6/6 fixed configurations within 0.21 mm (`tests/test_seeds_merge_split.py`); 90/90 random pairs within 0.19 mm with the weighted split (k-means++: 86/90, worst 1.53 mm) | 6eb4aa4 | split: windowed median + halves guard + weighted split, all default-on |
-| 3 | gap-slice fragment → 1 candidate | pass on the PostOp slab geometry (1 mm slices every 2 mm): 29/200 random seeds fragment, 0 stay fragmented at 4.0 mm, merged centre error 0.53 mean / 1.50 max. **Not met** on 2 mm slabs with interpolated gap slices (G3): there the fragments are tip pairs 4.2–4.7 mm apart, beyond the 4.0 mm cap (see stage 3, limits) | 6eb4aa4 | merge: pipeline default on for coarse scans with slices thinner than their spacing; opt-in in `detect_seed_candidates` |
-| 3 | 0 false splits among 30 noise blobs | pass (10 seeds + 30 one/two-voxel specks at 2200 HU, all `split_k == 1`) | 6eb4aa4 | — |
 
 ## Stage 3 — merge/split repair (agent LM, branch loc/mergesplit)
 
@@ -1122,7 +1122,58 @@ splits; on the 20 head-phantom cases the merge changes one (rng 4 at
 2.1 mm: 13 → 12 candidates, 12 true seeds) but is not enabled there by the
 pipeline (no slice-thickness tag).
 
-## Real-data proxies (no truth)
+### Harness check: FP / recall / 3D error, baseline vs legacy vs merge (G2–G4)
+
+`PYTHONPATH=. python scripts/validation_seed_localization.py --methods
+baseline,legacy,merge --grids G2,G3,G4` (layouts rng 0–4 × 40 seeds = 200
+seeds per grid and layout; noise rng = layout rng; Hungarian match ≤ 3 mm;
+PostOp contrast, median peak ≈ 1680 HU; wall 15 s; run in the working tree
+of the merge commit that carries this section, i.e. 2b9f896 + loc/integration
+8a35ee6 + the `DETECT_VARIANTS` edit).  Methods: `legacy` = the 3cf35af
+detector (all-blob median, no halves guard, k-means++); `baseline` = the
+stage-3 split defaults with the merge off (what `reconstruct` runs on a
+volume without a slice-thickness tag); `merge` = the same with
+`merge_fragments=True`.  Full table (bias, RMS per axis, threshold shift,
+ms/seed): `output/validation_seed_localization/summary_baseline-legacy-merge.md`.
+
+| grid | layout | method | recall | FP | 3D mean ± SD (mm) | P95 | RMS k | axis° med |
+|---|---|---|---|---|---|---|---|---|
+| G2 0.5×0.5×2.0 | sparse | legacy | 0.94 | 14 | 0.45 ± 0.40 | 1.30 | 0.40 | 18.9 |
+| | | baseline | 0.94 | 13 | 0.44 ± 0.40 | 1.30 | 0.40 | 18.8 |
+| | | **merge** | 0.94 | **0** | 0.39 ± 0.35 | 1.06 | 0.35 | 15.7 |
+| | crowded | legacy | 0.96 | 18 | 0.47 ± 0.42 | 1.31 | 0.42 | 23.4 |
+| | | baseline | 0.96 | 16 | 0.47 ± 0.42 | 1.31 | 0.42 | 21.7 |
+| | | **merge** | 0.96 | **0** | 0.43 ± 0.39 | 1.21 | 0.38 | 14.1 |
+| G3 1 mm slabs, irregular gaps, loader grid 2.0 | sparse | legacy | 0.76 | 41 | 0.86 ± 0.57 | 1.90 | 0.78 | 47.2 |
+| | | baseline | 0.76 | 27 | 0.85 ± 0.58 | 1.90 | 0.77 | 43.6 |
+| | | **merge** | 0.76 | **21** | 0.83 ± 0.58 | 1.90 | 0.76 | 41.7 |
+| | crowded | legacy | 0.78 | 39 | 0.78 ± 0.49 | 1.68 | 0.68 | 44.0 |
+| | | baseline | 0.78 | 26 | 0.76 ± 0.51 | 1.68 | 0.67 | 41.2 |
+| | | **merge** | 0.78 | **11** | 0.75 ± 0.52 | 1.74 | 0.69 | 30.5 |
+| G4 0.7×0.7×2.8 | sparse | legacy | 0.91 | 10 | 0.68 ± 0.40 | 1.42 | 0.64 | 55.4 |
+| | | baseline | 0.91 | 10 | 0.68 ± 0.40 | 1.42 | 0.64 | 55.4 |
+| | | **merge** | 0.91 | **7** | 0.67 ± 0.39 | 1.40 | 0.62 | 55.4 |
+| | crowded | legacy | 0.85 | 10 | 0.70 ± 0.41 | 1.53 | 0.64 | 54.4 |
+| | | baseline | 0.85 | 10 | 0.70 ± 0.41 | 1.53 | 0.64 | 54.4 |
+| | | **merge** | 0.85 | **5** | 0.68 ± 0.40 | 1.46 | 0.62 | 54.4 |
+
+Reading: recall is identical for all three methods on every row (the merge
+never removes a matched seed), and the 3D error of the merged rows is never
+worse (the fragment that was matched is replaced by the union's centroid,
+0.04–0.05 mm better on G2).  On G2 (contiguous 2 mm slabs at PostOp
+contrast) every false positive is a split-seed fragment and the merge
+removes all of them (29 → 0).  On the loader-grid G3 the stage-3 split
+defaults alone already drop the FP count (80 → 53: the windowed median no
+longer cuts seeds, see the DOE thin-cut finding) and the merge takes it to
+32 (−40 %); the remainder are fragments two grid slices apart across an
+interpolated slice (> 4.0 mm, see open decisions).  On G4 (2.8 mm) the merge
+removes half of the fragments (20 → 12).  No row gets worse.  Note the
+harness's G3 (1 mm slabs at irregular positions rebuilt by the loader, with
+`meta["interpolated_k"]`) is the PostOp geometry, not the contiguous-slab
+G3 of the sensitivity sweep above, which is why it benefits where that one
+did not.
+
+### Stage 3 real-data proxies (no truth)
 
 Commit 6eb4aa4, `python scripts/localization_mergesplit_realdata.py
 check <scan> --merge default` (`diagnose` for PostOp), each scan run alone.
@@ -1144,7 +1195,7 @@ the 4/37 candidate from 1.38/2.05 to 1.36 mm (its remaining ~1 mm z offset
 is #4's smear into interpolated slice 63, not the merge). Merge cost on
 PostOp: detection 0.26 → 0.29 s.
 
-## With-truth track
+### Stage 3 with-truth track: the DOE thin-cut as reference
 
 The DOE thin-cut (see stage 3) is a same-acquisition 1 mm reference for
 the PostOp 2 mm export: 64/64 PostOp slices are a re-reconstruction of
@@ -1153,7 +1204,7 @@ thin-cut seeds (subject to the thin-cut's own ~0.2–0.4 mm localization
 error). At 6eb4aa4: supported/tentative PostOp seeds → nearest thin-cut
 seed median 0.34 mm (0.47 before the merge), max 2.41 mm.
 
-## Open decisions
+### Stage 3 open decisions
 
 - **DOE relabel** (for the coordinator / Jacob): `DOEJOHNPOSTCT` is the
   complete thin-cut of the PostOp acquisition, not a pre-implant negative
@@ -1186,6 +1237,14 @@ seed median 0.34 mm (0.47 before the merge), max 2.41 mm.
 | 2026-10-08 | `python -m pytest tests/test_seeds_refine.py` (23 tests) + `tests/test_seeds_unit.py tests/test_integration.py tests/test_localization_plumbing.py` (17) | fixed | f00ccea | 10 s + 13 s |
 | 2026-10-08 | `python scripts/validation_fuse.py --mc --csv ...` (stage 5, stand-in covariance) | phantom rng 0-4; MC rng 0 | b09cb39 | 166 s |
 | 2026-10-08 | `pytest tests/test_tiles_fuse.py` (13 tests) + `tests/test_tiles*.py tests/test_localization_plumbing.py` | fixed | b09cb39 | 17 s; 151 passed in 147 s |
+| 2026-10-08 | `scripts/localization_mergesplit_realdata.py diagnose --merge off` (PostOp, baseline) | — | detection = 3cf35af | ~25 s (cached pickle) |
+| 2026-10-08 | `scripts/localization_mergesplit_realdata.py diagnose --merge default` (PostOp) | — | 6eb4aa4 | 26 s |
+| 2026-10-08 | `scripts/localization_mergesplit_realdata.py check phantom8 --merge default` (and `--merge on`) | — | 6eb4aa4 | 27 s |
+| 2026-10-08 | `scripts/localization_mergesplit_realdata.py check tilefree --merge default` | — | 6eb4aa4 | 28 s |
+| 2026-10-08 | `scripts/localization_mergesplit_realdata.py check doe --merge default [--legacy-split]` | — | 6eb4aa4 | 32 s / 26 s |
+| 2026-10-08 | `scripts/localization_mergesplit_sweep.py --singles 200 --pairs 60` | 2026 | 6eb4aa4 | 15.8 s |
+| 2026-10-08 | `python scripts/validation_seed_localization.py --methods baseline,legacy,merge --grids G2,G3,G4` | layout rng 0–4 × 40 × sparse/crowded | merge of 2b9f896 + loc/integration 8a35ee6 (this commit) | 15 s |
+| 2026-10-08 | `pytest tests/test_seeds_merge_split.py tests/test_seeds_unit.py tests/test_integration.py tests/test_tiles_cover.py tests/test_implant_assessment.py tests/test_localization_plumbing.py` | — | 6eb4aa4 | 33 s, 51 passed |
 
 ### Coordinator decision on stage 5 (2026-10-08, after loc/hwls merged at 04b4d20)
 
@@ -1255,10 +1314,3 @@ real scans.
   fe4a1a8; recall 0.97/0.98 at 2.1/2.8 mm, not 1.00). The README validation
   row "slice-spacing robustness" must be re-stated from the fresh baseline
   when this feature merges to main.
-| 2026-10-08 | `scripts/localization_mergesplit_realdata.py diagnose --merge off` (PostOp, baseline) | — | detection = 3cf35af | ~25 s (cached pickle) |
-| 2026-10-08 | `scripts/localization_mergesplit_realdata.py diagnose --merge default` (PostOp) | — | 6eb4aa4 | 26 s |
-| 2026-10-08 | `scripts/localization_mergesplit_realdata.py check phantom8 --merge default` (and `--merge on`) | — | 6eb4aa4 | 27 s |
-| 2026-10-08 | `scripts/localization_mergesplit_realdata.py check tilefree --merge default` | — | 6eb4aa4 | 28 s |
-| 2026-10-08 | `scripts/localization_mergesplit_realdata.py check doe --merge default [--legacy-split]` | — | 6eb4aa4 | 32 s / 26 s |
-| 2026-10-08 | `scripts/localization_mergesplit_sweep.py --singles 200 --pairs 60` | 2026 | 6eb4aa4 | 15.8 s |
-| 2026-10-08 | `pytest tests/test_seeds_merge_split.py tests/test_seeds_unit.py tests/test_integration.py tests/test_tiles_cover.py tests/test_implant_assessment.py tests/test_localization_plumbing.py` | — | 6eb4aa4 | 33 s, 51 passed |

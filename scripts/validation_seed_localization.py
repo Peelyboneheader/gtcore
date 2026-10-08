@@ -38,6 +38,10 @@ Methods
 baseline  ``detect_seed_candidates`` at the threshold
           ``pipeline.seed_detection_params(spacing)`` gives, then
           ``filter_seed_shaped`` (exactly the pipeline's detection).
+merge     baseline detection with ``merge_fragments=True`` (stage 3 fragment
+          merge forced on, whatever the pipeline default would decide).
+legacy    the pre-stage-3 split (all-blob median, no halves guard,
+          k-means++ on positions), merge off -- the detector of 3cf35af.
 centroid, model
           ``gtcore.seeds.refine.refine_seed_candidates(vol, cands,
           method=...)`` on the baseline candidates; looked up at run time and
@@ -103,7 +107,7 @@ LAYOUTS = {
     "sparse": dict(min_sep_mm=8.0, max_nn_mm=None, rng_offset=0),
     "crowded": dict(min_sep_mm=7.0, max_nn_mm=8.0, rng_offset=100),
 }
-METHODS = ("baseline", "centroid", "model")
+METHODS = ("baseline", "merge", "legacy", "centroid", "model")
 N_PER_VOLUME = 40
 BOX_MM = 44.0            # seed centres live in [-22, 22] mm
 MARGIN_MM = 8.0          # volume = box + margin on every side
@@ -185,11 +189,20 @@ def degrade(vol, g, seed):
     return vol
 
 
-def detect_baseline(vol, hu_threshold=None):
+# detection variants that are not refinements (stage 3 merge/split repair)
+DETECT_VARIANTS = {
+    "baseline": {},
+    "merge": dict(merge_fragments=True),
+    "legacy": dict(split_window=False, split_guard=False,
+                   split_weighted=False),
+}
+
+
+def detect_baseline(vol, hu_threshold=None, **detect_kw):
     p = seed_detection_params(vol.spacing)
     thr = p["hu_threshold"] if hu_threshold is None else float(hu_threshold)
     raw = detect_seed_candidates(vol, hu_threshold=thr, min_mm3=p["min_mm3"],
-                                 max_mm3=p["max_mm3"])
+                                 max_mm3=p["max_mm3"], **detect_kw)
     return filter_seed_shaped(raw, min_mm3=p["min_mm3"], max_mm3=p["max_mm3"],
                               min_elong=p["min_elong"],
                               max_elong=p["max_elong"])
@@ -238,15 +251,16 @@ class Method:
         self.name = name
         self.reason = None
         self.refiner = None
-        if name != "baseline":
+        if name not in DETECT_VARIANTS:
             self.refiner, self.reason = get_refiner()
 
     def run(self, vol, hu_threshold=None):
         """(candidates, seconds of the method's own step)."""
         t0 = time.perf_counter()
-        cands = detect_baseline(vol, hu_threshold)
+        cands = detect_baseline(vol, hu_threshold,
+                                **DETECT_VARIANTS.get(self.name, {}))
         t_det = time.perf_counter() - t0
-        if self.name == "baseline":
+        if self.name in DETECT_VARIANTS:
             return cands, t_det
         t0 = time.perf_counter()
         try:
