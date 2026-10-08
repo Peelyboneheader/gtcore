@@ -100,7 +100,12 @@ the slice (``AXES_RELIABLE_DZ_MM``), so its PCA axis is off by 20-40 deg
 stronger against the down-weighted z residuals, tilts the whole tile.  With
 ``seed_cov`` the bent-tile fits therefore leave the axis term out above
 ``AXES_RELIABLE_DZ_MM`` -- the rule the cover pass already applies -- while
-the pre-fit axis-coherence gates are unchanged.
+the pre-fit axis-coherence gates are unchanged.  Since the stage 5
+follow-up the DEFAULT (unweighted) fit does the same
+(``DROP_AXIS_TERM_ON_COARSE``; ``fit_deformable(use_axes=False)``), in
+auto mode, in the counted prior and in ``fit_tiles(score="deformable")``
+whenever ``spacing_mm`` says the scan is coarse; with no spacing given the
+thin-cut calibration (axes fitted) applies.
 """
 from __future__ import annotations
 
@@ -187,6 +192,18 @@ TRIPLET_MIN_GAP_MM = 3.5        # inferred seed must not sit on a detected one
 # spanning one slice is a pancake whose axis is whatever the voxel grid
 # says), so the cover pass neither gates nor fits on axes there.
 AXES_RELIABLE_DZ_MM = 1.2
+# Stage 5 follow-up (docs/localization-notes.md, "axis term"): the DEFAULT
+# unweighted bent-tile fit also drops its axis residual term above
+# AXES_RELIABLE_DZ_MM -- the weighted path and the cover pass always did.
+# False restores the historical fits (axes always in the residual).
+# Coordinator decision 2026-10-08 (notes, gate row "axis term on coarse scans"):
+# dropping the axis term on > 1.2 mm slices halves the tile-normal error
+# (2-4x) and keeps centres and thin slices bit-identical, but loses 1-2 of 20
+# partitions on analytic coarse scans that contain unmerged slab fragments
+# (rng 3 at 2.1 mm, rng 2 at 2.8 mm), which fails the pre-declared
+# "partition never worse" gate -- so it ships OFF.  Flip to True to get the
+# normal-error gain; the follow-up is an axis gate without the residual term.
+DROP_AXIS_TERM_ON_COARSE = False
 
 
 def spacing_tolerance(spacing_mm) -> float:
@@ -429,9 +446,12 @@ def _group_cov(seed_cov, idx, n_inferred=0):
 
 
 def _fit_axes(seed_cov, tol):
-    """Whether bent-tile fits carry the axis term (module docstring): always
-    without seed_cov (historical), else only where axes are reliable."""
-    return seed_cov is None or tol <= AXES_RELIABLE_DZ_MM
+    """Whether bent-tile fits carry the axis term (module docstring): on
+    thin cuts always; above ``AXES_RELIABLE_DZ_MM`` never with ``seed_cov``
+    and, without it, only while ``DROP_AXIS_TERM_ON_COARSE`` is False."""
+    if tol <= AXES_RELIABLE_DZ_MM:
+        return True
+    return seed_cov is None and not DROP_AXIS_TERM_ON_COARSE
 
 def _per_count_margins(items, chosen, n_sel, best_n_sel):
     """Partition margin of every selected item (plan-localization stage 6):
@@ -498,7 +518,7 @@ def _enumerate_loose_quads(centers, axes, dist, exclude,
         sim = fit_rigid(pts, ax, allow_scale=True, scale_range=(0.5, 1.1))
         if sim.rms_mm > sim_max:
             continue
-        fit = fit_deformable(pts, ax if fit_axes else None,
+        fit = fit_deformable(pts, ax, use_axes=fit_axes,
                              seed_cov=_group_cov(seed_cov, idx))
         if (fit.wrms_mm <= rms_max and fit.bending_energy <= e_max
                 and (not use_axes or fit.axis_err_deg <= axis_max)):
@@ -853,8 +873,8 @@ def fit_tiles_auto(centers_ras, axes_ras, cavity_center_ras=None,
     if deformable:
         std = set()
         for _s, idx, _r in quads:
-            fit = fit_deformable(centers[list(idx)],
-                                 axes[list(idx)] if fit_axes else None,
+            fit = fit_deformable(centers[list(idx)], axes[list(idx)],
+                                 use_axes=fit_axes,
                                  seed_cov=_group_cov(seed_cov, idx))
             score = deformable_score(fit)
             std.add(frozenset(idx))
@@ -1045,7 +1065,7 @@ def fit_tiles_prior(centers_ras, axes_ras, prior: ImplantPrior,
                         cavity_center_ras=cavity_center,
                         complete_degraded=complete_degraded,
                         score="deformable", margins=margins,
-                        seed_cov=seed_cov)
+                        seed_cov=seed_cov, spacing_mm=spacing_mm)
     tol = spacing_tolerance(spacing_mm)
     result = AutoFitResult(spacing_tol=tol, auto=False, prior=prior,
                            n_requested=int(prior.n_full),
@@ -1060,7 +1080,7 @@ def fit_tiles_prior(centers_ras, axes_ras, prior: ImplantPrior,
             try:
                 c, a = pose.seed_points(centers, axes)
                 pose.deform = fit_deformable(
-                    c, a if _fit_axes(seed_cov, tol) else None, kind=pose.kind,
+                    c, a, kind=pose.kind, use_axes=_fit_axes(seed_cov, tol),
                     seed_cov=_group_cov(seed_cov, pose.seed_indices,
                                         len(c) - len(pose.seed_indices)))
             except Exception:

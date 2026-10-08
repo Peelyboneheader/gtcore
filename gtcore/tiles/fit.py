@@ -708,7 +708,7 @@ def fit_tiles(centers_ras, axes_ras, n_full, n_half=0, cavity_center_ras=None,
     if score == "deformable" and quads:
         # one scoring rule for both modes: the bent-tile fit auto mode uses
         # (same call, same score); clamped positive so the count still wins
-        from .auto import deformable_score
+        from .auto import _fit_axes, deformable_score, spacing_tolerance
         from .deform import fit_deformable
 
         # per-candidate covariances (stage 5 weighting) reach the counted
@@ -718,10 +718,14 @@ def fit_tiles(centers_ras, axes_ras, n_full, n_half=0, cavity_center_ras=None,
             cov_all = np.asarray(seed_cov, dtype=float)
             if cov_all.shape != (centers.shape[0], 3, 3):
                 raise ValueError("seed_cov must be (N, 3, 3), got %r" % (cov_all.shape,))
+        # coarse scans (spacing_mm above AXES_RELIABLE_DZ_MM): the per-seed
+        # PCA axes are degenerate, so the fit drops the axis term, as auto
+        # mode does (auto.DROP_AXIS_TERM_ON_COARSE)
+        use_axes = _fit_axes(cov_all, spacing_tolerance(spacing_mm))
         rescored = []
         for _s, idx, _r in quads:
             fit = fit_deformable(centers[list(idx)], axes[list(idx)],
-                                 kind="full",
+                                 kind="full", use_axes=use_axes,
                                  seed_cov=None if cov_all is None else cov_all[list(idx)])
             fits[idx] = fit
             rescored.append((max(_DEF_SCORE_FLOOR, deformable_score(fit)),

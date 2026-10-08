@@ -197,6 +197,8 @@ seeds at 2.8 mm (recall 0.92, partition 0/5).
 | 7 | G2/G4 mean <= 0.85x stage 2; saturation bias <= 0.05 mm/axis; fallback <= 5 %; <= 30 ms/seed; NEES in [0.5, 2] (covariance) | Harness (rng 0-4, 200 seeds per grid and layout, sparse / crowded): mean vs centroid G2 0.69x / 0.71x, G4 0.48x / 0.57x, G1 0.5x, G3 0.94x **accuracy PASS**. Saturation bias (G1, 96 % clipped) <= 0.001 mm **PASS**. Runtime 13-26 ms/seed **PASS**. Fallback to the centroid: 0-3 % on supersampled grids, 10-20 % on the analytic head phantom (rng 1; air-level seeds), not counted on the harness. NEES G1 4.70 / 6.40 **FAIL**, G2 3.77 / 3.60 **FAIL**, G4 1.74 / 1.78 PASS, G3 303 / 290 FAIL (as the centroid): **covariance calibration FAIL on G1/G2**. Head phantom 2.1 / 2.8 mm vs centroid: binary 0.22 -> 0.21, 0.41 -> 0.35; analytic 0.14 -> 0.09, 0.39 -> 0.24 mm | 7ec5935 | Opt-in `refine_seed_candidates(method="model")`, `reconstruct(refine_seeds="model")`; `cov_ras` labelled uncalibrated (`info["refine_model_cov"]`). Open: the 4.25 mm segment length |
 | 2 | G1 mean <= 0.8x; G2/G4 z RMS <= 0.85x; threshold sensitivity <= 0.1 mm and >= 2x smaller; NEES in [0.5, 2]; recall unchanged; <= 5 ms/seed; head phantom 2.1/2.8 mm mean >= 15 % better, 0.7 mm not worse by > 0.02 mm | Harness (rng 0-4, 200 seeds per grid and layout, sparse / crowded): G1 mean 0.13 -> 0.006 / 0.007 mm (0.05x) **PASS**. G2 z RMS 0.40 -> 0.24 / 0.42 -> 0.24 (0.60x / 0.57x) **PASS**; G4 z RMS 0.64 -> 0.34 / 0.64 -> 0.35 (0.53x / 0.55x) **PASS** (G3, not in the gate: 0.78 -> 0.58 / 0.68 -> 0.45). Threshold shift 0.09-0.52 -> 0.00 mm on every grid; head phantom median 0.035-0.373 -> 0.000-0.002 mm **PASS**. NEES G1 1.77 / 1.85, G2 1.63 / 1.75, G4 1.24 / 1.24 **PASS** (95 % ellipsoid coverage 0.76-0.90: heavier tails than Gaussian); G3 528 / 531 **FAIL** (gap-filled volume: in-plane error 0.31 mm RMS coupled to the slice gaps is not modelled); binary head phantom 3D **FAIL** (its voxel-painted capsules; z NEES 0.59 / 0.69 at 2.1 / 2.8 mm). Recall identical **PASS**. 1.7-3.0 ms/seed **PASS**. Head phantom 2.1 / 2.8 mm: binary 0.50 -> 0.22 (-56 %), 0.70 -> 0.41 (-41 %); analytic 0.54 -> 0.14 (-74 %), 0.74 -> 0.39 (-47 %) **PASS**. 0.7 mm: binary 0.20 -> 0.15, worst seed +0.08 mm; analytic 0.10 -> 0.04, worst seed +0.000 mm **PASS**. Tile partition (not a stage-2 criterion): binary 2/5 -> 3/5 at 2.1 and 2.8 mm, analytic 2.8 mm 0/5 -> 1/5, never worse. Real-data proxies: not run on this branch | 234f3e5, 7afa8c2, f00ccea | `reconstruct(refine_seeds="centroid")`, default `None`: every plan criterion passes except NEES on G3; switching the default is the coordinator's call after the real-data proxies |
 | 5 — hierarchical WLS + posterior seeds | identical fit without covariance; head phantom 2.1 / 2.8 mm mean 3D error ≥ 15 % below raw; tile centre / normal not worse; 2.8 mm partition ≥ 3/5; posterior NEES in [0.5, 2]; stable across slack 0.1–0.5 mm | **PENDING-COVARIANCE** (stand-in: analytic slab covariance). Identity: bit-identical (max diff 0.0 over 288 fits vs 3cf35af; frozen reference in the tests) ✓. 2.1 mm: −0.3 % ✗. 2.8 mm: −15.2 % (borderline ✓). Centre unchanged; normal 3.77→2.66° (2.1) and 6.44→2.85° (2.8) ✓. Partition 2.8 mm 5/5 (raw also 5/5); 2.1 mm 2/5, same as raw (split-fragment detections). NEES conditional 2.02 / 3.00 ✗, PEV 1.25 / 1.76 ✓ (input covariance itself 1.19 / 1.86). Slack sweep: 2.1 / 2.8 mm within 2.5 % ✓; 0.7 mm at slack 0.1 is 16 % worse than raw ✗ | b09cb39 | opt-in `reconstruct(fuse_tiles=True)`, default off |
+| 5 — with REAL covariance (stage 2 `refine_seeds="centroid"`) | ceiling-adjusted bar: posterior mean 3D error at 2.1 mm ≥ 8 % below the REFINED seeds; partition / centre / normal not worse; posterior NEES tracks the input; stable across slack 0.2–0.5 mm | **FAIL — stays opt-in, negative result for the paper.** Auto mode, posterior vs refined, 2.1 mm: binary −1.9 % (0.244 → 0.239 mm), analytic −1.8 % (0.141 → 0.138) ✗; 2.8 mm: −13.9 % (0.407 → 0.351), −8.3 % (0.383 → 0.352); 0.7 / 1.4 mm −6 % / −4 % (binary), −9 % / −2 % (analytic): never worse, never near the bar. Centre unchanged ✓; normal better (axis term) ✓; partition 2.1 mm binary 2/5 → 3/5, analytic 5/5 → 4/5, 2.8 mm analytic 3/5 → 2/5 (mixed: weighting + axis rule, separated in the follow-up row). NEES: PEV posterior = input (analytic 0.87 vs 0.86 at 2.1, 1.17 vs 1.20 at 2.8; binary z 0.61 vs 0.57, 0.64 vs 0.70) ✓, conditional over-confident at 2.8 mm (1.51 / 1.45 z) ✗. Slack 0.2 / 0.3 / 0.5: within 2.5 % ✓. Counted prior at this commit: posterior WORSE (+9 … +60 %): its weighted fit still carried the degenerate axes (`fit_tiles(score="deformable")` never saw `spacing_mm`) — fixed by the axis-term follow-up | 0611ccc (code); script in the task-1 commit | opt-in `reconstruct(fuse_tiles=True)`, default off |
+| axis term on coarse scans (`auto.DROP_AXIS_TERM_ON_COARSE`) | tile normal error at 2.1 / 2.8 mm improves; partition and centre not worse at ANY spacing (5 realizations × 4 spacings × both renderings); slices ≤ 1.2 mm bit-identical; printed phantom stays 8/8; `test_tiles_auto.py` / `test_tiles_cover.py` pass unedited | **PARTIAL — fails the partition criterion on analytic fragment scans; coordinator decides.** Normal error ✓ everywhere: raw 2.1 mm 3.8 → 2.6° (binary) / 3.2 → 2.0° (analytic), 2.8 mm 6.4 → 2.9° / 7.5 → 3.7°; refined seeds 3.5 → 1.0° / 2.8 → 0.6° and 6.2 → 2.0° / 10.5 → 3.0°. Centre identical ✓. Thin slices bit-identical 40/40 ✓. Printed phantom 32/32 seeds, 8/8 tiles ✓. 295 tests pass, none edited ✓. Partition: binary never worse (refined 2.1 mm 2/5 → 3/5); analytic raw 2.1 mm 5/5 → 4/5 ✗, refined 2.1 mm 5/5 → 4/5 and 2.8 mm 3/5 → 2/5 ✗ — every loss is a slab fragment (a seed's second blob, unmatched to truth) that forms the squarer quad once the axis evidence is gone. Also fixes the counted path: `fit_tiles(score="deformable")` now honours `spacing_mm`, so counted = auto with `seed_cov` on coarse scans | task-2 commit (parent 5e55532) | `DROP_AXIS_TERM_ON_COARSE = True` as instructed; one-line revert (+ `test_shipped_default`) |
 | 4 | counted = automatic partition on every auto test case | **PASS** 30/30 synthetic layouts (rng 0–5 × 1–5 tiles, truth seeds), counted (deformable) = auto = truth; `capped` False on all 30 and True on the constructed lattice with a 20-node cap. Printed phantom: counted (deformable) = auto on all 8 tiles; counted chord differs on the 25/31 pair | d81b45d | `fit_tiles(score="deformable")` opt-in; `fit_tiles_prior` (planner) uses it; `fit_tiles` default and `assess_implant` / `reconstruct` stay `"chord"` |
 | 6 | margins > 2 on clean cases; constructed shared-seed case < 1 and flagged; normal σ grows with seed noise; centre covariance within 2× of the empirical scatter; planner cost < 0.5 s | **PASS** clean margins all `inf` (no same-count alternative); shared-seed case 4·10⁻⁶, flagged; normal σ 0.1 < 0.3 < 0.6 mm monotone; centre-covariance ratio 1.13–1.32 when every residual row carries the same noise (0.45–0.53 with noise-free axes, 3.8–4.1 with 10° axis noise, see below); margins 2–4 ms + uncertainty 6 ms on the printed phantom. Printed 25/31 pair: margin 1.87 under the bent-tile score → **not** flagged (0.27, flagged, under the chord score) | d81b45d | `margins=False` opt-in on `fit_tiles` / `fit_tiles_auto` / `fit_tiles_prior`; planner suggest calls `margins=True`; `DeformableFit.compute_uncertainty()` lazy, run for reported tiles in `_finish` |
 | 3 | side-by-side seeds 2.5–3.5 mm apart still split | pass: 6/6 fixed configurations within 0.21 mm (`tests/test_seeds_merge_split.py`); 90/90 random pairs within 0.19 mm with the weighted split (k-means++: 86/90, worst 1.53 mm) | 6eb4aa4 | split: windowed median + halves guard + weighted split, all default-on |
@@ -955,6 +957,223 @@ Reading:
   - the Monte-Carlo figure at 2.1 mm is about 10 %, so a 15 % gate there
     is unlikely to pass unless stage 2 changes the error structure.
 
+### Stage 5 with the real stage-2 covariances (code 0611ccc)
+
+**Verdict: FAIL at the ceiling-adjusted bar. Stage 5 stays opt-in; the paper
+reports it as a negative result with the ceiling analysis.** With the grey-
+level centroid of stage 2 the seeds handed to the tile fit are already at
+0.14–0.24 mm at 2.1 mm, the level of the phantom's own deviation from the
+bent-tile model (0.15 mm rms per tile, truth seeds fitted without noise), and
+only 23–24 % of their error energy lies in the three modes a tile fit can
+see. The posterior then has almost nothing left to correct.
+
+Commands (`--refine centroid` = `gtcore.seeds.refine.refine_seed_candidates`
+on the detections, detection axes kept, the refiner's default; the
+covariance is its analytic one; the analytic rendering is clipped at 3071 HU
+after slab averaging, as in `validation_spacing.py`):
+
+```
+PYTHONPATH=. python scripts/validation_fuse.py --refine centroid --seed-render binary   --mode auto
+PYTHONPATH=. python scripts/validation_fuse.py --refine centroid --seed-render analytic --mode auto
+PYTHONPATH=. python scripts/validation_fuse.py --refine centroid --seed-render binary   --mode prior
+PYTHONPATH=. python scripts/validation_fuse.py --refine centroid --seed-render analytic --mode prior
+```
+
+Head phantom rng 0–4 × 0.7 / 1.4 / 2.1 / 2.8 mm, slack 0.3 mm, Hungarian
+match < 2 mm; `det` = raw detections, `ref` = refined seeds (what the tile
+fit and the posterior start from), `post` = posterior. Partition = every
+truth tile recovered by exactly one fitted tile (supported + tentative).
+Tile normal vs the plane of the truth seeds. NEES 3D = eᵀΣ⁻¹e/3, z = e_z²/Σ_zz
+over the fused seeds. "Fallbacks" = refined seeds that fell back to the
+detection (stage 2 rule), summed over 5 realizations.
+
+**Auto mode (`fit_tiles_auto`, the pipeline's `n_full_tiles="auto"`), binary rendering:**
+
+| Slice | 3D det → ref → post | gain post/ref | z det → ref → post | Partition ref / w | Centre ref / post | Normal ref / w (°) | NEES input 3D / z | cond 3D / z | PEV 3D / z | Fallbacks |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0.7 | 0.200 → 0.147 → 0.138 | −5.9 % | 0.066 → 0.048 → 0.044 | 5/5 / 5/5 | 0.074 / 0.072 | 1.53 / 1.53 | 2910 / 1430 | 2910 / 1430 | 2910 / 1430 | 8 |
+| 1.4 | 0.291 → 0.187 → 0.178 | −4.4 % | 0.159 → 0.082 → 0.073 | 5/5 / 5/5 | 0.107 / 0.103 | 2.04 / 0.83 | 1442 / 5.87 | 1442 / 5.91 | 1441 / 5.84 | 10 |
+| 2.1 | 0.519 → 0.244 → 0.239 | **−1.9 %** | 0.336 → 0.137 → 0.132 | 2/5 / 3/5 | 0.089 / 0.088 | 3.45 / 0.95 | 743 / 0.57 | 743 / 0.77 | 743 / 0.61 | 14 |
+| 2.8 | 0.702 → 0.407 → 0.351 | −13.9 % | 0.554 → 0.332 → 0.267 | 5/5 / 5/5 | 0.176 / 0.170 | 6.15 / 1.93 | 408 / 0.70 | 409 / 1.45 | 408 / 0.64 | 13 |
+
+**Auto mode, analytic rendering:**
+
+| Slice | 3D det → ref → post | gain post/ref | z det → ref → post | Partition ref / w | Centre ref / post | Normal ref / w (°) | NEES input 3D / z | cond 3D / z | PEV 3D / z | Fallbacks |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0.7 | 0.100 → 0.039 → 0.035 | −9.1 % | 0.038 → 0.014 → 0.010 | 5/5 / 5/5 | 0.019 / 0.018 | 1.49 / 1.48 | 4.27 / 2.58 | 4.28 / 2.57 | 4.26 / 2.57 | 8 |
+| 1.4 | 0.335 → 0.096 → 0.093 | −2.4 % | 0.209 → 0.057 → 0.051 | 4/5 / 4/5 | 0.039 / 0.038 | 2.38 / 0.27 | 1.51 / 0.25 | 1.67 / 0.36 | 1.54 / 0.25 | 11 |
+| 2.1 | 0.543 → 0.141 → 0.138 | **−1.8 %** | 0.402 → 0.110 → 0.107 | 5/5 / 4/5 | 0.052 / 0.051 | 2.79 / 0.58 | 0.86 / 0.30 | 0.92 / 0.42 | 0.87 / 0.32 | 12 |
+| 2.8 | 0.729 → 0.383 → 0.352 | −8.3 % | 0.620 → 0.335 → 0.300 | 3/5 / 2/5 | 0.172 / 0.162 | 10.54 / 2.75 | 1.20 / 0.59 | 1.51 / 1.34 | 1.17 / 0.57 | 18 |
+
+Reading:
+- **Gain over the refined seeds at 2.1 mm: −1.9 % (binary), −1.8 %
+  (analytic).** The bar is 8 %. At 2.8 mm the posterior removes 14 % / 8 %,
+  at 0.7–1.4 mm 2–9 %. It never makes the seeds worse in auto mode.
+- The thick-slice z error of the refined seeds is no longer common-mode
+  slab snapping (that was 78 % of the raw error): stage 2's centroid already
+  recovers z within the slab, and what remains is mostly in the modes the
+  tile pose absorbs. Redundant share 0.23–0.24 at 2.1 mm on both renderings.
+- **Posterior covariance.** The PEV covariance reproduces the input
+  calibration: analytic 3D 0.87 vs 0.86 (2.1 mm) and 1.17 vs 1.20 (2.8 mm);
+  binary z 0.61 vs 0.57 and 0.64 vs 0.70 (the binary 3D NEES is the
+  voxel-painted capsule, see stage 2). The conditional covariance is
+  over-confident where the model pulls hardest (2.8 mm: 1.51 / z 1.45
+  analytic, z 1.45 binary). If the stage ships, `cov_mode="pev"`.
+- **Tile normal** improves 2–4× on coarse slices. That is the axis rule of
+  the weighted path, not the weighting (follow-up row below separates them).
+- **Partition** moves both ways (binary 2.1 mm 2/5 → 3/5; analytic 2.1 mm
+  5/5 → 4/5, 2.8 mm 3/5 → 2/5) — also a mix of weighting and axis rule at
+  this commit.
+- **Slack sweep (auto, posterior mean 3D error, mm; 0.2 / 0.3 / 0.5):**
+  binary 2.1 mm 0.239 / 0.239 / 0.241, 2.8 mm 0.352 / 0.351 / 0.360;
+  analytic 2.1 mm 0.143 / 0.138 / 0.138, 2.8 mm 0.357 / 0.352 / 0.354.
+  Within 2.5 %; partition identical at every slack.
+- Runtime: posterior 59–115 µs per seed; the weighted auto fit 0.08–0.14 s
+  on coarse scans vs 0.27–0.37 s unweighted (no axis term); 28 s per
+  5 × 4 run.
+
+**Counted prior (`fit_tiles_prior(n_full=3)`) at this commit — a defect,
+not a result.** Posterior vs refined: binary +8.8 % (2.1 mm) / +39.5 %
+(2.8 mm), analytic +26.9 % / +60.5 %, strongly slack-dependent (analytic
+2.8 mm: 0.800 / 0.615 / 0.454 mm at slack 0.2 / 0.3 / 0.5). Cause: stage 4's
+`fit_tiles(score="deformable")` was called by `fit_tiles_prior` without
+`spacing_mm`, so its weighted bent-tile fits kept the degenerate PCA axes on
+coarse scans — the configuration shown harmful in the stand-in section
+(model-point error 1.16 vs 0.58 mm at 2.8 mm). The counted path therefore
+disagreed with auto mode whenever `seed_cov` was given on a coarse scan.
+Fixed by the axis-term follow-up (next row), which threads `spacing_mm`
+through and re-measures both modes.
+
+### Axis term on coarse scans: the default bent-tile fit (task-2 commit, parent 5e55532)
+
+**Verdict: PARTIAL. Every criterion passes except partition on the analytic
+rendering, where slab fragments win the quad once the axis evidence is
+gone. The constant ships `True` as instructed; reverting is one line
+(`auto.DROP_AXIS_TERM_ON_COARSE = False`, plus `test_shipped_default`),
+and `False` reproduces the 0611ccc fits on every unweighted scan.**
+
+What changed:
+- `deform.fit_deformable(..., use_axes=True)`: `False` is the
+  `seed_axes=None` fit (no axis residual, no axis evidence in the
+  correspondence or the bowl/dome start, `axis_err_deg = 0`);
+  `DeformableFit.axes_fitted` records which fit was done.
+- `auto.DROP_AXIS_TERM_ON_COARSE = True`; `auto._fit_axes(seed_cov, tol)`:
+  thin cuts (tol ≤ `AXES_RELIABLE_DZ_MM` = 1.2) always fit axes; above it,
+  never with `seed_cov`, and without `seed_cov` only while the constant is
+  `False`. Threaded through the auto main loop, the loose tier, the counted
+  prior's attached fits and — new — `fit.fit_tiles(score="deformable")`,
+  which now receives `spacing_mm` from `fit_tiles_prior`. With no spacing
+  given (`assess_implant`, bare `fit_tiles`) the thin-cut calibration
+  applies; the chord path never fits the bent tile, so it is untouched.
+- The pre-fit axis-coherence gates (`_enumerate_quads`, the loose tier,
+  triplets) are unchanged.
+- Side effect, intended: the counted path with `seed_cov` on a coarse scan
+  now equals auto mode (stage 4's invariant). At 0611ccc it kept the
+  degenerate axes, which is why the counted-prior rows of the stage-5
+  re-evaluation were worse than the refined seeds.
+
+Commands (`scripts/validation_axis_term.py`: head phantom rng 0–4 ×
+0.7 / 1.4 / 2.1 / 2.8 mm × both renderings, auto fit and counted prior,
+switch OFF vs ON on the same seeds; tile normal vs the plane of the truth
+seeds — not the generator's radial normal with its ~7° floor):
+
+```
+PYTHONPATH=. python scripts/validation_axis_term.py                     # raw detections, 62 s
+PYTHONPATH=. python scripts/validation_axis_term.py --refine centroid   # stage-2 seeds, 56 s
+GT_DATA_ROOT=C:\Users\jacob\Documents python scripts/validation_realdata_proxies.py --scans printed8 --no-cache
+```
+
+**Raw detections** (OFF = axes always fitted = 0611ccc; ON = dropped above 1.2 mm):
+
+| Render | Slice | Partition OFF → ON (auto = prior) | Centre OFF / ON (mm) | Normal OFF → ON auto (°) | Normal OFF → ON prior (°) | Poses identical | Fit s OFF → ON |
+|---|---|---|---|---|---|---|---|
+| binary | 0.7 | 5/5 → 5/5 | 0.106 / 0.106 | 1.59 → 1.59 | 1.59 → 1.59 | 5/5 | 0.22 → 0.22 |
+| binary | 1.4 | 5/5 → 5/5 | 0.158 / 0.158 | 2.08 → 1.40 | 2.08 → 1.40 | 0/5 | 0.26 → 0.09 |
+| binary | 2.1 | 2/5 → 2/5 | 0.246 / 0.246 | 3.77 → 2.63 | 3.88 → 2.63 | 0/5 | 0.39 → 0.14 |
+| binary | 2.8 | 5/5 → 5/5 | 0.311 / 0.311 | 6.44 → 2.87 | 6.51 → 2.87 | 0/5 | 0.32 → 0.12 |
+| analytic | 0.7 | 5/5 → 5/5 | 0.049 / 0.049 | 1.51 → 1.51 | 1.51 → 1.51 | 5/5 | 0.17 → 0.16 |
+| analytic | 1.4 | 4/5 → 4/5 | 0.185 / 0.185 | 2.46 → 1.35 | 2.46 → 1.35 | 0/5 | 0.26 → 0.08 |
+| analytic | 2.1 | **5/5 → 4/5** | 0.323 / 0.323 | 3.21 → 1.95 | 3.21 → 1.95 | 0/5 | 0.28 → 0.08 |
+| analytic | 2.8 | 3/5 → 3/5 | 0.411 / 0.411 | 7.51 → 3.68 | 8.82 → 3.68 | 0/5 | 0.33 → 0.14 |
+
+**Refined seeds** (`--refine centroid`):
+
+| Render | Slice | Partition OFF → ON | Centre OFF / ON (mm) | Normal OFF → ON (°) | Poses identical |
+|---|---|---|---|---|---|
+| binary | 0.7 | 5/5 → 5/5 | 0.074 / 0.074 | 1.53 → 1.53 | 5/5 |
+| binary | 1.4 | 5/5 → 5/5 | 0.107 / 0.107 | 2.04 → 0.82 | 0/5 |
+| binary | 2.1 | **2/5 → 3/5** | 0.089 / 0.089 | 3.45 → 0.95 | 0/5 |
+| binary | 2.8 | 5/5 → 5/5 | 0.176 / 0.176 | 6.15 → 1.96 | 0/5 |
+| analytic | 0.7 | 5/5 → 5/5 | 0.019 / 0.019 | 1.49 → 1.49 | 5/5 |
+| analytic | 1.4 | 4/5 → 4/5 | 0.039 / 0.039 | 2.38 → 0.28 | 0/5 |
+| analytic | 2.1 | **5/5 → 4/5** | 0.052 / 0.052 | 2.79 → 0.55 | 0/5 |
+| analytic | 2.8 | **3/5 → 2/5** | 0.172 / 0.172 | 10.54 → 2.97 | 0/5 |
+
+Per-scan changes of the selection (all other scans keep their partition;
+the poses differ on every coarse scan because the fit changes):
+- Gains: binary rng 2 at 2.1 and 2.8 mm (raw) and analytic rng 0 / rng 2
+  at 2.8 mm (raw): a tentative tile becomes supported (2+1 → 3+0, 1+2 →
+  2+1), same partition. Binary rng 4 at 2.1 mm (refined): partition False
+  → True.
+- Losses: analytic rng 3 at 2.1 mm (raw and refined), analytic rng 2 at
+  2.8 mm (refined): partition True → False.
+
+**Mechanism of the losses (diagnosed on analytic rng 3, 2.1 mm).** The
+scan has 12 candidates for 12 seeds, but one of them is a slab fragment:
+a second blob of a tile-1 seed, 2–3 mm from that seed's own blob, left
+unmatched by the 2 mm Hungarian gate. With axes, the true tile-1 quad
+fits at rms 1.11 mm with 31° axis error (score 5.21) and the fragment quad
+is not selected. Without axes the fragment quad [3 true seeds + fragment]
+fits at rms 0.10 mm (score 7.80) against 0.38 mm for the true quad, so
+the selector takes it and the seed's own blob is left unassigned. The
+tile is physically right (same tile, one seed replaced by its fragment
+about 1 mm away in z), but the partition metric and the posterior for that
+seed are wrong. The same swap, twice, happens on analytic rng 2 at 2.8 mm
+(14 candidates, two fragments). On coarse slabs a capsule's PCA axis is
+20–40° off, yet it was still the only evidence separating a fragment from
+the seed's blob, because a fragment's axis is worse than that.
+- These fragments are threshold splits at slab boundaries of contiguous
+  thick slabs — the G3-like case stage 3's `merge_fragments` is tuned NOT
+  to touch (it is off for synthetic / unknown-thickness volumes and
+  fused 8/180 close pairs on G3). On real gapped exports (PostOp) the
+  merge rejoins them before the tile fit.
+- The binary rendering has no such fragment on these 20 scans, which is
+  why it never loses a partition and gains one with refined seeds.
+
+**Effect on the stage-5 re-evaluation (re-run after this change, same
+commands as above):** the counted prior now reproduces auto mode exactly
+(gain over refined seeds −1.9 % / −1.8 % at 2.1 mm, −13.9 % / −8.3 % at
+2.8 mm; the +9 … +60 % counted rows at 0611ccc were the axis defect, not
+the weighting). The refined (unweighted) and weighted fits now agree on
+partition at every spacing (binary 5/5, 5/5, 3/5, 5/5; analytic 5/5, 4/5,
+4/5, 2/5) and on the tile normal (within 0.2°), so the partition and normal
+differences in the stage-5 tables above were the axis rule, and the
+weighting itself changes neither. The stage-5 verdict is unchanged: FAIL.
+
+Other gate items: printed 8-tile phantom (1 mm, below the threshold, so
+untouched by construction) 32 seeds, 8 supported + 0 tentative tiles, 0
+unassigned, 36 s pipeline — the 25/31 auto-vs-counted(chord) difference is
+the known stage-4 item. Tests: `tests/test_tiles_axis_term.py` (5 new) and
+`test_tiles_auto.py`, `test_tiles_cover.py`, `test_localization_plumbing.py`,
+`test_localization_scoring.py`, `test_tiles_fuse.py`, `test_tiles_deform.py`
+(117 passed, 92 s) plus `test_tiles.py`, `test_tiles_degraded.py`,
+`test_tiles_suggest.py`, `test_tiles_surface.py`, `test_tile_model.py`,
+`test_implant_assessment.py`, `test_seeds_refine.py`, `test_integration.py`
+(178 passed, 128 s), no existing test edited. The frozen 1.4 mm expectation
+in `test_tiles_cover.py` (rng 1: the calibrated selection drops one tile,
+`n_selected == 2`, recovered as tentative) still holds: that tile stays
+2+1 with the switch on.
+
+Options for the decision:
+1. Keep `True`: tile normals 2–4× better on every coarse scan, counted =
+   auto, faster fits; cost = fragment sensitivity where stage 3 does not
+   merge (analytic phantom: 1/20 raw, 2/20 refined coarse scans).
+2. Revert to `False`: 0611ccc behaviour; the weighted path and the
+   counted-with-`seed_cov` fix keep dropping axes regardless.
+3. Not measured: fit without the axis term but keep an axis *gate* or
+   score penalty on coarse scans (the true tiles themselves show 25–38°
+   axis error there, so a gate would have to be loose).
+
 ## Open decisions
 
 - Stage 5 posterior covariance:
@@ -963,12 +1182,11 @@ Reading:
     ignores the uncertainty of θ̂. The posterior mean is the same in both
     modes.
   - The pipeline already stores both (`cov_ras`, `cov_ras_pev`).
-- Stage 5 axis rule:
-  - With `seed_cov`, fits above 1.2 mm drop the axis term. The unweighted
-    supported path still fits on degenerate axes on coarse scans (tile
-    normal error 6.4° at 2.8 mm vs 2.9° without).
-  - Changing that is outside stage 5: it alters the calibrated selection
-    and needs its own gate.
+- Stage 5 axis rule — measured (section "Axis term on coarse scans"):
+  shipped as `auto.DROP_AXIS_TERM_ON_COARSE = True`; gate PARTIAL (normal
+  error, centre, thin-slice identity, printed phantom, tests all pass;
+  partition loses 1/20 raw and 2/20 refined analytic coarse scans to slab
+  fragments). Coordinator decides keep / revert; see the options there.
 - Stage 5 weight normalisation:
   - The normalisation is per seed (λ_min(Cᵢ)), which drops relative
     precision between seeds. That is immaterial with the stand-in, where
@@ -1347,6 +1565,16 @@ seed median 0.34 mm (0.47 before the merge), max 2.41 mm.
 | 2026-10-08 | `scripts/localization_mergesplit_sweep.py --singles 200 --pairs 60` | 2026 | 6eb4aa4 | 15.8 s |
 | 2026-10-08 | `python scripts/validation_seed_localization.py --methods baseline,legacy,merge --grids G2,G3,G4` | layout rng 0–4 × 40 × sparse/crowded | merge of 2b9f896 + loc/integration 8a35ee6 (this commit) | 15 s |
 | 2026-10-08 | `pytest tests/test_seeds_merge_split.py tests/test_seeds_unit.py tests/test_integration.py tests/test_tiles_cover.py tests/test_implant_assessment.py tests/test_localization_plumbing.py` | — | 6eb4aa4 | 33 s, 51 passed |
+| 2026-10-08 | `python scripts/validation_fuse.py --refine centroid --seed-render binary --mode auto` | phantom rng 0-4 | 0611ccc (+ script) | 28 s |
+| 2026-10-08 | `python scripts/validation_fuse.py --refine centroid --seed-render analytic --mode auto` | phantom rng 0-4 | 0611ccc (+ script) | 28 s |
+| 2026-10-08 | `python scripts/validation_fuse.py --refine centroid --seed-render binary --mode prior` | phantom rng 0-4 | 0611ccc (+ script) | 40 s |
+| 2026-10-08 | `python scripts/validation_fuse.py --refine centroid --seed-render analytic --mode prior` | phantom rng 0-4 | 0611ccc (+ script) | 40 s |
+| 2026-10-08 | `python scripts/validation_axis_term.py` (raw detections, both renderings, auto + prior, OFF vs ON) | phantom rng 0-4 | task-2 commit | 62 s |
+| 2026-10-08 | `python scripts/validation_axis_term.py --refine centroid` | phantom rng 0-4 | task-2 commit | 56 s |
+| 2026-10-08 | `GT_DATA_ROOT=C:\Users\jacob\Documents python scripts/validation_realdata_proxies.py --scans printed8 --no-cache` | printed 8-tile phantom | task-2 commit | 39 s (pipeline 36 s) |
+| 2026-10-08 | `python scripts/validation_fuse.py --refine centroid --seed-render {binary,analytic} --mode {auto,prior}` (re-run after the axis change) | phantom rng 0-4 | task-2 commit | 4 × 30 s |
+| 2026-10-08 | `pytest tests/test_tiles_axis_term.py tests/test_tiles_auto.py tests/test_tiles_cover.py tests/test_localization_plumbing.py tests/test_localization_scoring.py tests/test_tiles_fuse.py tests/test_tiles_deform.py` | fixed | task-2 commit | 92 s, 117 passed |
+| 2026-10-08 | `pytest tests/test_tiles.py tests/test_tiles_degraded.py tests/test_tiles_suggest.py tests/test_tiles_surface.py tests/test_tile_model.py tests/test_implant_assessment.py tests/test_seeds_refine.py tests/test_integration.py` | fixed | task-2 commit | 128 s, 178 passed |
 
 ### Coordinator decision on stage 5 (2026-10-08, after loc/hwls merged at 04b4d20)
 
@@ -1416,3 +1644,18 @@ real scans.
   fe4a1a8; recall 0.97/0.98 at 2.1/2.8 mm, not 1.00). The README validation
   row "slice-spacing robustness" must be re-stated from the fresh baseline
   when this feature merges to main.
+
+### Coordinator decision on the axis-term switch (2026-10-08, after loc/hwls merged)
+
+Gate "normal error at 2.1/2.8 mm improves AND partition correctness and
+centre error not worse at any spacing; thin slices bit-identical": normal
+error improved 2–4× everywhere, centres identical, thin slices identical
+(40/40), printed phantom unchanged — but partition correctness got worse on
+analytic coarse scans with unmerged slab fragments (raw 1/20, refined 2/20:
+the fragment forms a squarer quad once axis evidence is gone). The
+pre-declared criterion is therefore **not met** and `DROP_AXIS_TERM_ON_COARSE`
+ships `False` (bit-identical to the previous default on every unweighted
+scan). The measured trade-off stays in the notes; the follow-up (after the
+paper) is an axis GATE without the residual term, which needs its own gate.
+The defect fix bundled with it — `fit_tiles(score="deformable")` now
+receives `spacing_mm`, so counted = auto exactly — is kept.
