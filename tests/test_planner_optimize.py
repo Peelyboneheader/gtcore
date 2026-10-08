@@ -293,7 +293,7 @@ def test_enter_runs_the_optimizer_and_tiles_land_as_ordinary_tiles(app, fakes):
     s = app._last_status
     assert "optimized: 3 tiles placed by sa in" in s
     assert "V100" in s and "->" in s and "D90" in s and "+5 mm shell" in s
-    assert "1 hand-placed tile replaced" in s
+    assert "replaced 1 tile and" in s and "free detected seed" in s
     assert "3 optimizer tiles untouched" in s
     # section 4 V1: the planner never flags an optimizer output as overlapping
     app._refresh_overlaps()

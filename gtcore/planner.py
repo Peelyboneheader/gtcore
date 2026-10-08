@@ -102,15 +102,18 @@ PLACE    hover the blue wall : ghost preview of the next tile (amber = overlaps)
          gold outline        : tile fitted FROM THE SCAN (green = placed by hand)
          right-click or P    : drop tile there      H : next tile full/half
          T                   : suggest tiles from the detected seeds (OR count
-                               if given, else auto; orange = tentative)
+                               if given, else auto; orange = tentative); T again
+                               re-infers: the earlier scan tiles are replaced
          O                   : OPTIMIZE placement: recommends a tile count, asks
                                for N (digits, Enter, Esc), drops the optimizer's
                                tiles (violet until touched)   Shift+O : solver
+                               M in the prompt: REPLACE the board (and its
+                               seeds) with the plan, or ADD to the board
          N                   : suggest the NEXT tile for the current board
 ADJUST   left-drag ON a tile : grab it (quad or seeds) and slide it along the wall
          Ctrl + left-drag    : slide the SELECTED tile from anywhere on the wall
          Tab                 : select next tile     arrows : nudge 2 mm
-         [  ]                : rotate 10 deg        X / Del : delete tile
+         [  ]                : rotate 10 deg        X / Del : delete tile + its seeds
          Backspace           : delete ALL placed tiles
          Z                   : undo last change
 DOSE     U                   : compute TG-43 dose, isodoses + dose panel
@@ -362,6 +365,11 @@ class _PlannerApp:
         # twice in dose / export.  Deleting the tile (or undo) releases it.
         self._owned_seeds = {}
         self._det_hidden = set()     # detected-seed actors currently removed
+        # detected-seed indices taken OFF the board: a deleted tile takes its
+        # seeds with it, and an optimizer run in replace mode takes the whole
+        # implant with it.  Not drawn, not counted in dose or export.  Undo
+        # (and T, which re-infers the implant from the scan) brings them back.
+        self._removed_seeds = set()
         self._next_id = 0
         self.selected = -1
         self.next_kind = "full"
@@ -472,10 +480,16 @@ class _PlannerApp:
             out.update(self._owned_seeds.get(tid, ()))
         return out
 
+    def _hidden_seed_indices(self):
+        """Detected seeds not shown as free seeds: owned by a tile on the
+        board (the tile draws them) or removed from the board."""
+        return self._owned_seed_indices() | set(self._removed_seeds)
+
     def _free_detected(self):
-        """Detected seeds NOT owned by any tile on the board: (centers,
-        axes) -- what dose and export count alongside the placed tiles."""
-        owned = self._owned_seed_indices()
+        """Detected seeds NOT owned by any tile on the board and not removed
+        from it: (centers, axes) -- what dose and export count alongside the
+        placed tiles."""
+        owned = self._hidden_seed_indices()
         c = np.asarray(self.result.seeds.centers_ras, dtype=float).reshape(-1, 3)
         a = np.asarray(self.result.seeds.axes_ras, dtype=float).reshape(-1, 3)
         keep = [i for i in range(len(c)) if i not in owned]
@@ -483,8 +497,9 @@ class _PlannerApp:
 
     def _refresh_detected_seeds(self):
         """Hide detected seeds owned by a tile on the board (the tile draws
-        them, at the tile's current position); show the rest again."""
-        owned = self._owned_seed_indices()
+        them, at the tile's current position) and seeds removed from the
+        board; show the rest again."""
+        owned = self._hidden_seed_indices()
         seeds = self.result.seeds
         for k in owned - self._det_hidden:
             try:
@@ -1208,7 +1223,8 @@ class _PlannerApp:
     def _push_history(self):
         """Snapshot the board before a mutation (tiles are immutable values)."""
         self._history.append((list(self.tiles), list(self._tile_ids),
-                              self.selected))
+                              self.selected, frozenset(self._removed_seeds),
+                              tuple(self._unassigned)))
         del self._history[:-UNDO_DEPTH]
 
     def undo(self):
@@ -1218,10 +1234,12 @@ class _PlannerApp:
         if self._drag_idx >= 0:  # never unwind under an active grab
             self._drag_idx = -1
             self._drag_pending_xy = self._drag_applied_xy = None
-        tiles, ids, selected = self._history.pop()
+        tiles, ids, selected, removed, unassigned = self._history.pop()
         for tid in set(self._tile_ids) - set(ids):
             self._remove_tile_actors(tid)
         self.tiles, self._tile_ids = tiles, ids
+        self._removed_seeds = set(removed)
+        self._mark_unassigned(unassigned)
         self.selected = selected if 0 <= selected < len(tiles) \
             else len(tiles) - 1
         self._hover_idx = -1
@@ -1318,7 +1336,13 @@ class _PlannerApp:
         """Infer the implanted configuration from the detected seeds (no
         count needed) and put the tiles on the board as ordinary placed
         tiles -- movable, rotatable, deletable -- conformed to the cavity
-        wall when one exists, otherwise as the free bent-tile fits."""
+        wall when one exists, otherwise as the free bent-tile fits.
+
+        T is a re-inference, not an addition: the tiles that came from the
+        scan before (adopted at startup or by an earlier T, moved or not)
+        are replaced, and seeds removed from the board by X or an optimizer
+        run come back -- the scan's implant is shown in full again.  Tiles
+        placed by hand or by the optimizer stay.  One undo step."""
         from .tiles import fit_tiles_prior, to_placed_tiles
 
         seeds = self.result.seeds
@@ -1346,8 +1370,23 @@ class _PlannerApp:
             verify_inferred_seeds(fit, vol_raw, seeds)
         placed = to_placed_tiles(fit, seeds.centers_ras, seeds.axes_ras)
         poses = fit.all_tiles
-        if placed:
-            self._push_history()          # one undo step restores the board
+        if not placed:
+            self._last_suggestion = fit
+            self._mark_unassigned(fit.unassigned_indices)
+            self._after_change("suggest: no tiles fitted: %s" % fit.summary())
+            return placed
+        self._push_history()          # one undo step restores the board
+        self._hide_ghost()
+        self._drag_idx = -1
+        self._hover_idx = -1
+        earlier = [tid for tid in self._tile_ids if tid in self._adopted_ids]
+        for tid in earlier:
+            self._remove_tile_actors(tid)
+        keep = [(t, tid) for t, tid in zip(self.tiles, self._tile_ids)
+                if tid not in self._adopted_ids]
+        self.tiles = [t for t, _tid in keep]
+        self._tile_ids = [tid for _t, tid in keep]
+        self._removed_seeds = set()
         for tile, pose in zip(placed, poses):
             self.tiles.append(tile)
             self._tile_ids.append(self._next_id)
@@ -1372,6 +1411,9 @@ class _PlannerApp:
                 len(placed), n_sup, n_ten, fit.summary())
         else:
             msg = "suggested %d tile(s): %s" % (len(placed), fit.summary())
+        if earlier:
+            msg += "\n  re-inferred: %d earlier scan tile%s replaced (Z restores)" % (
+                len(earlier), "" if len(earlier) == 1 else "s")
         if notes:
             msg += "\n  " + ", ".join(notes)
         if mesh is None:
@@ -1477,7 +1519,7 @@ class _PlannerApp:
                             "tiles are on the board)" % self._opt_solver)
 
     def cycle_mode(self):
-        """Prompt key M: replace this session's proposals, or add to the board."""
+        """Prompt key M: replace the board with the plan, or add to the board."""
         i = OPTIMIZE_MODES.index(self._opt_mode)
         self._opt_mode = OPTIMIZE_MODES[(i + 1) % len(OPTIMIZE_MODES)]
 
@@ -1495,10 +1537,10 @@ class _PlannerApp:
             self.optimize_placement()
 
     def _fixed_for_mode(self, mode=None):
-        """Tiles the optimizer must keep as obstacles in ``mode``."""
+        """Tiles the optimizer must keep as obstacles in ``mode``: every
+        tile on the board in ``add`` mode, none in ``replace`` mode."""
         mode = mode or self._opt_mode
-        return [t for t, tid in zip(self.tiles, self._tile_ids)
-                if mode == "add" or tid in self._adopted_ids]
+        return list(self.tiles) if mode == "add" else []
 
     def _capacity(self):
         """``(tiles that fit at the planner grid or None, status line)``.
@@ -1604,12 +1646,16 @@ class _PlannerApp:
         """Run ``gtcore.plan.optimize`` for the wall and put the result on
         the board as ordinary placed tiles (one undo step, violet tint).
 
-        ``mode`` ``"replace"`` (default) removes this session's hand-placed
-        proposals and keeps the tiles fitted from the scan as fixed
-        obstacles; ``"add"`` keeps everything on the board as fixed and adds
-        the new tiles.  Fixed tiles force the greedy solver (the only one
-        with a fixed set); the status line says so.  Runs synchronously;
-        stage progress goes to the console.  Returns the new tiles.
+        ``mode`` ``"replace"`` (default) puts the optimizer's plan on the
+        board INSTEAD of what is there: every tile (hand-placed, suggested by
+        T, fitted from the scan, or from an earlier run) and every free
+        detected seed leave the board, so the plan is scored and drawn on
+        its own and nothing of the implant is counted twice.  ``"add"``
+        keeps everything on the board as fixed obstacles and adds the new
+        tiles.  Fixed tiles force the greedy solver (the only one with a
+        fixed set); the status line says so.  Either way one undo step
+        restores the board.  Runs synchronously; stage progress goes to the
+        console.  Returns the new tiles.
         """
         if not self._has_surface():
             self._update_status("no cavity surface in this scan -- nothing to optimize on")
@@ -1617,10 +1663,10 @@ class _PlannerApp:
         solver = solver or self._opt_solver
         mode = mode or self._opt_mode
         n_full, n_half = int(n_full), int(n_half)
-        keep = [(t, tid) for t, tid in zip(self.tiles, self._tile_ids)
-                if mode == "add" or tid in self._adopted_ids]
+        keep = list(zip(self.tiles, self._tile_ids)) if mode == "add" else []
         fixed = self._fixed_for_mode(mode)
         n_removed = len(self.tiles) - len(keep)
+        n_free = 0 if mode == "add" else len(self._free_detected()[0])
         solver_used, note = solver, ""
         if fixed and solver != "greedy":
             solver_used = "greedy"
@@ -1667,9 +1713,16 @@ class _PlannerApp:
         self._push_history()           # one undo step restores the board
         self._drag_idx = -1
         self._hover_idx = -1
+        kept_ids = set(k for _t, k in keep)
         for tid in list(self._tile_ids):
-            if tid not in [k for _t, k in keep]:
+            if tid not in kept_ids:
                 self._remove_tile_actors(tid)
+                self._removed_seeds.update(
+                    int(i) for i in self._owned_seeds.get(tid, ()))
+        if mode != "add":
+            # the plan replaces the implant: free detected seeds leave too
+            seeds = getattr(self.result, "seeds", None)
+            self._removed_seeds.update(range(len(seeds) if seeds is not None else 0))
         self.tiles = [t for t, _tid in keep]
         self._tile_ids = [tid for _t, tid in keep]
         for tile in tiles:
@@ -1685,10 +1738,14 @@ class _PlannerApp:
         grid = " (%d candidates at h %g mm / %d spins built in %.1f s, solver %.1f s)" % (
             int(cs.get("n_candidates", 0)), PLANNER_H_MM, PLANNER_N_SPINS,
             float(rt.get("candidates", 0.0)), float(rt.get("solver", 0.0)))
+        replaced = []
+        if n_removed:
+            replaced.append("%d tile%s" % (n_removed, "" if n_removed == 1 else "s"))
+        if n_free:
+            replaced.append("%d free detected seed%s" % (n_free, "" if n_free == 1 else "s"))
         msg = "optimized: %d tile%s placed by %s in %.1f s%s%s%s (violet until touched; Z undoes)" % (
             len(tiles), "" if len(tiles) == 1 else "s", solver_used, dt, grid, note,
-            "; %d hand-placed tile%s replaced" % (n_removed, "" if n_removed == 1 else "s")
-            if n_removed else "")
+            "; replaced " + " and ".join(replaced) + " on the board" if replaced else "")
         msg += "\n  " + self._before_after_text(before, after, rep)
         if self._eligible_note():
             msg += "\n  " + self._eligible_note()
@@ -1758,8 +1815,13 @@ class _PlannerApp:
             self._drag_idx = -1
         self._hover_idx = -1  # indices shifted; the next move re-picks
         self._remove_tile_actors(tid)
+        # the tile's seeds leave the board with it: they must not reappear
+        # as free detected seeds at the scan position (and count in dose)
+        owned = self._owned_seeds.get(tid, ())
+        self._removed_seeds.update(int(i) for i in owned)
         self.selected = min(self.selected, len(self.tiles) - 1)
-        self._after_change("tile deleted")
+        self._after_change("tile deleted" + (
+            " with its %d seeds (Z restores both)" % len(owned) if owned else ""))
 
     def delete_all(self):
         """Remove every tile placed this session (one undo step restores
@@ -1780,6 +1842,8 @@ class _PlannerApp:
         for tid in list(self._tile_ids):
             if tid not in self._adopted_ids:
                 self._remove_tile_actors(tid)
+                self._removed_seeds.update(
+                    int(i) for i in self._owned_seeds.get(tid, ()))
         self.tiles = [t for t, _tid in keep]
         self._tile_ids = [tid for _t, tid in keep]
         self.selected = 0 if keep else -1

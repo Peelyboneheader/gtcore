@@ -1174,6 +1174,17 @@ planner keys `O` / `N`).
     fixed obstacles — the implant is physically there. **add**: everything
     on the board stays fixed and N tiles are added. Alternative: always
     clear the board. Rejected: that silently discards the recovered implant.
+    *Revised 2026-10-08 (Jacob: "T and O interfere with each other"):*
+    keeping the scan tiles fixed made O after T an add-on (greedy forced,
+    N more tiles around the implant) while the implant's free seeds were
+    still counted next to the plan. **replace** now puts the plan on the
+    board INSTEAD of the implant: every tile and every free detected seed
+    leave (`_removed_seeds`), the status line says how many, and one `Z`
+    restores them, so nothing is discarded silently. **add** is the mode
+    for "keep the implant, add N". `T` is a re-inference (earlier scan
+    tiles replaced, removed seeds back) rather than an append, and `X`
+    takes a tile's seeds off the board with it instead of releasing them
+    at the scan position.
 12. **Fixed tiles go through the greedy solver only.** Each fixed tile
     becomes one extra pre-selected pseudo-candidate (its own influence row
     from `dose_at_points(exact=False)`, its own conflict row from the
