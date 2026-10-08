@@ -19,7 +19,7 @@ then `U`.
 | `Cav_Post` | 35.1 cc | physician's post-op resection cavity |
 | `CTV_GT` | 19.0 cc | the GammaTile clinical target: a *partial* 5 mm rind — 0 % inside the cavity, every voxel ≤ 5.2 mm from it, but only 56 % of the full 5 mm rind (33.9 cc) |
 | `CTV_Post` | 23.4 cc | a second target, reaching 10.6 mm from the cavity |
-| `Seeds` | 30 contours | 30 seed positions (7.5 full tiles' worth) |
+| `Seeds` | 30 contours | 30 contoured seed positions; the RTDOSE itself has **32** local maxima, i.e. the plan has 32 sources = 8 full tiles (two seeds were never contoured) |
 
 The clinical plan's `CTV_GT` D90 is **6365 cGy** (V100 94 %), i.e. the 63 Gy
 Jacob remembered. The same plan on the *full* 5 mm rind of the physician's
@@ -46,8 +46,12 @@ reference.
 | detected → nearest TPS seed | median 0.23 mm, p95 4.4 mm, max 8.7 mm |
 | TPS seeds with no detection within 2 mm | 1 |
 
-Tile fitting on the detected seeds recovers 6 full tiles (24 seeds) with 7
-seeds unassigned (the implant is 7.5 tiles: at least one half tile).
+Of the 31 detections, 29 match contoured seeds (median 0.23 mm, max 0.9 mm)
+and 2 are the uncontoured sources; one contoured seed (2 mm outside the
+cranial-interior mask under the craniotomy) is dropped by the vault filter.
+Tile fitting recovers 6 of the 8 full tiles; the 8 leftover seeds form no
+square quads (crumpled or stacked tiles the bent-tile model does not
+explain) -- a limitation to report.
 
 ## 3. Dose engine vs the TPS
 
@@ -59,19 +63,21 @@ positions, against the RTDOSE at `CTV_GT` voxels more than 5 mm from any seed:
 | median | 0.931 |
 | p5 – p95 | 0.777 – 1.030 |
 
-A uniform 7 % deficit is a seed-strength difference, not a formalism one: the
-TPS evidently used about **3.76 U** per seed (the assay value; 3.5 U is the
-nominal). With 3.76 U:
+The 7 % deficit is NOT a seed-strength difference: it is the two sources the
+`Seeds` contour omits. With all 32 sources the engine at the nominal 3.5 U
+matches the RTDOSE to 1 % (implied 3.54 U). The 3.76 U row below is what you
+get by scaling the 30 contoured seeds up to the missing dose, kept only to
+show the size of the effect:
 
 | D90 on `CTV_GT` (cGy) | 3.5 U | 3.76 U | RTDOSE |
 |---|---|---|---|
 | TPS seed positions | 5790 | 6221 | 6365 |
 | gtcore detected seeds | 6080 | 6532 | — |
 
-So the engine reproduces the clinical D90 within 2 % once the seed strength
-is right, and seed localisation adds about +5 % (the 31st detection and the
-two outliers). The assay S_K should be a planner input (it is already a
-parameter of `compute_dose_grid`).
+So the engine reproduces the clinical D90 within 1-2 % given the full source
+list. gtcore's own 31 detections at 3.5 U land 4.5 % low on `CTV_GT` (6080
+vs 6365 cGy), consistent with the one dropped seed. The assay S_K should
+still be a planner input (it is already a parameter of `compute_dose_grid`).
 
 ## 4. Cavity segmentation and the HR-CTV
 
@@ -108,8 +114,11 @@ order of value:
 2. Cavity contents above 26 HU (clot) — the 29 % of `Cav_Post` never
    reached. A closing-free fill of the region enclosed by the seed sheet
    would capture it.
-3. Read S_K from the assay certificate / plan; default 3.5 U understates the
-   dose here by 7 %.
+3. Widen the vault filter's dilation so a seed just under the craniotomy is
+   kept (the dropped contoured seed); read S_K from the assay certificate.
+4. A pure-geometry cavity (seed hull dilated 7 mm) scores Dice 0.82 /
+   covers 89 % of `Cav_Post` on this case, better than the intensity-grown
+   rule; worth testing on the phantom and the next case before switching.
 
 ## 5. Earlier intermediate numbers (superseded)
 
