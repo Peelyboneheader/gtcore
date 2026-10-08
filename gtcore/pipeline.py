@@ -188,13 +188,51 @@ def _count_near(centers, ref, radius_mm):
     return int((d <= radius_mm).sum())
 
 
+# fragment merge default: slabs at most this fraction of the slice spacing
+# leave an unimaged gap between neighbouring slices (PostOp: 1.0 / 2.0 mm)
+MERGE_SLAB_GAP_RATIO = 0.75
+
+
+def merge_fragments_default(vol: Volume):
+    """Whether ``reconstruct`` merges seed fragments when not told.
+
+    Returns ``(enabled, reason)``.  On only for coarse scans (slices >
+    1.2 mm) whose reconstructed slabs are THINNER than their spacing
+    (DICOM SliceThickness <= ``MERGE_SLAB_GAP_RATIO`` x spacing): a capsule
+    crossing the unimaged gap between two slabs leaves two non-touching
+    traces, which is how both duplicate pairs on the PostOp export (1 mm
+    slices every 2 mm) arose.  Measured in docs/localization-notes.md
+    (stage 3): on that geometry ~15 % of random seeds fragment and the merge
+    rejoins all of them; on contiguous 2 mm slabs (with or without
+    interpolated gap slices) fragments are >= 4.2 mm apart, the merge
+    rejoins none of them and only adds false merges between close distinct
+    seeds; thin cuts have no fragments.  Unknown slice thickness -> off.
+    """
+    dz = float(np.max(vol.spacing))
+    from .seeds.detect import MERGE_COARSE_SLICE_MM
+
+    if dz <= MERGE_COARSE_SLICE_MM:
+        return False, "thin slices (%.2f mm): capsules stay connected" % dz
+    try:
+        thick = float(vol.meta.get("slice_thickness"))
+    except (TypeError, ValueError):
+        return False, "slice thickness unknown"
+    if not np.isfinite(thick) or thick <= 0:
+        return False, "slice thickness unknown"
+    if thick <= MERGE_SLAB_GAP_RATIO * dz:
+        return True, ("%.2f mm slices every %.2f mm leave unimaged gaps"
+                      % (thick, dz))
+    return False, ("contiguous %.2f mm slabs at %.2f mm spacing" % (thick, dz))
+
+
 def reconstruct(vol: Volume, verbose: bool = True,
                 n_full_tiles: Optional[Union[int, str]] = None,
                 n_half_tiles: int = 0,
                 complete_degraded: bool = True,
                 n_seeds_expected: Optional[int] = None,
                 refine_seeds: Optional[str] = None,
-                fuse_tiles: bool = False) -> PipelineResult:
+                fuse_tiles: bool = False,
+                merge_fragments: Optional[bool] = None) -> PipelineResult:
     """Run the full reconstruction pipeline on one CT volume.
 
     ``n_seeds_expected`` (the implanted seed count, when the OR team knows
@@ -213,6 +251,12 @@ def reconstruct(vol: Volume, verbose: bool = True,
     from the seed cloud by model selection (``n_half_tiles`` non-zero then
     merely allows half tiles to be selected) and ``PipelineResult.tiles`` is
     an :class:`~gtcore.tiles.auto.AutoFitResult` with the score curve.
+
+    ``merge_fragments`` rejoins candidate pairs that are fragments of one
+    seed (``gtcore.seeds.detect._merge_fragments``); ``None`` uses
+    :func:`merge_fragments_default` (on for coarse scans whose slices are
+    thinner than their spacing).  The decision and every merge are logged in
+    ``vol.meta["seed_merge"]``.
 
     ``refine_seeds`` (``None`` = off, the default; ``"centroid"``) re-measures
     every surviving candidate after the vault filter and the threshold
@@ -244,6 +288,11 @@ def reconstruct(vol: Volume, verbose: bool = True,
     timings = {}
     meta = {}
     fusion = None           # vol.meta["seed_posterior"] when fuse_tiles
+    if merge_fragments is None:
+        merge_fragments, merge_reason = merge_fragments_default(vol)
+    else:
+        merge_reason = "set by caller"
+    merge_fragments = bool(merge_fragments)
 
     def stage(name, fn):
         t0 = time.perf_counter()
@@ -256,7 +305,14 @@ def reconstruct(vol: Volume, verbose: bool = True,
     params = seed_detection_params(vol.spacing)
     seeds_raw = stage("seed detection", lambda: detect_seed_candidates(
         vol, hu_threshold=params["hu_threshold"],
-        min_mm3=params["min_mm3"], max_mm3=params["max_mm3"]))
+        min_mm3=params["min_mm3"], max_mm3=params["max_mm3"],
+        merge_fragments=merge_fragments))
+    merge_log = list((seeds_raw.info or {}).get("merge_log", ()))
+    vol.meta["seed_merge"] = dict(enabled=merge_fragments, reason=merge_reason,
+                                  n_merged=len(merge_log), merges=merge_log)
+    if verbose and merge_fragments:
+        print("  fragment merge: %d pair(s) rejoined (%s)"
+              % (len(merge_log), merge_reason))
     seeds = filter_seed_shaped(
         seeds_raw, min_mm3=params["min_mm3"], max_mm3=params["max_mm3"],
         min_elong=params["min_elong"], max_elong=params["max_elong"])
@@ -322,7 +378,8 @@ def reconstruct(vol: Volume, verbose: bool = True,
                 break
             raw2 = detect_seed_candidates(vol, hu_threshold=thr,
                                           min_mm3=params["min_mm3"],
-                                          max_mm3=params["max_mm3"])
+                                          max_mm3=params["max_mm3"],
+                                          merge_fragments=merge_fragments)
             s2 = filter_seed_shaped(raw2, min_mm3=params["min_mm3"],
                                     max_mm3=params["max_mm3"],
                                     min_elong=params["min_elong"],
