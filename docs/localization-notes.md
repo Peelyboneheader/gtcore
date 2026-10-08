@@ -204,6 +204,7 @@ seeds at 2.8 mm (recall 0.92, partition 0/5).
 | 3 | side-by-side seeds 2.5–3.5 mm apart still split | pass: 6/6 fixed configurations within 0.21 mm (`tests/test_seeds_merge_split.py`); 90/90 random pairs within 0.19 mm with the weighted split (k-means++: 86/90, worst 1.53 mm) | 6eb4aa4 | split: windowed median + halves guard + weighted split, all default-on |
 | 3 | gap-slice fragment → 1 candidate | pass on the PostOp slab geometry (1 mm slices every 2 mm): 29/200 random seeds fragment, 0 stay fragmented at 4.0 mm, merged centre error 0.53 mean / 1.50 max. **Not met** on 2 mm slabs with interpolated gap slices (G3): there the fragments are tip pairs 4.2–4.7 mm apart, beyond the 4.0 mm cap (see stage 3, limits). Harness (`validation_seed_localization.py`, 200 seeds per grid and layout): FP 29 → 0 on G2, 53 → 32 on the loader-grid G3, 20 → 12 on G4, recall and 3D error unchanged or better | 6eb4aa4 | merge: pipeline default on for coarse scans with slices thinner than their spacing; opt-in in `detect_seed_candidates` |
 | 3 | 0 false splits among 30 noise blobs | pass (10 seeds + 30 one/two-voxel specks at 2200 HU, all `split_k == 1`) | 6eb4aa4 | — |
+| 8 | 2.1 mm missed-seed case → "recovered" within 1.0 mm; the same case with the seed removed → "no image evidence" | **PASS** rng-1 head phantom block-averaged to 2.1 mm (11/12 seeds detected, the 12th inferred by triplet completion): "recovered", refined position **0.71 mm** from the truth seed (inferred 1.15 mm; through `reconstruct` 0.95 → 0.71 mm); the seed painted to the local background → "no image evidence" (peak −621 vs threshold 144 HU); a result without tentative tiles → `{}`; 7 ms per check; the verdict is the same for k_sigma 3 / 5 / 8. Caveat: that seed lies in the cavity's air pocket, where the stage-2 grey centroid falls back and the ROI centroid refines (details below) | f9c6134 | `verify_inferred_seeds` runs inside `reconstruct` only when `refine_seeds` is set (`vol.meta["seed_verify"]`) and in `planner.suggest_tiles` (status note "4th seed recovered" / "no image evidence"); tiles stay tentative |
 
 ## Stage 2 — grey-level centroid + analytic covariance (branch loc/refine)
 
@@ -695,6 +696,41 @@ through-slab term dominates, the covariance is calibrated.
 - 4.25 mm segment length: see the open question above.
 - Gap-filled volumes (G3): 6 % gain only; the gap geometry dominates.
 - 13-26 ms/seed: within budget (60 candidates -> ~1.5 s).
+### Stage 8 — image check of inferred seeds (commit f9c6134)
+
+What was built (`gtcore/tiles/verify.py::verify_inferred_seeds(result, vol, cands, k_sigma=5)`):
+- For every tile with `inferred_seed_ras` (triplet completion of the cover pass): a spherical 2.5 mm ROI around the inferred position on the RAW volume, with a shell of max(1.5 mm, largest voxel) beyond it, so a coarse slab export always contributes shell voxels. Voxels nearer to a detected candidate are excluded from both (stage 2's Voronoi rule), so a tile-mate's bloom cannot vouch for a missing seed.
+- Background = shell median; σ = 1.4826·MAD of the shell; reference contrast C_ref = median over the detected candidates of their own (peak − shell background) in the same windows.
+- Evidence iff peak > background + max(k_sigma·σ, 0.3·C_ref). The first term is the conventional detection threshold; the second demands a third of a typical seed's contrast on this scan, so a noise spike on a clean scan cannot pass.
+- With evidence, the position is refined with the stage-2 grey centroid (`grey_centroid`, orientation-free first pass, the tile-mates' mean axis as the start) and the tile is recorded as "recovered" with the refined position and covariance; otherwise "no image evidence".
+- Stored in `result.verification` (tile_id → dict; a new trailing `TileFitResult` field, `TilePose` untouched) and, from `reconstruct`, in `vol.meta["seed_verify"]` as a JSON-friendly digest. `pose.inferred_seed_ras` is left as inferred unless `update_poses=True`. The tile is never promoted.
+- `reconstruct(..., refine_seeds="centroid")` runs it after the tile fit (additive, off by default like stage 2; the candidates passed are the detections, not the stage-5 posteriors). `planner.suggest_tiles` runs it whenever a suggested tile carries an inferred seed; the status note reads `T3 tentative (1 seed inferred: 4th seed recovered)` or `(…: no image evidence)`. `AutoFitResult.summary()` adds "image check: 1 recovered, 0 without evidence".
+
+Finding: the missed seed sits in the air pocket.
+- The seed detection drops on this case (truth seed 8) lies on the superior cavity wall inside the air pocket: 93 % of the shell voxels are air (−1000 HU), ROI median −898 HU, peak 949 HU. That is also why the 1500 HU detection threshold missed it (partial volume across two 2.1 mm slabs).
+- The stage-2 grey centroid assumes a locally flat background. Its shell (4.5–6.6 mm out) is bimodal (air + brain): background −660 HU, signed-weight sum −26 000, `fallback:no_signal`. The same happens at the exact truth position, so this is the estimator's assumption, not the inferred offset.
+- Added fallback: the conventional above-threshold intensity-weighted centroid over the 2.5 mm ROI, weights (v − threshold) clipped at zero, re-centred for up to 3 passes; covariance = the stage-2 noise term σ²·S/W² plus the s²/12 quantization term. No new constant: the weight floor is the evidence threshold. `refine_status = "roi_centroid:no_signal"` records that this path produced the position ("ok" = grey centroid).
+- Caveat: σ from a bimodal shell (160 HU here) measures the shell's spread, not the scanner noise (4 HU). It only raises the threshold, so the rule is conservative there; on this case k·σ (802) is the larger term, not 0.3·C_ref (765).
+
+Measurements (`python scripts/validation_loc_scoring.py --verify`; output in `output/loc_scoring/stage8_measure.txt`):
+
+| Quantity | Value |
+|---|---|
+| Volume | rng-1 3-tile head phantom, 0.7 mm, block-averaged ×3 → 0.7 × 0.7 × 2.1 mm, 95 × 286 × 286 |
+| Inferred position error | 1.15 mm (`fit_tiles_auto` on the plain detections); 0.95 mm through `reconstruct` (refined detections) |
+| Evidence terms | peak 949 HU, background −894, σ 160, C_ref 2549 → threshold −91 HU |
+| Refined position error | **0.71 mm** on both paths (shift 1.84 / 1.59 mm from the inferred position), `roi_centroid:no_signal` |
+| Refined σ (√diag cov) | 0.27 / 0.27 / 0.64 mm |
+| k_sigma 3 / 5 / 8 | recovered / recovered / recovered |
+| Seed painted out (5 mm ball to the local background) | "no image evidence": peak −621 vs threshold 144 HU |
+| Runtime of the check | 7.4 ms (min of 5; 12 candidates for C_ref) |
+| `reconstruct` on the 2.1 mm volume | 14.5 s without, 13.5 s with `refine_seeds="centroid"` (the check is below the noise) |
+| Tests | `tests/test_tiles_verify.py`: 5 passed in 16.3 s (13.9 s is the `reconstruct` wiring test) |
+
+Limits:
+- One case with truth, and its detection miss happens to be the air-pocket seed, so the grey-centroid path ("ok") has not produced a recovered position yet; the ROI fallback carried the gate. The harness renderer (stage 0) can make further cases.
+- The 0.3·C_ref term assumes a missed seed is about as bright as the detected ones. A seed missed because it is genuinely faint must still reach 30 % of the median contrast; here 949 vs 2549 HU (37 %), close to the line. Report that fraction per case.
+- Not yet run on a real scan. The PostOp export (coarse, gappy, triplet completions expected) is the candidate; the printed phantom has no inferred seeds.
 
 ## Real-data proxies (no truth)
 
@@ -1659,3 +1695,13 @@ scan). The measured trade-off stays in the notes; the follow-up (after the
 paper) is an axis GATE without the residual term, which needs its own gate.
 The defect fix bundled with it — `fit_tiles(score="deformable")` now
 receives `spacing_mm`, so counted = auto exactly — is kept.
+| 2026-10-08 | `scripts/localization_mergesplit_realdata.py diagnose --merge off` (PostOp, baseline) | — | detection = 3cf35af | ~25 s (cached pickle) |
+| 2026-10-08 | `scripts/localization_mergesplit_realdata.py diagnose --merge default` (PostOp) | — | 6eb4aa4 | 26 s |
+| 2026-10-08 | `scripts/localization_mergesplit_realdata.py check phantom8 --merge default` (and `--merge on`) | — | 6eb4aa4 | 27 s |
+| 2026-10-08 | `scripts/localization_mergesplit_realdata.py check tilefree --merge default` | — | 6eb4aa4 | 28 s |
+| 2026-10-08 | `scripts/localization_mergesplit_realdata.py check doe --merge default [--legacy-split]` | — | 6eb4aa4 | 32 s / 26 s |
+| 2026-10-08 | `scripts/localization_mergesplit_sweep.py --singles 200 --pairs 60` | 2026 | 6eb4aa4 | 15.8 s |
+| 2026-10-08 | `pytest tests/test_seeds_merge_split.py tests/test_seeds_unit.py tests/test_integration.py tests/test_tiles_cover.py tests/test_implant_assessment.py tests/test_localization_plumbing.py` | — | 6eb4aa4 | 33 s, 51 passed |
+| 2026-10-08 | `python scripts/validation_loc_scoring.py --verify` | rng-1 head phantom at 2.1 mm | f9c6134 | ~40 s (two `reconstruct` runs) |
+| 2026-10-08 | `pytest tests/test_tiles_verify.py` | rng 1 | f9c6134 | 16.3 s, 5 passed |
+| 2026-10-08 | `pytest tests/test_tiles*.py tests/test_tile_model.py tests/test_implant_assessment.py tests/test_localization_plumbing.py tests/test_localization_scoring.py` after merging loc/integration (0611ccc) into loc/scoring | per test | f9c6134 | 213 s, 272 passed |

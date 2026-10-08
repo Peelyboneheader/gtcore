@@ -228,6 +228,7 @@ def _suggest_notes(fit) -> list:
     ``AMBIGUOUS_MARGIN`` of the chosen one."""
     margins = getattr(fit, "partition_margins", None) or {}
     ambiguous = set(getattr(fit, "ambiguous_tiles", None) or [])
+    verification = getattr(fit, "verification", None) or {}
     notes = []
     for pose in fit.all_tiles:
         base = "T%d" % (pose.tile_id + 1)
@@ -235,7 +236,12 @@ def _suggest_notes(fit) -> list:
         if pose.tentative:
             tag += " tentative"
             if pose.inferred_seed_ras is not None:
-                tag += " (1 seed inferred)"
+                tag += " (1 seed inferred"
+                ver = verification.get(pose.tile_id)
+                if ver is not None:
+                    tag += (": 4th seed recovered" if ver["status"] == "recovered"
+                            else ": no image evidence")
+                tag += ")"
         elif pose.degraded:
             tag += " crumpled"
         if pose.surface is not None and not pose.surface.attached:
@@ -1300,6 +1306,14 @@ class _PlannerApp:
         fit = fit_tiles_prior(seeds.centers_ras, seeds.axes_ras, self.prior,
                               cavity_center_ras=cavity_center, mesh=mesh,
                               spacing_mm=spacing, margins=True)
+        # stage 8: ask the raw image about every inferred 4th seed (the
+        # tile stays tentative; the note says recovered / no image evidence)
+        vol_raw = getattr(self.result, "volume", None)
+        if vol_raw is not None and any(p.inferred_seed_ras is not None
+                                       for p in fit.all_tiles):
+            from .tiles.verify import verify_inferred_seeds
+
+            verify_inferred_seeds(fit, vol_raw, seeds)
         placed = to_placed_tiles(fit, seeds.centers_ras, seeds.axes_ras)
         poses = fit.all_tiles
         if placed:
