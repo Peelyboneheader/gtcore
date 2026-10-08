@@ -82,8 +82,12 @@ from scipy.optimize import linear_sum_assignment
 from scipy.spatial.distance import cdist
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-DATA_ROOT = os.environ.get("GT_DATA_ROOT",
-                           r"C:\Users\jacob\OneDrive\Documents")
+# The scans left OneDrive on 2026-10-08 (now C:\Users\jacob\Documents); the
+# old root is kept as a fallback and GT_DATA_ROOT overrides both.
+_DATA_ROOTS = (r"C:\Users\jacob\Documents",
+               r"C:\Users\jacob\OneDrive\Documents")
+DATA_ROOT = os.environ.get("GT_DATA_ROOT") or next(
+    (r for r in _DATA_ROOTS if os.path.isdir(r)), _DATA_ROOTS[0])
 SCANS = {
     "printed8": "3D-Printed Phantom-8tiles (223)",
     "postop": "PostOp CT",
@@ -230,7 +234,8 @@ class Context:
         self.recon_refine = "refine_seeds" in params
         self.recon_fuse = "fuse_tiles" in params
         self.notes = []
-        self.cache_dir = os.path.join(args.out, "cache")
+        self.cache_dir = getattr(args, "cache_dir", None) or os.path.join(
+            args.out, "cache")
         os.makedirs(self.cache_dir, exist_ok=True)
 
     def skipped(self):
@@ -285,45 +290,77 @@ def run_pipeline(ctx, name, vol, path, tiles):
     wall = time.time() - t0
     seeds, tiles_res = res.seeds, res.tiles
     post_hoc = []
+    # same inputs as reconstruct()'s tile fit: cavity centre from its mask
+    cav = np.asarray(res.cavity_mask)
+    cav_c = vol.index_to_ras(np.argwhere(cav).mean(axis=0)[::-1]) \
+        if cav.any() else None
     if ctx.refiner is not None and not ctx.recon_refine and len(seeds):
         seeds = ctx.refiner(vol, seeds, method=args.refine)
         post_hoc.append("refine")
         if tiles:
             from gtcore.tiles import fit_tiles
 
-            # same call as reconstruct(): cavity centre from its cavity mask
-            cav = np.asarray(res.cavity_mask)
-            cav_c = vol.index_to_ras(np.argwhere(cav).mean(axis=0)[::-1]) \
-                if cav.any() else None
             tiles_res = fit_tiles(seeds.centers_ras, seeds.axes_ras, "auto",
                                   0, cavity_center_ras=cav_c,
                                   mesh=res.meshes.get("cavity"),
                                   spacing_mm=vol.spacing)
-    fused = None
-    if ctx.fuser is not None and tiles_res is not None:
-        try:
-            fused = _posterior_centers(ctx.fuser(
-                tiles_res, seeds.centers_ras, getattr(seeds, "cov_ras", None)))
-            if not ctx.recon_fuse:
+    fused, fuse_info = None, None
+    centers_raw = np.asarray(seeds.centers_ras, float)
+    cov_raw = None if getattr(seeds, "cov_ras", None) is None \
+        else np.asarray(seeds.cov_ras, float)
+    posterior = (res.meta or {}).get("seed_posterior")
+    if posterior is not None and posterior.get("applied"):
+        # in-pipeline fusion (THE SWITCH): res.seeds already carries the
+        # posterior centres; the detections sit in meta["seeds_unfused"]
+        fused = np.asarray(seeds.centers_ras, float)
+        centers_raw = np.asarray(posterior["raw_centers_ras"], float)
+        cov_raw = np.asarray(posterior["raw_cov_ras"], float)
+        fi = posterior.get("info") or {}
+        fuse_info = dict(n_fused=int(fi.get("n_fused", 0)),
+                         n_passthrough=int(fi.get("n_passthrough", 0)),
+                         shift_mm=np.asarray(fi.get("shift_mm", []), float))
+    elif ctx.fuser is not None and tiles_res is not None:
+        if posterior is not None:
+            ctx.fuse_reason = posterior.get("reason")
+        else:
+            try:
+                fused = _posterior_centers(ctx.fuser(
+                    tiles_res, seeds.centers_ras,
+                    getattr(seeds, "cov_ras", None)))
                 post_hoc.append("fuse")
-        except Exception as exc:
-            ctx.fuse_reason = "posterior_seed_positions failed: %r" % exc
+            except Exception as exc:
+                ctx.fuse_reason = "posterior_seed_positions failed: %r" % exc
+    refine = vol.meta.get("seed_refine")
+    if refine is None and ctx.refiner is not None and len(seeds) \
+            and "refine_status" in (seeds.info or {}):
+        status = [str(s_) for s_ in seeds.info["refine_status"]]
+        refine = dict(method=args.refine, n=len(status),
+                      n_ok=sum(1 for s_ in status if s_ == "ok"),
+                      status=status,
+                      shift_mm=[float(x) for x in
+                                seeds.info["refine_shift_mm"]],
+                      saturation_hu=seeds.info.get("saturation_hu"))
     slim = dict(
         key=key, cached=False, wall_s=wall, post_hoc=post_hoc,
         centers=np.asarray(seeds.centers_ras), axes=np.asarray(seeds.axes_ras),
+        centers_raw=centers_raw, cov_raw=cov_raw,
         volumes=np.asarray(seeds.volumes_mm3),
         cov=None if getattr(seeds, "cov_ras", None) is None
         else np.asarray(seeds.cov_ras),
         n_raw=len(res.seeds_raw), tiles=tiles_res, implant=res.implant,
         timings=dict(res.timings), meta={k: v for k, v in vol.meta.items()
                                          if k in ("vault_filter", "implant",
-                                                  "seed_search",
+                                                  "seed_search", "seed_merge",
                                                   "slices_interpolated",
                                                   "slices_on_grid",
                                                   "slices_present",
-                                                  "interpolated_k")},
-        fused=fused, shape=tuple(vol.array.shape),
-        spacing=[float(s) for s in vol.spacing])
+                                                  "interpolated_k",
+                                                  "slice_thickness")},
+        refine=refine, fuse_info=fuse_info, fused=fused,
+        cavity_center=cav_c, cavity_mesh=bool("cavity" in res.meshes),
+        shape=tuple(vol.array.shape),
+        spacing=[float(s) for s in vol.spacing],
+        affine=np.asarray(vol.affine, float))
     del res
     gc.collect()
     with open(fn, "wb") as fh:
@@ -399,13 +436,45 @@ def pair_assignment(res, pair):
     return out
 
 
+def _refine_summary(refine):
+    """ok / fallback counts from ``vol.meta["seed_refine"]`` (or the
+    equivalent built from ``info["refine_status"]``)."""
+    if not refine:
+        return None
+    status = [str(s) for s in refine.get("status", [])]
+    ok = np.array([s == "ok" for s in status], bool)
+    reasons = {}
+    for s in status:
+        if s != "ok":
+            reasons[s] = reasons.get(s, 0) + 1
+    shift = np.asarray(refine.get("shift_mm", []), float)
+    if len(shift) != len(status):
+        shift = np.full(len(status), np.nan)
+    return dict(n=len(status), n_ok=int(ok.sum()),
+                n_fallback=int(len(status) - ok.sum()), reasons=reasons,
+                shift_median=float(np.median(shift[ok])) if ok.any()
+                else np.nan,
+                shift_max=float(shift[ok].max()) if ok.any() else np.nan,
+                saturation_hu=refine.get("saturation_hu"))
+
+
+def _partition(res):
+    return sorted(tuple(sorted(int(i) for i in p.seed_indices))
+                  for p in list(res.tiles)
+                  + list(getattr(res, "tentative_tiles", [])))
+
+
 def printed_report(ctx, slim, vol):
     from gtcore.tiles import fit_tiles
 
-    centers = slim["centers"]
+    # the proxies are measured on the DETECTED seeds, the ones the tiles
+    # were fitted to; under --fuse the posterior centres are compared to
+    # them (fuse_* keys) rather than substituted
+    centers = np.asarray(slim.get("centers_raw", slim["centers"]), float)
     rep = dict(n_seeds=int(len(centers)), n_raw=int(slim["n_raw"]),
                wall_s=slim["wall_s"], cached=slim["cached"],
-               post_hoc=slim["post_hoc"])
+               post_hoc=slim["post_hoc"],
+               refine=_refine_summary(slim.get("refine")))
     res = slim["tiles"]
     rep.update(n_supported=len(res.tiles),
                n_tentative=len(getattr(res, "tentative_tiles", [])),
@@ -440,14 +509,31 @@ def printed_report(ctx, slim, vol):
                axis_spread_deg_mean=float(np.mean(
                    [t["axis_spread_deg"] for t in tiles])))
     if slim.get("fused") is not None:
-        ft = tile_report(slim, centers=slim["fused"])
+        F = np.asarray(slim["fused"], float)
+        disp = np.linalg.norm(F - centers, axis=1)
+        ft = tile_report(slim, centers=F)
         fs = np.concatenate([t["sides"] for t in ft
                              if t.get("kappa_max", 1.0) <= KAPPA_FLAT
                              and "sides" in t] or [np.zeros(0)])
-        rep.update(fused_chord_flat_mean=float(fs.mean()) if fs.size
+        fc = np.concatenate([t["chord_resid"] for t in ft
+                             if "chord_resid" in t] or [np.zeros(0)])
+        fi = slim.get("fuse_info") or {}
+        rep.update(fuse_disp_median=float(np.median(disp)),
+                   fuse_disp_mean=float(disp.mean()),
+                   fuse_disp_max=float(disp.max()),
+                   fuse_n_fused=fi.get("n_fused"),
+                   fuse_n_passthrough=fi.get("n_passthrough"),
+                   fused_chord_flat_mean=float(fs.mean()) if fs.size
                    else np.nan,
                    fused_chord_flat_sd=float(fs.std(ddof=1)) if fs.size > 1
+                   else np.nan,
+                   fused_chord_resid_mean=float(fc.mean()) if fc.size
+                   else np.nan,
+                   fused_chord_resid_sd=float(fc.std(ddof=1)) if fc.size > 1
                    else np.nan)
+        if len(centers) > max(PAIR_25_31):
+            rep["fused_pair_25_31_mm"] = float(np.linalg.norm(
+                F[PAIR_25_31[0]] - F[PAIR_25_31[1]]))
     # the close pair: the documented 25/31, and the closest pair found now
     D = cdist(centers, centers)
     np.fill_diagonal(D, np.inf)
@@ -462,12 +548,45 @@ def printed_report(ctx, slim, vol):
     a_cnt = pair_assignment(counted, pair)
     rep.update(pair_auto=a_auto, pair_counted=a_cnt,
                pair_consistent=bool(a_auto == a_cnt))
+    # partition margins (stage 6) of the tiles holding the pair: the auto
+    # fit re-run with margins=True on the pipeline's inputs (the cavity
+    # mesh is not cached; the partition must come back identical)
+    margins = getattr(res, "partition_margins", None)
+    if not margins:
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                again = fit_tiles(centers, slim["axes"], "auto", 0,
+                                  cavity_center_ras=slim.get("cavity_center"),
+                                  spacing_mm=slim["spacing"], margins=True,
+                                  seed_cov=slim.get("cov_raw")
+                                  if slim.get("fused") is not None else None)
+            if _partition(again) == _partition(res):
+                margins = again.partition_margins
+                rep["ambiguous_tiles"] = list(again.ambiguous_tiles)
+            else:
+                rep["margin_note"] = ("partition of the margin re-fit differs "
+                                      "from the pipeline fit%s"
+                                      % (" (cavity mesh not cached)"
+                                         if slim.get("cavity_mesh") else ""))
+        except Exception as exc:
+            rep["margin_note"] = "margin re-fit failed: %r" % exc
+    if margins:
+        pm = {}
+        for pose in list(res.tiles) + list(getattr(res, "tentative_tiles",
+                                                   [])):
+            for s in pair:
+                if s in pose.seed_indices:
+                    pm[int(s)] = float(margins.get(pose.tile_id, np.inf))
+        rep["pair_margins"] = pm
+        rep["margins_all"] = {int(k): float(v) for k, v in margins.items()}
     return rep
 
 
 def split_half(ctx, vol, ref_centers):
     from gtcore.volume import Volume
 
+    t0 = time.time()
     halves = {}
     for name, start in (("even", 0), ("odd", 1)):
         aff = vol.affine.copy()
@@ -475,12 +594,17 @@ def split_half(ctx, vol, ref_centers):
         aff[:3, 2] = 2.0 * vol.affine[:3, 2]
         halves[name] = Volume(np.ascontiguousarray(vol.array[start::2]), aff,
                               {"modality": "CT"})
-    dets = {}
+    dets, refs = {}, {}
     for name, hv in halves.items():
         c = detect(hv, ctx.refiner, ctx.args.refine)
         dets[name] = np.asarray(c.centers_ras, float)
+        if ctx.refiner is not None and "refine_status" in (c.info or {}):
+            refs[name] = _refine_summary(dict(
+                status=list(c.info["refine_status"]),
+                shift_mm=list(c.info.get("refine_shift_mm", [])),
+                saturation_hu=c.info.get("saturation_hu")))
     direction = vol.direction
-    out = dict(n_ref=int(len(ref_centers)),
+    out = dict(n_ref=int(len(ref_centers)), refine=refs,
                spacing_half=[float(s) for s in halves["even"].spacing])
     per = {}
     for name in ("even", "odd"):
@@ -510,6 +634,73 @@ def split_half(ctx, vol, ref_centers):
         out["diff_3d_mean"] = float(e3.mean())
         out["diff_3d_p95"] = float(np.percentile(e3, 95))
         out["precision_3d"] = float(np.sqrt((e3 ** 2).mean()) / np.sqrt(2.0))
+    out["wall_s"] = time.time() - t0
+    return out
+
+
+# ------------------------------------------------- PostOp vs its thin-cut
+def postop_vs_thincut(postop, doe):
+    """PostOp seeds (1 mm slabs every 2 mm, gaps interpolated) against the
+    seeds of the contiguous 1 mm thin-cut of the SAME acquisition
+    (``DOEJOHNPOSTCT``; docs/localization-notes.md, stage 3).  Same frame,
+    so no transform: the in-plane grids must coincide (direction, pixel
+    size and in-plane origin equal; the PostOp z origin on a thin-cut slice)
+    -- checked and reported.  Hungarian within MATCH_MM; differences
+    (PostOp minus thin-cut) in the voxel axes of the PostOp grid, for every
+    matched candidate and for the tile-assigned PostOp seeds.  The thin-cut
+    is itself a measurement (~0.2-0.4 mm), not truth.
+    """
+    A = np.asarray(postop["affine"], float)
+    B = np.asarray(doe["affine"], float)
+    sa, sb = np.linalg.norm(A[:3, :3], axis=0), np.linalg.norm(B[:3, :3],
+                                                               axis=0)
+    da, db = A[:3, :3] / sa, B[:3, :3] / sb
+    off = da.T @ (A[:3, 3] - B[:3, 3])          # PostOp origin in doe axes
+    off_vox = off / sb
+    grid = dict(direction_equal=bool(np.allclose(da, db, atol=1e-6)),
+                inplane_pixel_equal=bool(np.allclose(sa[:2], sb[:2],
+                                                     atol=1e-6)),
+                spacing_postop=[float(x) for x in sa],
+                spacing_thincut=[float(x) for x in sb],
+                origin_offset_vox=[float(x) for x in off_vox])
+    grid["coincide"] = bool(
+        grid["direction_equal"] and grid["inplane_pixel_equal"]
+        and abs(off_vox[0]) < 1e-3 and abs(off_vox[1]) < 1e-3
+        and abs(off_vox[2] - round(off_vox[2])) < 1e-3)
+    out = dict(grid=grid, n_postop=int(len(postop["centers"])),
+               n_thincut=int(len(doe["centers"])))
+    T = np.asarray(doe.get("centers_raw", doe["centers"]), float)
+    res = postop["tiles"]
+    assigned = sorted({int(i) for p in list(res.tiles)
+                       + list(getattr(res, "tentative_tiles", []))
+                       for i in p.seed_indices})
+    rows = {}
+    variants = [("detected", np.asarray(postop.get("centers_raw",
+                                                   postop["centers"]), float))]
+    if postop.get("fused") is not None:
+        variants.append(("posterior", np.asarray(postop["fused"], float)))
+    for label, P in variants:
+        r, c = match(P, T)
+        D = (P[r] - T[c]) @ da                      # PostOp voxel axes
+        d3 = np.linalg.norm(D, axis=1)
+        sub = np.array([a in assigned for a in r], bool)
+        row = dict(n_match=int(len(r)), n_assigned=int(len(assigned)),
+                   n_assigned_matched=int(sub.sum()))
+        for name, sel in (("all", np.ones(len(r), bool)), ("assigned", sub)):
+            if sel.sum() == 0:
+                continue
+            E = D[sel]
+            e3 = d3[sel]
+            row[name] = dict(
+                n=int(sel.sum()),
+                mean=[float(x) for x in E.mean(axis=0)],
+                sd=[float(x) for x in E.std(axis=0, ddof=1)]
+                if sel.sum() > 1 else [np.nan] * 3,
+                rms=[float(x) for x in np.sqrt((E ** 2).mean(axis=0))],
+                mean_3d=float(e3.mean()), median_3d=float(np.median(e3)),
+                p95_3d=float(np.percentile(e3, 95)), max_3d=float(e3.max()))
+        rows[label] = row
+    out["rows"] = rows
     return out
 
 
@@ -698,10 +889,40 @@ def to_markdown(rep, header):
                  fmt(p.get("pair_25_31_mm")), p["pair_auto"],
                  p["pair_counted"],
                  "consistent" if p["pair_consistent"] else "INCONSISTENT")]
-        if "fused_chord_flat_mean" in p:
-            L.append("- fused side chords (near-flat): %s ± %s mm"
-                     % (fmt(p["fused_chord_flat_mean"]),
-                        fmt(p["fused_chord_flat_sd"])))
+        if p.get("pair_margins"):
+            L.append("- partition margins (stage 6) of the tiles holding "
+                     "25 / 31: %s; ambiguous tiles: %s; all tiles: %s"
+                     % (", ".join("seed %d: %s" % (k, fmt(v))
+                                  for k, v in sorted(p["pair_margins"].items())),
+                        p.get("ambiguous_tiles", []),
+                        ", ".join("%d: %s" % (k, fmt(v)) for k, v in
+                                  sorted(p.get("margins_all", {}).items()))))
+        elif p.get("margin_note"):
+            L.append("- partition margins: %s" % p["margin_note"])
+        if p.get("refine"):
+            r = p["refine"]
+            L.append("- seed refinement: %d/%d refined, %d fallback%s; "
+                     "shift median %s mm, max %s mm; saturation %s HU"
+                     % (r["n_ok"], r["n"], r["n_fallback"],
+                        " (%s)" % ", ".join("%s x%d" % kv for kv in
+                                            sorted(r["reasons"].items()))
+                        if r["reasons"] else "",
+                        fmt(r["shift_median"], 3), fmt(r["shift_max"], 3),
+                        r.get("saturation_hu")))
+        if "fuse_disp_median" in p:
+            L.append("- tile fusion (stage 5): %s seeds fused, %s passed "
+                     "through; |posterior − detected| median %s mm, mean %s "
+                     "mm, max %s mm; fused side chord − model chord %s ± %s "
+                     "mm; fused near-flat side chords %s ± %s mm; fused "
+                     "25/31 distance %s mm"
+                     % (p.get("fuse_n_fused"), p.get("fuse_n_passthrough"),
+                        fmt(p["fuse_disp_median"], 3),
+                        fmt(p["fuse_disp_mean"], 3), fmt(p["fuse_disp_max"], 3),
+                        fmt(p["fused_chord_resid_mean"], 3),
+                        fmt(p["fused_chord_resid_sd"], 3),
+                        fmt(p["fused_chord_flat_mean"]),
+                        fmt(p["fused_chord_flat_sd"]),
+                        fmt(p.get("fused_pair_25_31_mm"))))
         L.append("")
     s = rep.get("split")
     if s:
@@ -738,6 +959,19 @@ def to_markdown(rep, header):
                      "disagreement/√2 = %s mm."
                      % (fmt(s["diff_3d_mean"]), fmt(s["diff_3d_p95"]),
                         fmt(s["precision_3d"])))
+        extra = []
+        for h in ("even", "odd"):
+            r = (s.get("refine") or {}).get(h)
+            if r:
+                extra.append("%s %d/%d refined, %d fallback%s" % (
+                    h, r["n_ok"], r["n"], r["n_fallback"],
+                    " (%s)" % ", ".join("%s x%d" % kv for kv in
+                                        sorted(r["reasons"].items()))
+                    if r["reasons"] else ""))
+        L.append("")
+        L.append("Split-half wall %.1f s%s." % (
+            s.get("wall_s", float("nan")),
+            ("; seed refinement: " + "; ".join(extra)) if extra else ""))
         L.append("")
     q = rep.get("postop")
     if q:
@@ -755,7 +989,56 @@ def to_markdown(rep, header):
                  ", ".join("%.1f" % x for x in q["unassigned_nn_mm"]),
                  q["prior_agrees"], q["implant"], q["n_implant"],
                  q["peak_median"], q["peak_sat"], q["n_on_interp"],
-                 q["wall_s"], " (cached)" if q["cached"] else ""), ""]
+                 q["wall_s"], " (cached)" if q["cached"] else "")]
+        bits = []
+        if q.get("slice_thickness") is not None:
+            bits.append("DICOM slice thickness %s mm" % q["slice_thickness"])
+        if q.get("n_merged") is not None:
+            bits.append("fragment merge %s: %d pair(s) rejoined"
+                        % ("on" if q.get("merge_enabled") else "off",
+                           q["n_merged"]))
+        if q.get("refine"):
+            r = q["refine"]
+            bits.append("seed refinement %d/%d refined, %d fallback%s, shift "
+                        "median %s mm, max %s mm" % (
+                            r["n_ok"], r["n"], r["n_fallback"],
+                            " (%s)" % ", ".join("%s x%d" % kv for kv in
+                                                sorted(r["reasons"].items()))
+                            if r["reasons"] else "",
+                            fmt(r["shift_median"], 3), fmt(r["shift_max"], 3)))
+        if bits:
+            L.append("PostOp detection: " + "; ".join(bits) + ".")
+        L.append("")
+    x = rep.get("thincut")
+    if x:
+        g = x["grid"]
+        L += ["**PostOp vs its 1 mm thin-cut** (DOEJOHNPOSTCT, same "
+              "acquisition, no transform; PostOp minus thin-cut in the PostOp "
+              "voxel axes; Hungarian within %.0f mm; %d PostOp / %d thin-cut "
+              "candidates). Grids coincide: %s (direction equal %s, in-plane "
+              "pixel equal %s, PostOp origin offset %s voxels of the thin-cut "
+              "grid)."
+              % (MATCH_MM, x["n_postop"], x["n_thincut"], g["coincide"],
+                 g["direction_equal"], g["inplane_pixel_equal"],
+                 ", ".join("%.3f" % v for v in g["origin_offset_vox"])), "",
+              "| PostOp seeds | n | mean i / j / k (mm) | SD i / j / k (mm) "
+              "| RMS i / j / k (mm) | 3D mean | median | P95 | max |",
+              "|---|---|---|---|---|---|---|---|---|"]
+        for label, row in x["rows"].items():
+            for name in ("all", "assigned"):
+                v = row.get(name)
+                if not v:
+                    continue
+                L.append("| %s, %s | %d | %s | %s | %s | %s | %s | %s | %s |" % (
+                    label, "all matched" if name == "all"
+                    else "tile-assigned (%d of %d matched)"
+                    % (row["n_assigned_matched"], row["n_assigned"]),
+                    v["n"], " / ".join(fmt(a, 3) for a in v["mean"]),
+                    " / ".join(fmt(a, 3) for a in v["sd"]),
+                    " / ".join(fmt(a, 3) for a in v["rms"]),
+                    fmt(v["mean_3d"]), fmt(v["median_3d"]), fmt(v["p95_3d"]),
+                    fmt(v["max_3d"])))
+        L.append("")
     n = rep.get("negatives")
     if n:
         L += ["**Negative controls.**", "",
@@ -766,6 +1049,19 @@ def to_markdown(rep, header):
                 SCANS[name], v.get("loaded"), v.get("grid", "–"),
                 v.get("n_cand", "–"), v.get("verdict", "–"),
                 v.get("reason", "–")))
+        bits = []
+        for name, v in n.items():
+            r = v.get("refine")
+            if r:
+                bits.append("%s %d/%d refined, %d fallback" % (
+                    SCANS[name], r["n_ok"], r["n"], r["n_fallback"]))
+            if v.get("wall_s") is not None:
+                bits.append("%s pipeline %.0f s%s" % (
+                    SCANS[name], v["wall_s"],
+                    " (cached)" if v.get("cached") else ""))
+        if bits:
+            L.append("")
+            L.append("; ".join(bits) + ".")
         L.append("")
     t = rep.get("truth")
     if t:
@@ -815,6 +1111,8 @@ def main(argv=None):
     ap.add_argument("--out", default=os.path.join(
         REPO, "output", "validation_realdata_proxies"))
     ap.add_argument("--tag", default=None)
+    ap.add_argument("--cache-dir", default=None,
+                    help="pipeline-result cache (default: <out>/cache)")
     ap.add_argument("--no-cache", action="store_true")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args(argv)
@@ -829,6 +1127,7 @@ def main(argv=None):
         print("SKIPPED %s: %s" % (k, why))
     t_start = time.time()
     rep = {}
+    postop_slim, doe_slim = None, None
 
     if {"printed8", "split"} & set(todo) or args.truth:
         vol, path = load("printed8")
@@ -843,7 +1142,8 @@ def main(argv=None):
                          rep["printed8"]["n_supported"],
                          rep["printed8"]["n_tentative"]))
             if "split" in todo:
-                rep["split"] = split_half(ctx, vol, slim["centers"])
+                rep["split"] = split_half(
+                    ctx, vol, slim.get("centers_raw", slim["centers"]))
                 print("split-half: %d pairs" % rep["split"]["n_pairs"])
             if args.truth:
                 truth, ttiles = read_truth(args.truth)
@@ -865,15 +1165,16 @@ def main(argv=None):
             from gtcore.tiles import ImplantPrior, fit_tiles_prior
 
             slim = run_pipeline(ctx, "postop", vol, path, tiles=True)
+            postop_slim = slim
             res = slim["tiles"]
-            prior = fit_tiles_prior(slim["centers"], slim["axes"],
-                                    ImplantPrior(),
+            prior = fit_tiles_prior(slim.get("centers_raw", slim["centers"]),
+                                    slim["axes"], ImplantPrior(),
                                     spacing_mm=vol.spacing)
             agrees = (len(prior.tiles) == len(res.tiles)
                       and len(prior.tentative_tiles) == len(res.tentative_tiles)
                       and sorted(prior.unassigned_indices)
                       == sorted(res.unassigned_indices))
-            C = slim["centers"]
+            C = np.asarray(slim.get("centers_raw", slim["centers"]), float)
             D = cdist(C, C)
             np.fill_diagonal(D, np.inf)
             un = list(res.unassigned_indices)
@@ -885,8 +1186,13 @@ def main(argv=None):
             k_of = np.round(vol.ras_to_index(C[implant_idx])[:, 2]).astype(
                 int) if implant_idx else np.zeros(0, int)
             on_interp = np.array([k in interp_k for k in k_of])
+            merge = slim["meta"].get("seed_merge") or {}
             rep["postop"] = dict(
                 n_raw=int(slim["n_raw"]), n_cand=int(len(C)),
+                refine=_refine_summary(slim.get("refine")),
+                merge_enabled=merge.get("enabled"),
+                n_merged=merge.get("n_merged"),
+                slice_thickness=slim["meta"].get("slice_thickness"),
                 n_supported=len(res.tiles), n_tentative=len(
                     res.tentative_tiles), n_unassigned=len(un),
                 unassigned=un,
@@ -912,6 +1218,8 @@ def main(argv=None):
                 rep["negatives"][name] = dict(loaded=False)
                 continue
             slim = run_pipeline(ctx, name, vol, path, tiles=False)
+            if name == "doe":
+                doe_slim = slim
             imp = slim["implant"] or {}
             rep["negatives"][name] = dict(
                 loaded=True, grid="x".join("%.2f" % s for s in vol.spacing)
@@ -920,10 +1228,17 @@ def main(argv=None):
                 # assess_implant gives no verdict key below 4 candidates
                 verdict=imp.get("verdict") or (
                     "confirmed" if imp.get("present") else "absent"),
-                reason=imp.get("reason"), wall_s=slim["wall_s"])
+                reason=imp.get("reason"), wall_s=slim["wall_s"],
+                cached=slim["cached"],
+                refine=_refine_summary(slim.get("refine")))
             print("%s: %s" % (name, imp.get("verdict")))
             del vol
             gc.collect()
+
+    if postop_slim is not None and doe_slim is not None:
+        rep["thincut"] = postop_vs_thincut(postop_slim, doe_slim)
+        print("postop vs thin-cut: %d matched" % rep["thincut"]["rows"]
+              ["detected"]["n_match"])
 
     wall = time.time() - t_start
     skipped = ctx.skipped()
