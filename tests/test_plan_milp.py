@@ -43,7 +43,29 @@ def solve_milp(*args, **kw):
 
 # ------------------------------------------------------------------ helpers
 def _objective(inst, **kw) -> Objective:
+    # the MILP is the coverage (V100) reference: the lower-tail term is off here
+    # (solve_milp drops it anyway, see test_solve_milp_drops_tail_term)
+    kw.setdefault("lambda_tail", 0.0)
     return Objective(inst["influence"], inst["conflicts"], rx_cgy=inst["rx_cgy"], **kw)
+
+
+def test_solve_milp_drops_tail_term(toy10):
+    """With lambda_tail != 0 the reference solves the V100 problem, reports the
+    tail-free P1 value and records the dropped weight."""
+    import dataclasses
+    full = _objective(toy10, lambda_tail=1.0)
+    assert full.lambda_tail == 1.0
+    r = solve_milp(full, 2)
+    assert r.status == "optimal"
+    assert r.extra["lambda_tail_dropped"] == 1.0
+    r0 = solve_milp(_objective(toy10), 2)
+    assert "lambda_tail_dropped" not in r0.extra
+    assert r.selection.tolist() == r0.selection.tolist()
+    assert r.objective == pytest.approx(r0.objective)
+    assert r.objective == pytest.approx(
+        evaluate_selection(dataclasses.replace(full, lambda_tail=0.0), r.selection)[0])
+    assert r.objective < full.hard(r.selection)          # the tail term is positive here
+    assert r.bound >= r.objective - 1e-9
 
 
 @pytest.fixture(scope="module")

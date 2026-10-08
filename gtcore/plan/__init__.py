@@ -117,6 +117,13 @@ V200_TOL = 0.10
 # P1 tolerated V200 fraction before the hot-spot penalty applies (section 2).
 
 LAMBDA_OAR = 1e3
+LAMBDA_TAIL = 1.0
+# Weight of the lower-tail coverage term (objective.tail_mean: weighted mean
+# of min(D, rx) / rx over the coldest TAIL_Q of the target).  It pulls the
+# optimizer towards the clinical endpoint D90 when N is too small for full
+# coverage (V100 alone clusters tiles and leaves one cold patch; see
+# docs/optimize-notes.md "Objective: lower-tail term").  0 restores pure V100.
+TAIL_Q = 0.10
 # P1 OAR penalty per cGy over the limit: any violation dominates coverage.
 
 LOCAL_RADIUS_MM = 10.0
@@ -633,6 +640,13 @@ class Objective:
         Penalty per cGy of OAR Dmax above its limit.
     tau_cgy : float
         Soft-coverage sigmoid width [cGy]; default ``TAU_FRACTION * rx_cgy``.
+    lambda_tail : float
+        Weight of the lower-tail coverage term ``tail_mean`` (weighted mean
+        of ``min(D, rx) / rx`` over the coldest ``tail_q`` of the target
+        weight, in [0, 1]; a lower bound on ``min(D90, rx) / rx``).  Added
+        to both ``hard`` and ``soft``; 0 restores the pure V100 objective.
+    tail_q : float
+        Tail fraction of the target weight (0.10 pairs with D90).
     """
 
     influence: InfluenceMatrix
@@ -642,12 +656,18 @@ class Objective:
     v200_tol: float = V200_TOL
     lambda_oar: float = LAMBDA_OAR
     tau_cgy: Optional[float] = None
+    lambda_tail: float = LAMBDA_TAIL
+    tail_q: float = TAIL_Q
 
     def __post_init__(self):
         self.rx_cgy = float(self.rx_cgy)
         if self.tau_cgy is None:
             self.tau_cgy = TAU_FRACTION * self.rx_cgy
         self.tau_cgy = float(self.tau_cgy)
+        self.lambda_tail = float(self.lambda_tail)
+        self.tail_q = float(self.tail_q)
+        if not (0.0 < self.tail_q <= 1.0):
+            raise ValueError("tail_q must lie in (0, 1], got %r" % (self.tail_q,))
 
     def dose_of(self, selection) -> np.ndarray:
         """Dose ``(M,)`` float64 [cGy] at the influence target for ``selection``.
@@ -670,17 +690,19 @@ class Objective:
         return metrics(self, selection)
 
     def hard(self, selection) -> float:
-        """P1 objective: ``V100 - lambda_hot * max(0, V200 - v200_tol)
-        - sum_j lambda_oar * max(0, Dmax(O_j) - L_j)`` (dimensionless; the
-        OAR term is per cGy).  Implemented on branch plan/influence.
+        """P1 objective: ``V100 + lambda_tail * tail_mean - lambda_hot *
+        max(0, V200 - v200_tol) - sum_j lambda_oar * max(0, Dmax(O_j) - L_j)``
+        (dimensionless; the OAR term is per cGy).  Implemented on branch
+        plan/influence; the tail term was added 2026-10-08.
         """
         from .objective import hard
         return hard(self, selection)
 
     def soft(self, selection) -> float:
         """Smooth surrogate for annealing: ``sum_m w_m sigma((D_m - rx) / tau)
-        / sum_m w_m`` minus the same hot-spot / OAR penalties as :meth:`hard`.
-        Implemented on branch plan/influence.
+        / sum_m w_m`` plus the same ``lambda_tail * tail_mean`` term and minus
+        the same hot-spot / OAR penalties as :meth:`hard`.  Implemented on
+        branch plan/influence.
         """
         from .objective import soft
         return soft(self, selection)
@@ -1253,7 +1275,7 @@ __all__ = [
     # constants
     "DEFAULT_H_MM", "DEFAULT_N_SPINS_FULL", "DEFAULT_N_SPINS_HALF", "DETACHED_MM",
     "DEFAULT_RX_CGY", "TARGET_SHELL_OFFSET_MM", "M_OPT_MAX", "TAU_FRACTION",
-    "LAMBDA_HOT", "V200_TOL", "LAMBDA_OAR", "LOCAL_RADIUS_MM", "SA_ALPHA",
+    "LAMBDA_HOT", "V200_TOL", "LAMBDA_OAR", "LAMBDA_TAIL", "TAIL_Q", "LOCAL_RADIUS_MM", "SA_ALPHA",
     "SA_MOVES_PER_TILE_PER_SWEEP", "SA_N_SWEEPS", "SA_N_RESTARTS",
     "MILP_TIME_LIMIT_S", "TILE_AREA_CM2", "CONFLICT_GAP_MM",
     # dataclasses

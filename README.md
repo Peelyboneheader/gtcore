@@ -120,8 +120,10 @@ Planner controls (the same legend is on screen; `?` collapses it):
 8. **`gtcore.plan` (opt-in placement optimizer)** — a separate module layered
    on 1-7 that changes none of their defaults: given a wall mesh, a target
    (default: the +5 mm shell, area-weighted) and a tile count, it proposes a
-   non-overlapping, wall-conformed configuration maximizing V100 with hot-spot
-   and OAR penalties. Candidates = farthest-point anchors × spins draped with
+   non-overlapping, wall-conformed configuration maximizing V100 plus a
+   lower-tail (D90-directed) coverage term, with hot-spot and OAR penalties
+   (`gtcore.plan.LAMBDA_TAIL`; 0 restores pure V100 — see
+   `docs/optimize-notes.md`, "Objective: lower-tail term"). Candidates = farthest-point anchors × spins draped with
    `interact.conform_tile`; a float32 influence matrix from the TG-43 engine
    (gated against the exact 1 mm grid); a conflict graph that is the
    planner's overlap rule **union** a geometric proxy (the planner's
@@ -182,6 +184,18 @@ Per-dataset findings and data-quality caveats: `docs/data-notes.md`.
 Not claimed: TG-43 in water; static cavity; tiles modelled as non-overlapping although collagen may stack; surgeon reachability beyond the eligibility mask; clinical case 2 (not on this machine). Open for Jacob: the planner's footprint fit on strongly curved walls (`docs/optimize-notes.md`, "Open decisions").
 
 
+## Paper figures
+
+`python scripts/paper_figures.py` regenerates every data panel of the
+manuscript figures (`output/figures/figN_panelX.png` at 300 dpi and `.pdf`
+with editable text) from the committed tables under `docs/figures/data/` and
+`docs/figures/optimize/data/`; only figure 1 (pipeline stages on the synthetic
+phantom) is computed, once, and cached. Camera, dpi, sizes and colours are
+fixed in the script; the multi-panel figures are assembled in Inkscape.
+`--list` shows panels and sources, `--only fig5` or `--only fig1C` limits the
+run, `--recompute` refreshes the figure-1 cache; `manifest.json` records the
+commit and sources of every panel.
+
 ## Layout
 
 ```
@@ -189,7 +203,8 @@ gtcore/            algorithm core (pure numpy/scipy/scikit-image/SimpleITK/trime
 gtcore/viz.py      optional PyVista viewer   (only files allowed to render)
 gtcore/planner.py  optional PyVista planner
 gtcore/cli.py      the `gt` command
-scripts/           demo + validation studies
+scripts/           demo + validation studies + paper_figures.py (every data panel)
+docs/figures/data/ committed measurement tables the paper figures read (git add -f: *.csv is ignored)
 tests/             671 tests, all stages scored against phantom ground truth (incl. gtcore.plan)
 docs/              TG-43 physics notes, interference notes, data notes
 output/            generated volumes, meshes, figures (gitignored)

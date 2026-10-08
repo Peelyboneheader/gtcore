@@ -134,8 +134,11 @@ def _reference_objective(tiles, pts, w, rx, cliques="edges"):
     infl = _reference_influence(tiles, pts, w, rx)
     graph = _reference_conflict_graph(tiles, cliques=cliques)
     cset = _candidate_set(tiles)
+    # The reviewer probes re-derive the coverage P1 objective (``_p1_objective``)
+    # from exact doses; the lower-tail term (2026-10-08) is audited in
+    # tests/test_plan_objective.py, so it is switched off here.
     obj = _try(plan_mod.Objective, influence=infl, conflicts=graph,
-               rx_cgy=float(rx))
+               rx_cgy=float(rx), lambda_tail=0.0)
     return obj, cset
 
 

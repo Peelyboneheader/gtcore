@@ -30,7 +30,9 @@ subject to
   OAR        ``sum_c D_j[c,o] x_c <= L_j``            for every OAR ``j``, sample ``o``
 
 **Coverage only.**  The hot-spot term of P1 (``lambda_hot * max(0, V200 -
-v200_tol)``) is NOT in the MILP (it is not linear in ``x``); the OAR limits
+v200_tol)``) and the lower-tail term (``lambda_tail * tail_mean``, an order
+statistic) are NOT in the MILP (neither is linear in ``x``): the reported
+``objective`` includes them but the ``bound`` is on V100 alone; the OAR limits
 enter as hard rows rather than as the P1 penalty.  Every comparison against
 the MILP must therefore be on V100 (``extra["milp_objective"]``), while
 ``SolverResult.objective`` is the full P1 hard value recomputed from the
@@ -166,9 +168,17 @@ def _metrics_local(objective: Objective, ids: np.ndarray) -> Dict[str, float]:
 
 
 def _hard_local(objective: Objective, metrics: Dict[str, float]) -> float:
-    """P1: ``V100 - lambda_hot * max(0, V200 - v200_tol) - sum_j lambda_oar *
-    max(0, Dmax_j - L_j)`` from a metrics dict."""
+    """P1: ``V100 + lambda_tail * tail_mean - lambda_hot * max(0, V200 -
+    v200_tol) - sum_j lambda_oar * max(0, Dmax_j - L_j)`` from a metrics
+    dict (the tail term from the dose vector when ``metrics["_ids"]`` is
+    given and ``lambda_tail`` != 0)."""
     val = metrics["V100"] - objective.lambda_hot * max(0.0, metrics["V200"] - objective.v200_tol)
+    lam_tail = float(getattr(objective, "lambda_tail", 0.0) or 0.0)
+    if lam_tail and "_ids" in metrics:
+        from .objective import tail_mean
+        inf = objective.influence
+        val += lam_tail * tail_mean(inf.dose_of(metrics["_ids"]), inf.target.weights,
+                                    objective.rx_cgy, objective.tail_q)
     for name, limit in objective.influence.oar_limits.items():
         dmax = metrics.get("oar_dmax_" + name)
         if dmax is not None:
@@ -186,7 +196,7 @@ def evaluate_selection(objective: Objective, selection) -> Tuple[float, Dict[str
         hard = float(objective.hard(ids))
     except NotImplementedError:
         metrics = _metrics_local(objective, ids)
-        hard = _hard_local(objective, metrics)
+        hard = _hard_local(objective, dict(metrics, _ids=ids))
     return hard, metrics
 
 
@@ -459,7 +469,9 @@ def solve_milp(objective: Objective, n_tiles: int,
     everything).  ``extra["method"]`` records which ran (``"enum_bb"`` /
     ``"highs"``); ``solver`` is ``"milp"`` either way.
 
-    Hot-spot terms are NOT in either model; ``extra["milp_objective"]`` is
+    Hot-spot terms are NOT in either model, and the lower-tail term is dropped
+    for the whole call (``extra["lambda_tail_dropped"]`` records the weight;
+    the result is the V100 reference); ``extra["milp_objective"]`` is
     the coverage value (V100 of the incumbent), ``objective`` the P1 hard
     value recomputed from ``selection``.  ``bound`` (upper bound on V100)
     and ``mip_gap`` are always filled; on ``status="time_limit"`` the bound,
@@ -476,6 +488,20 @@ def solve_milp(objective: Objective, n_tiles: int,
     ``nnz`` and ``build_s`` to ``extra``; the enumeration adds ``n_nodes``,
     ``n_pruned``, ``incumbent_source``.
     """
+    lam_tail = float(getattr(objective, "lambda_tail", 0.0) or 0.0)
+    if lam_tail:
+        # The exact reference is coverage-only: with the lower-tail term kept
+        # in ``objective`` the reported value, ``bound`` and ``mip_gap`` would
+        # describe different quantities.  Drop it (recorded in ``extra``) so a
+        # MILP result is the V100 optimum comparable to any solver run with
+        # ``lambda_tail=0``.
+        import dataclasses
+        res = solve_milp(dataclasses.replace(objective, lambda_tail=0.0), n_tiles,
+                         time_limit_s=time_limit_s, exact_n=exact_n,
+                         mip_rel_gap=mip_rel_gap, method=method, prune_frac=prune_frac,
+                         use_cliques=use_cliques, cover_cuts=cover_cuts, order=order)
+        res.extra["lambda_tail_dropped"] = lam_tail
+        return res
     N = int(n_tiles)
     C = objective.influence.n_candidates
     if method == "auto":
