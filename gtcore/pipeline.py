@@ -258,7 +258,8 @@ def reconstruct(vol: Volume, verbose: bool = True,
     thinner than their spacing).  The decision and every merge are logged in
     ``vol.meta["seed_merge"]``.
 
-    ``refine_seeds`` (``None`` = off, the default; ``"centroid"``) re-measures
+    ``refine_seeds`` (``None`` = off, the default; ``"centroid"``; ``"model"``
+    = the experimental stage-7 line-source fit on top of it) re-measures
     every surviving candidate after the vault filter and the threshold
     search with :func:`gtcore.seeds.refine.refine_seed_candidates` -- the
     threshold-free background-subtracted centroid with a per-seed analytic
@@ -282,9 +283,9 @@ def reconstruct(vol: Volume, verbose: bool = True,
     raw detections stay in ``PipelineResult.meta["seeds_unfused"]``.
     Without ``cov_ras`` nothing is fused and the reason is recorded.
     """
-    if refine_seeds not in (None, "centroid"):
-        raise ValueError("refine_seeds must be None or 'centroid', got %r"
-                         % (refine_seeds,))
+    if refine_seeds not in (None, "centroid", "model"):
+        raise ValueError("refine_seeds must be None, 'centroid' or 'model', "
+                         "got %r" % (refine_seeds,))
     timings = {}
     meta = {}
     fusion = None           # vol.meta["seed_posterior"] when fuse_tiles

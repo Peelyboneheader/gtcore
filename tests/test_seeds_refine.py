@@ -517,3 +517,100 @@ def test_only_the_roi_leaving_the_volume_is_truncation():
                                np.array([[1.0, 0, 0]]), np.ones(1), np.ones(1))
         ref = refine_seed_candidates(vol, cands)
         assert ref.info["refine_status"][0] == expect
+
+
+# ----------------------------------------------------- stage 7: method="model"
+@pytest.fixture(scope="module")
+def model_grids():
+    """Supersampled seeds on the two thick-slice grids, centroid vs model."""
+    out = {}
+    for sp, nf, thr in (((0.5, 0.5, 2.0), (3, 3, 10), 1000.0),
+                        ((0.7, 0.7, 2.8), (3, 3, 8), 800.0)):
+        rng = np.random.default_rng(1)
+        centers, axes = _random_layout(4, rng)
+        vol = _render_capsules(sp, centers, axes, n_fine=nf, noise=20.0, rng=2)
+        cands = detect_seed_candidates(vol, hu_threshold=thr, min_mm3=0.2,
+                                       max_mm3=200.0)
+        cen = refine_seed_candidates(vol, cands)
+        t0 = time.perf_counter()
+        mod = refine_seed_candidates(vol, cands, method="model")
+        ms = 1e3 * (time.perf_counter() - t0) / max(1, len(cands))
+        ti = cdist(cands.centers_ras, centers).argmin(axis=1)
+        e_c = np.linalg.norm(cen.centers_ras - centers[ti], axis=1)
+        e_m = np.linalg.norm(mod.centers_ras - centers[ti], axis=1)
+        print("model %s: centroid %.3f -> model %.3f mm, %d/%d fits kept, "
+              "chi2_red median %.2f, %.1f ms/seed"
+              % ("x".join("%g" % v for v in sp), e_c.mean(), e_m.mean(),
+                 int((mod.info["refine_status"] == "ok").sum()), len(mod),
+                 np.nanmedian(mod.info["refine_model_chi2"]), ms))
+        out[sp] = (cen, mod, e_c, e_m, ms)
+    return out
+
+
+@pytest.mark.parametrize("sp", [(0.5, 0.5, 2.0), (0.7, 0.7, 2.8)])
+def test_model_halves_centroid_error_on_supersampled_seeds(model_grids, sp):
+    cen, mod, e_c, e_m, _ = model_grids[sp]
+    assert (mod.info["refine_status"] == "ok").mean() >= 0.9
+    assert e_m.mean() <= 0.5 * e_c.mean(), (e_m.mean(), e_c.mean())
+    assert mod.cov_ras.shape == (len(mod), 3, 3)
+    assert np.isfinite(mod.info["refine_model_chi2"][
+        mod.info["refine_status"] == "ok"]).all()
+    assert mod.info["refine_model_cov"].startswith("uncalibrated")
+
+
+def test_model_runtime(model_grids):
+    ms = max(v[4] for v in model_grids.values())
+    print("model fit: %.1f ms/seed worst grid" % ms)
+    assert ms <= 60.0
+
+
+def test_model_fallbacks_never_raise():
+    """A plate, a threshold-split pair and an empty list all go through
+    the model path: the fit is rejected (status 'centroid:...' or
+    'fallback:...') or there is nothing to fit, never an exception."""
+    rng = np.random.default_rng(5)
+    seed_c = np.array([[0.0, 0.0, 0.0]])
+    vol = _render_capsules((0.7, 0.7, 0.7), seed_c, [[0.0, 1.0, 0.0]],
+                           n_fine=(3, 3, 3), origin=(-20.0, -20.0, -20.0),
+                           shape_ijk=(58, 58, 58))
+    arr = vol.array.astype(float)
+    plate = np.zeros(arr.shape)
+    ijk = np.round((np.array([12.0, 0.0, 0.0]) + 20.0) / 0.7).astype(int)
+    plate[ijk[2] - 1:ijk[2] + 1, ijk[1] - 9:ijk[1] + 9, ijk[0] - 9:ijk[0] + 9] = 1500.0
+    arr += ndimage.gaussian_filter(plate, 0.45 / 0.7)
+    vol = Volume(arr.astype(np.float32), vol.affine)
+    cands = SeedCandidates(
+        mask=np.zeros(arr.shape, bool),
+        centers_ras=np.array([[12.0, 0.0, 0.0], seed_c[0] + rng.normal(0, 0.2, 3),
+                              [0.0, 1.3, 0.0], [0.0, -1.3, 0.0]]),
+        axes_ras=np.array([[1.0, 0, 0], [0, 1.0, 0], [0, 1.0, 0], [0, 1.0, 0]]),
+        volumes_mm3=np.array([40.0, 3.0, 1.0, 1.0]),
+        elongations=np.array([1.2, 3.0, 1.0, 1.0]))
+    ref = refine_seed_candidates(vol, cands, method="model")
+    st = list(ref.info["refine_status"])
+    assert st[0].startswith("fallback:")
+    assert all(s == "ok" or s.startswith(("fallback:", "centroid:")) for s in st)
+    assert np.all(np.isfinite(ref.centers_ras))
+    empty = SeedCandidates(np.zeros(arr.shape, bool), np.zeros((0, 3)),
+                           np.zeros((0, 3)), np.zeros(0), np.zeros(0))
+    assert len(refine_seed_candidates(vol, empty, method="model")) == 0
+
+
+def test_model_on_analytic_head_phantom_not_worse():
+    """Analytic head phantom (rng 1), 2.1 and 2.8 mm slices: the model's
+    mean error is not worse than the centroid's by more than 0.02 mm."""
+    vol0, truth = make_head_phantom(spacing=0.7, n_tiles=3, rng_seed=1,
+                                    seed_render="analytic", saturate_hu=None)
+    t = np.array([s.center_ras for s in truth.seeds])
+    for f in (3, 4):
+        vol = _thick_slices(vol0, f)
+        cands = _detect(vol)
+        cen = refine_seed_candidates(vol, cands)
+        mod = refine_seed_candidates(vol, cands, method="model")
+        m = _match(t, cands.centers_ras)
+        e_c = np.mean([np.linalg.norm(cen.centers_ras[j] - t[i]) for i, j in m.items()])
+        e_m = np.mean([np.linalg.norm(mod.centers_ras[j] - t[i]) for i, j in m.items()])
+        n_ok = int((mod.info["refine_status"] == "ok").sum())
+        print("analytic head %.1f mm: centroid %.3f, model %.3f mm (%d/%d fits kept)"
+              % (0.7 * f, e_c, e_m, n_ok, len(mod)))
+        assert e_m <= e_c + 0.02, (f, e_c, e_m)
