@@ -13,10 +13,15 @@ physical 8-tile printed phantom (no truth).
    fitted centres, 200 noisy draws per row, for several axis-noise levels
    (the pooled ``s^2`` assumes one noise level for every residual row).
 
+4. ``--verify``: stage 8 on the 2.1 mm missed-seed case (rng 1): image
+   evidence at the inferred 4th seed, the refined position against the
+   truth seed, the painted-out control and the ``reconstruct`` wiring.
+
 Run from the repo root:
     python scripts/validation_loc_scoring.py --extract
     python scripts/validation_loc_scoring.py
     python scripts/validation_loc_scoring.py --calibration
+    python scripts/validation_loc_scoring.py --verify
 """
 from __future__ import annotations
 
@@ -233,10 +238,102 @@ def calibration(n_draws=200, sigma=0.3):
                 float(np.mean(nsig)), float(np.sqrt(np.mean(ang ** 2))), ms))
 
 
+def _detect_plain(vol):
+    from gtcore.pipeline import filter_seed_shaped, seed_detection_params
+    from gtcore.seeds import detect_seed_candidates
+
+    p = seed_detection_params(vol.spacing)
+    return filter_seed_shaped(
+        detect_seed_candidates(vol, hu_threshold=p["hu_threshold"],
+                               min_mm3=p["min_mm3"], max_mm3=p["max_mm3"]),
+        min_mm3=p["min_mm3"], max_mm3=p["max_mm3"],
+        min_elong=p["min_elong"], max_elong=p["max_elong"])
+
+
+def verify_check():
+    """Stage 8 on the 2.1 mm missed-seed case (rng 1, truth known)."""
+    import copy
+
+    from scipy.spatial.distance import cdist
+
+    from gtcore.phantom import make_head_phantom
+    from gtcore.phantom.seed_render import thick_slices
+    from gtcore.pipeline import reconstruct
+    from gtcore.tiles import fit_tiles_auto, verify_inferred_seeds
+
+    vol, truth = make_head_phantom(spacing=0.7, n_tiles=3, rng_seed=1)
+    thick = thick_slices(vol, 3)
+    cands = _detect_plain(thick)
+    tc = np.array([s.center_ras for s in truth.seeds])
+    lost = int(np.argmax(cdist(cands.centers_ras, tc).min(axis=0)))
+    res = fit_tiles_auto(cands.centers_ras, cands.axes_ras,
+                         cavity_center_ras=truth.cavity_center_ras,
+                         spacing_mm=thick.spacing)
+    pose = [p for p in res.all_tiles if p.inferred_seed_ras is not None][0]
+    print("thick volume %s, spacing %s; %d of %d seeds detected, truth seed %d"
+          " inferred" % (thick.array.shape, np.round(thick.spacing, 2),
+                         len(cands), len(tc), lost))
+    print("inferred position error vs truth: %.2f mm"
+          % np.linalg.norm(pose.inferred_seed_ras - tc[lost]))
+    ts = []
+    for _ in range(5):
+        r = copy.deepcopy(res)
+        t0 = time.perf_counter()
+        ver = verify_inferred_seeds(r, thick, cands)
+        ts.append(time.perf_counter() - t0)
+    rec = ver[pose.tile_id]
+    print("verify runtime: %.1f ms (min of 5)" % (1000 * min(ts)))
+    print("status %s; peak %.0f, bg %.1f, sigma %.1f, C_ref %.0f -> threshold"
+          " %.0f (k*sigma %.0f, 0.3*C_ref %.0f)" % (
+              rec["status"], rec["peak_hu"], rec["background_hu"],
+              rec["sigma_noise_hu"], rec["ref_contrast_hu"],
+              rec["threshold_hu"], 5 * rec["sigma_noise_hu"],
+              0.3 * rec["ref_contrast_hu"]))
+    print("refined position error vs truth: %.2f mm (shift %.2f mm from the"
+          " inferred position, refine %s, n_roi %d, n_shell %d)" % (
+              np.linalg.norm(rec["refined_ras"] - tc[lost]), rec["shift_mm"],
+              rec["refine_status"], rec["n_roi"], rec["n_shell"]))
+    print("refined covariance sd (mm): %s"
+          % np.round(np.sqrt(np.diag(rec["cov_ras"])), 2))
+    for ks in (3.0, 5.0, 8.0):
+        v = verify_inferred_seeds(copy.deepcopy(res), thick, cands, k_sigma=ks)
+        print("  k_sigma %.0f -> %s" % (ks, v[pose.tile_id]["status"]))
+    # the same volume with the lost seed painted to the local background
+    arr = np.array(thick.array, copy=True)
+    nk, nj, ni = arr.shape
+    K, J, I = np.meshgrid(np.arange(nk), np.arange(nj), np.arange(ni),
+                          indexing="ij", sparse=True)
+    ijk = np.stack(np.broadcast_arrays(I, J, K), axis=-1).reshape(-1, 3)
+    dd = np.linalg.norm(thick.index_to_ras(ijk.astype(float))
+                        - tc[lost][None, :], axis=1).reshape(arr.shape)
+    arr[dd <= 5.0] = np.median(arr[(dd > 5.0) & (dd <= 7.0)])
+    blank = copy.copy(thick)
+    blank.array = arr
+    v = verify_inferred_seeds(copy.deepcopy(res), blank, cands)[pose.tile_id]
+    print("painted out: %s; peak %.0f vs threshold %.0f (bg %.1f, sigma %.1f)"
+          % (v["status"], v["peak_hu"], v["threshold_hu"],
+             v["background_hu"], v["sigma_noise_hu"]))
+    for refine in (None, "centroid"):
+        t0 = time.perf_counter()
+        out = reconstruct(thick, verbose=False, n_full_tiles="auto",
+                          refine_seeds=refine)
+        dt = time.perf_counter() - t0
+        print("reconstruct(refine_seeds=%r): %.1f s; %s; seed_verify=%s" % (
+            refine, dt, out.tiles.summary(),
+            thick.meta.get("seed_verify", "absent")))
+        for tid, rr in (out.tiles.verification or {}).items():
+            if rr["refined_ras"] is not None:
+                print("   tile %d: refined %.2f mm from truth (inferred %.2f"
+                      " mm)" % (tid, np.linalg.norm(rr["refined_ras"] - tc[lost]),
+                                np.linalg.norm(rr["inferred_ras"] - tc[lost])))
+        thick.meta.pop("seed_verify", None)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--extract", action="store_true")
     ap.add_argument("--calibration", action="store_true")
+    ap.add_argument("--verify", action="store_true")
     ap.add_argument("--phantom8", default=DEFAULT_PHANTOM8)
     args = ap.parse_args()
     if args.extract:
@@ -244,6 +341,9 @@ def main():
         return
     if args.calibration:
         calibration()
+        return
+    if args.verify:
+        verify_check()
         return
     measure()
 
