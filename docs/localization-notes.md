@@ -196,6 +196,7 @@ seeds at 2.8 mm (recall 0.92, partition 0/5).
 |---|---|---|---|---|
 | 7 | G2/G4 mean <= 0.85x stage 2; saturation bias <= 0.05 mm/axis; fallback <= 5 %; <= 30 ms/seed; NEES in [0.5, 2] (covariance) | Harness (rng 0-4, 200 seeds per grid and layout, sparse / crowded): mean vs centroid G2 0.69x / 0.71x, G4 0.48x / 0.57x, G1 0.5x, G3 0.94x **accuracy PASS**. Saturation bias (G1, 96 % clipped) <= 0.001 mm **PASS**. Runtime 13-26 ms/seed **PASS**. Fallback to the centroid: 0-3 % on supersampled grids, 10-20 % on the analytic head phantom (rng 1; air-level seeds), not counted on the harness. NEES G1 4.70 / 6.40 **FAIL**, G2 3.77 / 3.60 **FAIL**, G4 1.74 / 1.78 PASS, G3 303 / 290 FAIL (as the centroid): **covariance calibration FAIL on G1/G2**. Head phantom 2.1 / 2.8 mm vs centroid: binary 0.22 -> 0.21, 0.41 -> 0.35; analytic 0.14 -> 0.09, 0.39 -> 0.24 mm | 7ec5935 | Opt-in `refine_seed_candidates(method="model")`, `reconstruct(refine_seeds="model")`; `cov_ras` labelled uncalibrated (`info["refine_model_cov"]`). Open: the 4.25 mm segment length |
 | 2 | G1 mean <= 0.8x; G2/G4 z RMS <= 0.85x; threshold sensitivity <= 0.1 mm and >= 2x smaller; NEES in [0.5, 2]; recall unchanged; <= 5 ms/seed; head phantom 2.1/2.8 mm mean >= 15 % better, 0.7 mm not worse by > 0.02 mm | Harness (rng 0-4, 200 seeds per grid and layout, sparse / crowded): G1 mean 0.13 -> 0.006 / 0.007 mm (0.05x) **PASS**. G2 z RMS 0.40 -> 0.24 / 0.42 -> 0.24 (0.60x / 0.57x) **PASS**; G4 z RMS 0.64 -> 0.34 / 0.64 -> 0.35 (0.53x / 0.55x) **PASS** (G3, not in the gate: 0.78 -> 0.58 / 0.68 -> 0.45). Threshold shift 0.09-0.52 -> 0.00 mm on every grid; head phantom median 0.035-0.373 -> 0.000-0.002 mm **PASS**. NEES G1 1.77 / 1.85, G2 1.63 / 1.75, G4 1.24 / 1.24 **PASS** (95 % ellipsoid coverage 0.76-0.90: heavier tails than Gaussian); G3 528 / 531 **FAIL** (gap-filled volume: in-plane error 0.31 mm RMS coupled to the slice gaps is not modelled); binary head phantom 3D **FAIL** (its voxel-painted capsules; z NEES 0.59 / 0.69 at 2.1 / 2.8 mm). Recall identical **PASS**. 1.7-3.0 ms/seed **PASS**. Head phantom 2.1 / 2.8 mm: binary 0.50 -> 0.22 (-56 %), 0.70 -> 0.41 (-41 %); analytic 0.54 -> 0.14 (-74 %), 0.74 -> 0.39 (-47 %) **PASS**. 0.7 mm: binary 0.20 -> 0.15, worst seed +0.08 mm; analytic 0.10 -> 0.04, worst seed +0.000 mm **PASS**. Tile partition (not a stage-2 criterion): binary 2/5 -> 3/5 at 2.1 and 2.8 mm, analytic 2.8 mm 0/5 -> 1/5, never worse. Real-data proxies: not run on this branch | 234f3e5, 7afa8c2, f00ccea | `reconstruct(refine_seeds="centroid")`, default `None`: every plan criterion passes except NEES on G3; switching the default is the coordinator's call after the real-data proxies |
+| 2 | G1 mean <= 0.8x; G2/G4 z RMS <= 0.85x; threshold sensitivity <= 0.1 mm and >= 2x smaller; NEES in [0.5, 2]; recall unchanged; <= 5 ms/seed; head phantom 2.1/2.8 mm mean >= 15 % better, 0.7 mm not worse by > 0.02 mm | Harness (rng 0-4, 200 seeds per grid and layout, sparse / crowded): G1 mean 0.13 -> 0.006 / 0.007 mm (0.05x) **PASS**. G2 z RMS 0.40 -> 0.24 / 0.42 -> 0.24 (0.60x / 0.57x) **PASS**; G4 z RMS 0.64 -> 0.34 / 0.64 -> 0.35 (0.53x / 0.55x) **PASS** (G3, not in the gate: 0.78 -> 0.58 / 0.68 -> 0.45). Threshold shift 0.09-0.52 -> 0.00 mm on every grid; head phantom median 0.035-0.373 -> 0.000-0.002 mm **PASS**. NEES G1 1.77 / 1.85, G2 1.63 / 1.75, G4 1.24 / 1.24 **PASS** (95 % ellipsoid coverage 0.76-0.90: heavier tails than Gaussian); G3 528 / 531 **FAIL** (gap-filled volume: in-plane error 0.31 mm RMS coupled to the slice gaps is not modelled); binary head phantom 3D **FAIL** (its voxel-painted capsules; z NEES 0.59 / 0.69 at 2.1 / 2.8 mm). Recall identical **PASS**. 1.7-3.0 ms/seed **PASS**. Head phantom 2.1 / 2.8 mm: binary 0.50 -> 0.22 (-56 %), 0.70 -> 0.41 (-41 %); analytic 0.54 -> 0.14 (-74 %), 0.74 -> 0.39 (-47 %) **PASS**. 0.7 mm: binary 0.20 -> 0.15, worst seed +0.08 mm; analytic 0.10 -> 0.04, worst seed +0.000 mm **PASS**. Tile partition (not a stage-2 criterion): binary 2/5 -> 3/5 at 2.1 and 2.8 mm, analytic 2.8 mm 0/5 -> 1/5, never worse. Real-data proxies (loc/proxies, 5073e01; section "Stage 2 real-data proxies"): no-regression criteria **PASS** (printed 32/32 and 8/8, PostOp 4 + 2 / 3 unassigned, both negative-control verdicts unchanged); split-half >= 15 % and chord-spread criteria **FAIL** at 0 % change -- the estimator falls back on 31/32 printed-phantom seeds (air/plastic background) and on 43/50 PostOp candidates, and 5 of the 7 PostOp seeds it moves end farther from the 1 mm thin-cut of the same acquisition; it engages (27/31) and tightens the tile fit (-18 %) only on the contiguous 1 mm thin-cut | 234f3e5, 7afa8c2, f00ccea, 5073e01 | `reconstruct(refine_seeds="centroid")`, default `None`: every plan criterion passes except NEES on G3; switching the default is the coordinator's call after the real-data proxies |
 | 5 — hierarchical WLS + posterior seeds | identical fit without covariance; head phantom 2.1 / 2.8 mm mean 3D error ≥ 15 % below raw; tile centre / normal not worse; 2.8 mm partition ≥ 3/5; posterior NEES in [0.5, 2]; stable across slack 0.1–0.5 mm | **PENDING-COVARIANCE** (stand-in: analytic slab covariance). Identity: bit-identical (max diff 0.0 over 288 fits vs 3cf35af; frozen reference in the tests) ✓. 2.1 mm: −0.3 % ✗. 2.8 mm: −15.2 % (borderline ✓). Centre unchanged; normal 3.77→2.66° (2.1) and 6.44→2.85° (2.8) ✓. Partition 2.8 mm 5/5 (raw also 5/5); 2.1 mm 2/5, same as raw (split-fragment detections). NEES conditional 2.02 / 3.00 ✗, PEV 1.25 / 1.76 ✓ (input covariance itself 1.19 / 1.86). Slack sweep: 2.1 / 2.8 mm within 2.5 % ✓; 0.7 mm at slack 0.1 is 16 % worse than raw ✗ | b09cb39 | opt-in `reconstruct(fuse_tiles=True)`, default off |
 | 5 — with REAL covariance (stage 2 `refine_seeds="centroid"`) | ceiling-adjusted bar: posterior mean 3D error at 2.1 mm ≥ 8 % below the REFINED seeds; partition / centre / normal not worse; posterior NEES tracks the input; stable across slack 0.2–0.5 mm | **FAIL — stays opt-in, negative result for the paper.** Auto mode, posterior vs refined, 2.1 mm: binary −1.9 % (0.244 → 0.239 mm), analytic −1.8 % (0.141 → 0.138) ✗; 2.8 mm: −13.9 % (0.407 → 0.351), −8.3 % (0.383 → 0.352); 0.7 / 1.4 mm −6 % / −4 % (binary), −9 % / −2 % (analytic): never worse, never near the bar. Centre unchanged ✓; normal better (axis term) ✓; partition 2.1 mm binary 2/5 → 3/5, analytic 5/5 → 4/5, 2.8 mm analytic 3/5 → 2/5 (mixed: weighting + axis rule, separated in the follow-up row). NEES: PEV posterior = input (analytic 0.87 vs 0.86 at 2.1, 1.17 vs 1.20 at 2.8; binary z 0.61 vs 0.57, 0.64 vs 0.70) ✓, conditional over-confident at 2.8 mm (1.51 / 1.45 z) ✗. Slack 0.2 / 0.3 / 0.5: within 2.5 % ✓. Counted prior at this commit: posterior WORSE (+9 … +60 %): its weighted fit still carried the degenerate axes (`fit_tiles(score="deformable")` never saw `spacing_mm`) — fixed by the axis-term follow-up | 0611ccc (code); script in the task-1 commit | opt-in `reconstruct(fuse_tiles=True)`, default off |
 | axis term on coarse scans (`auto.DROP_AXIS_TERM_ON_COARSE`) | tile normal error at 2.1 / 2.8 mm improves; partition and centre not worse at ANY spacing (5 realizations × 4 spacings × both renderings); slices ≤ 1.2 mm bit-identical; printed phantom stays 8/8; `test_tiles_auto.py` / `test_tiles_cover.py` pass unedited | **PARTIAL — fails the partition criterion on analytic fragment scans; coordinator decides.** Normal error ✓ everywhere: raw 2.1 mm 3.8 → 2.6° (binary) / 3.2 → 2.0° (analytic), 2.8 mm 6.4 → 2.9° / 7.5 → 3.7°; refined seeds 3.5 → 1.0° / 2.8 → 0.6° and 6.2 → 2.0° / 10.5 → 3.0°. Centre identical ✓. Thin slices bit-identical 40/40 ✓. Printed phantom 32/32 seeds, 8/8 tiles ✓. 295 tests pass, none edited ✓. Partition: binary never worse (refined 2.1 mm 2/5 → 3/5); analytic raw 2.1 mm 5/5 → 4/5 ✗, refined 2.1 mm 5/5 → 4/5 and 2.8 mm 3/5 → 2/5 ✗ — every loss is a slab fragment (a seed's second blob, unmatched to truth) that forms the squarer quad once the axis evidence is gone. Also fixes the counted path: `fit_tiles(score="deformable")` now honours `spacing_mm`, so counted = auto with `seed_cov` on coarse scans | task-2 commit (parent 5e55532) | `DROP_AXIS_TERM_ON_COARSE = True` as instructed; one-line revert (+ `test_shipped_default`) |
@@ -1334,7 +1335,11 @@ positives.
    detect at PostOp contrast.
 3. **DOE negative control** is "confirmed" before any change; the
    verification criterion for it needs rewording (no new quads / verdict not
-   worse), or the assessment fixed separately.
+   worse), or the assessment fixed separately. *(Resolved 2026-10-08:
+   `DOEJOHNPOSTCT` is the post-implant thin-cut of the PostOp acquisition,
+   stage 3; "confirmed" is correct there and `docs/data-notes.md` is
+   corrected on loc/proxies. There is no real pre-implant negative control
+   on this machine.)*
 4. **Near-flat threshold** (κ ≤ 0.04 /mm admits 2 of 8 printed tiles); the
    chord residual against the bent-tile model is the better proxy for the
    stage 2/5 comparisons.
@@ -1562,7 +1567,9 @@ seed median 0.34 mm (0.47 before the merge), max 2.41 mm.
   complete thin-cut of the PostOp acquisition, not a pre-implant negative
   control. docs/data-notes.md and the "calcification chance quads"
   limitation in `pipeline.assess_implant` rest on that mislabel; there is
-  currently no true pre-implant scan on this machine.
+  currently no true pre-implant scan on this machine. *(data-notes
+  corrected on loc/proxies, 2026-10-08; the `assess_implant` /
+  `reconstruct` comments still carry the old wording -- coordinator.)*
 - Merge on contiguous-slab exports with interpolated gaps (G3, and the
   harness G3/G4): fragments are two grid slices apart and 4.2–4.7 mm
   apart; reaching them needs `meta["interpolated_k"]` (adjacency among
@@ -1571,6 +1578,202 @@ seed median 0.34 mm (0.47 before the merge), max 2.41 mm.
 - Residual merge ambiguity (9 % of adversarial close pairs on the PostOp
   geometry) is physical; the stage-7 two-capsule fit with BIC is the
   principled resolver.
+
+## Stage 2 real-data proxies (agent LP, branch loc/proxies)
+
+Commit 5073e01 (loc/integration 0611ccc + the proxies script changes
+below), 2026-10-08. `scripts/validation_realdata_proxies.py`, fresh
+pipeline runs (`--no-cache`), one configuration at a time, each as one
+command; `reconstruct(refine_seeds=, fuse_tiles=, merge_fragments=)` is
+accepted on this branch, so refinement and fusion run IN the pipeline
+(refinement after the vault filter on the raw volume, fusion after the
+auto tile fit; nothing post hoc). Data root: the scans left OneDrive this
+morning and now live under `C:\Users\jacob\Documents\` (the script falls
+back to the old path; `GT_DATA_ROOT` overrides). Outputs:
+`output/validation_realdata_proxies/<tag>/proxies_<tag>.{md,json}`, cache
+`output/validation_realdata_proxies/cache/`.
+
+    python scripts/validation_realdata_proxies.py --refine none            --no-cache --out output/validation_realdata_proxies/none          --cache-dir output/validation_realdata_proxies/cache --tag none
+    python scripts/validation_realdata_proxies.py --refine centroid        --no-cache --out output/validation_realdata_proxies/centroid      --cache-dir output/validation_realdata_proxies/cache --tag centroid
+    python scripts/validation_realdata_proxies.py --refine centroid --fuse --no-cache --out output/validation_realdata_proxies/centroid-fuse --cache-dir output/validation_realdata_proxies/cache --tag centroid-fuse
+    python scripts/localization_proxies_diag.py --part printed            # fallback diagnostic, rule-threshold variants, split-half with the estimator forced on
+    python scripts/localization_proxies_diag.py --part thincut            # PostOp vs thin-cut with the two sides refined independently (from the cache)
+
+Script changes (this branch): in-pipeline fusion is no longer re-fused
+post hoc (the proxies are measured on the DETECTED seeds, the posterior is
+compared to them); per-scan fallback counts from `vol.meta["seed_refine"]`
+(`info["refine_status"]`) incl. both split halves; stage-6 partition
+margins of the tiles holding seeds 25/31 (auto fit re-run with
+`margins=True`, partition checked identical); the PostOp-vs-thin-cut
+cross-check; wall time per dataset, merge count and DICOM slice thickness.
+
+### Baseline reproduction (`--refine none`)
+
+Printed phantom bit-identical to the stage-0 table at fe4a1a8 (32/32, 8/8,
+bent-tile RMS 0.26–0.87, chord − model 0.070 ± 0.625 mm, coherence 0.947 /
+14.5°, 25/31 auto vs counted INCONSISTENT). Split-half differs by one even-
+half false positive (36 detected, 5 FP; was 37 / 6 at fe4a1a8: the stage-3
+split defaults — windowed median, rod guard, weighted Lloyd — now default-on
+in `detect_seed_candidates`), the 28 common pairs are the same, 3-D
+disagreement/√2 1.01 mm (was 0.99). PostOp carries the stage-3 merge (701
+raw → 50 in-vault, 30 pairs rejoined, 3 unassigned at NN 10.1 / 10.0 / 9.2
+mm; was 53 / 5 unassigned). Negatives unchanged. This run is the baseline
+for the rows below.
+
+### Three configurations
+
+Printed phantom = `3D-Printed Phantom-8tiles (223)`, 0.59 × 0.59 × 1.0 mm,
+157 slices, 31/32 seed peaks saturated at 3071 HU. "Chord − model" = measured
+side chord minus the fitted bent tile's chord, all 8 tiles (32 chords); near-
+flat = max |κ| ≤ 0.04 /mm (n = 2 tiles). Split halves = even / odd 1 mm
+slices as two 2.0 mm scans, 28 seeds found in both; disagreement/√2 = RMS
+(odd − even)/√2 per voxel axis. Fallback reasons are
+`refine.py`'s rules (`shift` > 1.5 mm, `background` gradient shift > 0.1 mm,
+`close_neighbour` < 4.5 mm, `no_signal`, `extended`).
+
+| Proxy | (a) `--refine none` | (b) `--refine centroid` | (c) `--refine centroid --fuse` | Plan criterion → verdict |
+|---|---|---|---|---|
+| Printed phantom seeds / tiles | 32/32 (32 raw), 8 supported + 0 tentative, 0 unassigned | 32/32, 8 + 0, 0 | 32/32, 8 + 0, 0 | stays 32/32, 8/8 → **PASS** (all three) |
+| Refinement engaged (printed) | — | **1/32** refined, 31 fallbacks (shift ×15, background ×11, close_neighbour ×4, no_signal ×1); the one shift 0.149 mm | 1/32, same | (reported) |
+| Bent-tile RMS mean / max (mm) | 0.52 / 0.87 | 0.52 / 0.87 | 0.53 / 0.88 (hierarchical weighted fit, `seed_cov`) | unchanged |
+| Chord − model, all tiles (mm) | 0.070 ± 0.625 | 0.072 ± 0.626 | 0.073 ± 0.633 on the detected seeds; 0.049 ± 0.456 on the posterior (shrinkage toward the model, not a measurement) | spread should shrink → **FAIL** (unchanged: +0.001 mm SD) |
+| Near-flat side chords vs 10 mm (n = 2 tiles) | 9.24 ± 0.52 | 9.24 ± 0.52 | 9.24 ± 0.52 (detected); 9.24 ± 0.41 (posterior) | unchanged |
+| Within-tile seed-axis coherence | mean \|cos\| 0.947, spread 14.5° | 0.947, 14.5° (detection axes kept by design, f00ccea) | 0.947, 14.5° | unchanged |
+| 25/31 (3.93 mm apart) | auto {8,16,24,25} + {26,29,30,31}; counted-chord {25,26,29,30} + {8,16,24,31} (documented ambiguity); stage-6 margin **1.87** on both tiles, not flagged | identical, margin 1.87 / 1.87 | identical partition, margin 1.87 / 1.87; posterior 25/31 distance 4.03 mm | margin reported → unchanged |
+| Split-half: refinement engaged | — | even 1/36, odd 1/30 (close_neighbour ×15 / ×2, shift ×14 / ×14, background ×4 / ×11, no_signal ×2 / ×2) | same | (reported) |
+| Split-half disagreement/√2 i / j / k (mm) | 0.756 / 0.352 / 0.576 | 0.756 / 0.353 / 0.576 | same as (b) (fusion needs the tiles, the halves are detection-only) | — |
+| Split-half 3-D disagreement/√2 | **1.01 mm** (mean \|Δ\| 1.26, P95 1.98) | **1.01 mm** (0 %) | 1.01 mm | ≥ 15 % lower than baseline → **FAIL** (0 %; forced on, +4 %, see below) |
+| Split-half Bland–Altman bias [95 % LoA] i / j / k (mm) | −0.100 [−2.22, 2.03] / 0.131 [−0.83, 1.09] / −0.062 [−1.68, 1.56] | −0.096 [−2.22, 2.03] / 0.129 [−0.83, 1.09] / −0.056 [−1.68, 1.57] | same as (b) | — |
+| Split halves vs the 1 mm result (3-D mean ± SD; RMS i/j/k) | even 0.74 ± 0.59 (0.73/0.27/0.53), odd 0.49 ± 0.48 (0.48/0.27/0.41) | even 0.74 ± 0.60, odd 0.49 ± 0.48 | same | — |
+| PostOp (0.52 × 0.52 × 2.0 grid, 1.0 mm slabs, 52/89 interpolated) | 701 raw → 50 in-vault (merge on, 30 rejoined); **4 supported + 2 tentative, 3 unassigned** (NN 10.1 / 10.0 / 9.2 mm); prior path agrees; confirmed | 50; **4 + 2, 3 unassigned** (NN 10.1 / 10.0 / 8.5); refinement **7/50** (43 fallbacks: close_neighbour ×13, shift ×11, extended ×9, background ×5, no_signal ×5; shifts 0.10–0.73 mm); prior path agrees; confirmed | 50; **4 + 2, 3 unassigned** (NN 6.9 / 10.0 / 7.3: the weighted auto fit picks different tentative members); `fit_tiles_prior(ImplantPrior())` **disagrees** with the weighted auto fit; confirmed | not worse than 4 + 2 / ≤ 3 unassigned → **PASS** (all three) |
+| Tile-free printed scan (`CT 3D printed`, 248 sl) | 0 candidates, **absent** | 0, absent (0/0 refined) | 0, absent | verdict unchanged → **PASS** |
+| DOE thin-cut (`DOEJOHNPOSTCT`, 204 sl, 1 mm; post-implant, see stage 3) | 31 candidates, **confirmed** (6 quads, 1 region) | 31, confirmed; **27/31 refined** (fallbacks: background, shift, extended ×2) | 31, confirmed | verdict unchanged → **PASS** |
+| Fusion (stage 5, printed) | — | — | 32 fused, 0 passed through; \|posterior − detected\| **median 0.117 mm**, mean 0.147, max 0.565 | > 0.3 mm median would be flagged → **not** the case |
+| Wall per dataset (s): printed / split / PostOp / tile-free / DOE / total | 26 / 0.4 / 16 / 26 / 33 / 111 | 26 / 0.4 / 16 / 24 / 26 / 103 | 25 / 0.6 / 17 / 23 / 25 / 102 | (machine shared with other agents; refinement itself 0.04–0.1 s per scan) |
+
+### PostOp vs its 1 mm thin-cut (the closest thing to a real-data accuracy check)
+
+`DOEJOHNPOSTCT` is the contiguous 1 mm thin-cut of the SAME post-implant
+acquisition as the PostOp export (stage 3); grids checked to coincide:
+direction cosines equal, in-plane pixel 0.5195 mm equal, PostOp origin
+offset (0.000, 0.000, 1.000) thin-cut voxels — the PostOp z origin sits
+exactly on thin-cut slice 1 — so seeds are matched with **no transform**
+(Hungarian within 3 mm; 25 of the 50 PostOp in-vault candidates match one
+of the 31 thin-cut candidates, incl. all 22 tile-assigned PostOp seeds).
+Differences = PostOp − thin-cut in the PostOp voxel axes (i, j in-plane; k
+through-slice). The thin-cut is itself a measurement (bent-tile RMS
+0.18–0.67 mm on its 6 tiles), not truth.
+
+| PostOp side / thin-cut side | n | mean i / j / k (mm) | SD i / j / k (mm) | 3-D mean | median | P95 | max |
+|---|---|---|---|---|---|---|---|
+| none / none (a) | 25 | −0.084 / −0.073 / 0.016 | 0.506 / 0.398 / 0.631 | 0.63 | 0.32 | 1.80 | 2.41 |
+| none / none, tile-assigned | 22 | −0.095 / −0.124 / −0.022 | 0.539 / 0.360 / 0.638 | 0.64 | 0.34 | 1.88 | 2.41 |
+| centroid / centroid (b) | 25 | −0.062 / −0.071 / −0.015 | 0.376 / 0.360 / 0.652 | 0.64 | 0.48 | 1.46 | 2.44 |
+| centroid / centroid, tile-assigned | 22 | −0.074 / −0.128 / −0.062 | 0.399 / 0.296 / 0.650 | 0.64 | 0.50 | 1.27 | 2.44 |
+| centroid + fuse, posterior / centroid (c) | 25 | −0.062 / −0.069 / −0.008 | 0.370 / 0.356 / 0.590 | 0.61 | 0.51 | 1.44 | 2.16 |
+| *decomposition (`--part thincut`):* none / centroid | 25 | −0.035 / −0.039 / 0.020 | 0.385 / 0.363 / 0.617 | 0.58 | 0.38 | 1.46 | 2.44 |
+| centroid / none | 25 | −0.111 / −0.105 / −0.020 | 0.502 / 0.395 / 0.667 | 0.71 | 0.54 | 1.80 | 2.41 |
+
+Reading. The in-plane SD drops 0.506 → 0.376 mm (i) and 0.398 → 0.360 (j)
+from (a) to (b), but the decomposition shows **all of it comes from the
+reference side**: refining only the thin-cut gives 0.385 / 0.363 / 0.617
+and 3-D mean 0.63 → 0.58 mm, while refining only the PostOp side gives
+0.502 / 0.395 / 0.667 and 3-D mean 0.63 → **0.71**, median 0.32 → 0.54.
+Per seed, of the 7 PostOp candidates the centroid moved (0.10–0.73 mm),
+**5 moved away from the thin-cut seed** (|d| 0.17 → 0.78, 0.19 → 0.51,
+0.07 → 0.55, 0.10 → 0.54, 0.05 → 0.44 mm; three of the five by −0.4 to
+−0.5 mm along k, the through-slab axis, two of them next to an
+interpolated slice) and 2 moved toward it (0.69 → 0.38, 0.62 → 0.61). The
+k SD does not improve in any configuration (0.63–0.67 mm: the 2 mm gapped
+export's through-slice limit). The thin-cut side behaves as the synthetic
+track predicted: 27/31 engage, shift median 0.13 mm (max 0.74), and its own
+auto-fit bent-tile RMS falls from 0.18 / 0.21 / 0.29 / 0.47 / 0.51 / 0.67
+(mean 0.387) to 0.16 / 0.17 / 0.25 / 0.43 / 0.45 / 0.45 (mean 0.318, −18 %).
+Fusion (c) pulls the PostOp k SD 0.652 → 0.590 and the max 2.44 → 2.16 mm
+(posterior vs the thin-cut), with the same median.
+
+### Why the centroid does not engage on the printed phantom (`--part printed`)
+
+| Variant | Refined | Fallbacks | Shift of the refined seeds (median / max, mm) | Background-gradient shift (median / max, mm) | Auto fit: bent-tile RMS mean / chord − model (mm) | Split-half 3-D disagreement/√2 (i / j / k) |
+|---|---|---|---|---|---|---|
+| default rules | 1/32 | shift ×15, background ×11, close_neighbour ×4, no_signal ×1 | 0.15 / 0.15 | 0.20 / 0.66 (all seeds) | 0.518 / 0.072 ± 0.626 | 1.014 (0.756 / 0.353 / 0.576) |
+| `max_bg_shift_mm` 0.3 | 9/32 | shift ×15, background ×3, … | 0.29 / 0.52 | 0.17 / 0.26 | 0.504 / 0.085 ± 0.615 | — |
+| `max_bg_shift_mm` 1.0 | 12/32 | shift ×15, … | 0.32 / 0.55 | 0.20 / 0.66 | 0.503 / 0.088 ± 0.617 | — |
+| `max_shift_mm` 3.0 | 1/32 | background ×18, shift ×8, … | 0.15 | 0.26 / 0.69 | 0.518 / 0.072 ± 0.626 | — |
+| both rules off (10 mm) | 20/32 | shift ×4, no_signal ×3, extended ×1, close_neighbour ×4 | 0.32 / 0.93 | 0.26 / 0.69 | 0.522 / 0.080 ± 0.643 | **1.055** (0.729 / 0.460 / 0.608); refined even 11/36, odd 17/30 |
+| rules off, `roi="ellipsoid"` | 19/32 | — | 1.39 / 2.93 | 1.22 / 8.23 | 0.770 / 0.165 ± 0.958 | — |
+| rules off, `mask="none"` | 13/32 | extended ×6, no_signal ×6, … | 0.28 / 1.45 | 0.26 / 3.66 | 0.527 / 0.053 ± 0.679 | — |
+
+The printed phantom is plastic and air, not tissue: the background shell
+around each seed has a median of −40 to −550 HU and a robust spread
+(`sigma_noise`) of 150–700 HU (the harness and head phantom assume ~20 HU
+tissue noise), so the constant-plus-planar background model behind the
+signed-weight centroid is violated and the first iteration wanders (15 of
+32 move > 1.5 mm, 11 have a gradient-induced shift of 0.14–0.66 mm).
+Saturation is not the cause (signed weights keep clipped voxels by
+design; `n_sat` up to 14 voxels per seed). The rule fallbacks are doing
+their job: when they are switched off the estimator engages on 20/32 seeds
+and every proxy gets slightly worse (bent-tile RMS 0.518 → 0.522, chord
+spread 0.626 → 0.643, split-half 3-D disagreement 1.01 → 1.06 mm, j 0.35 →
+0.46). The printed phantom therefore cannot measure stage 2's gain; it
+measures that the fallbacks reject what the background model cannot
+handle. `close_neighbour` ×4 are the two pairs closer than 4.5 mm (25/31
+at 3.93 mm and 24/30).
+
+### Stage-2 real-data gate verdict
+
+| Criterion (plan, "Real scans WITHOUT independent truth") | Verdict |
+|---|---|
+| Printed phantom stays 32/32 seeds, 8/8 tiles | **PASS** (a, b, c) |
+| Bent-tile RMS per tile | unchanged (1/32 seeds refined): neither better nor worse |
+| Side chords vs the 10 mm pitch: spread should shrink | **FAIL** — 0.625 → 0.626 mm (unchanged); with the fallbacks forced off 0.643 (worse) |
+| Seed-axis agreement within a tile | unchanged (detection axes are kept by design) |
+| Partition margin for 25/31 | 1.87 in all three configurations (not ambiguous under the bent-tile score; counted chord still reads the pair the other way) |
+| Split-half: ≥ 15 % lower disagreement than baseline | **FAIL** — 1.01 → 1.01 mm (0 %); the estimator engages on 1 of 36 / 1 of 30 half-scan seeds; forced on, +4 % |
+| PostOp: 4 supported kept, no new supported tiles, unassigned ≤ 3 (after stage 3) | **PASS** (a, b, c: 4 + 2, 3 unassigned); under `--fuse` the tentative tiles' members change and the prior path disagrees — to watch, not a failure |
+| Negative controls: verdict unchanged (tile-free absent; DOE confirmed — it is a post-implant thin-cut) | **PASS** (a, b, c) |
+| `--fuse` changes the printed seeds by > 0.3 mm median? | No: 0.117 mm median (max 0.565) |
+
+**Verdict: the stage-2 refinement does not pass its real-data gate on the
+scans available.** It is inert on the printed phantom (fallback on 31/32:
+air/plastic background), engages on only 7/50 PostOp candidates and moves 5
+of those 7 away from the 1 mm thin-cut reference (through-slab axis of the
+gapped 2 mm export, the G3 NEES failure seen in real data), and helps only
+on the contiguous 1 mm thin-cut in tissue (27/31 engaged, tile-fit RMS −18 %,
+tighter in-plane agreement with the PostOp export). No regression anywhere
+(the fallbacks hand back the detected centre). Recommendation for the
+coordinator: keep `refine_seeds=None` as the default; if it is enabled, gate
+it on contiguous thin-slice scans (slice thickness ≈ spacing ≤ 1.2 mm) and
+keep it off on gapped slab exports; the printed phantom needs a tissue-
+equivalent background (or a scan of tiles in a water/gel phantom) before it
+can measure sub-voxel gains. The split-half proxy at 2 mm is dominated by
+slab snapping (median |Δk| 1.0 mm in every configuration) and will not show
+a sub-voxel estimator's gain until the k-handling for interpolated/gapped
+grids improves.
+
+Proposed README validation rows (coordinator's pass; do not copy the
+2026-09-01 numbers):
+
+- `Real post-op CT (1 mm slabs at 2 mm spacing, gaps interpolated)` →
+  "4 supported + 2 tentative tiles, 3 real seeds unassigned (the thin-cut of
+  the same acquisition leaves the same 3); fragment merge rejoins the 2
+  slab-boundary duplicates; tile-assigned seeds agree with the contiguous
+  1 mm thin-cut of the same acquisition to 0.34 mm median / 0.64 mm mean,
+  SD 0.54 / 0.36 / 0.64 mm (in-plane / in-plane / through-slice), no
+  transform"
+- `Physical 8-tile printed phantom (157 slices, 1 mm, O-MAR)` → add
+  "split-half (odd / even slices as two 2 mm scans) precision 0.76 / 0.35 /
+  0.58 mm per axis, 1.01 mm 3-D; bent-tile RMS 0.26–0.87 mm; side chords
+  − bent-tile model 0.07 ± 0.63 mm"
+- `Negative controls` → "tile-free printed scan: 0 candidates, absent. No
+  pre-implant head CT is available (DOEJOHNPOSTCT is the post-implant
+  thin-cut, corrected 2026-10-08)"
+- `Grey-level seed refinement (stage 2)` → "opt-in (`refine_seeds=
+  'centroid'`): synthetic gains as in the stage-2 row; on real scans it
+  engages only where the background is tissue-like and contiguous (thin-cut
+  27/31 seeds, tile-fit RMS −18 %); inert on the air/plastic printed phantom
+  (1/32) and not recommended on gapped 2 mm exports (5/7 refined PostOp seeds
+  moved away from the thin-cut)"
 
 ## Runs log
 
@@ -1705,3 +1908,8 @@ receives `spacing_mm`, so counted = auto exactly — is kept.
 | 2026-10-08 | `python scripts/validation_loc_scoring.py --verify` | rng-1 head phantom at 2.1 mm | f9c6134 | ~40 s (two `reconstruct` runs) |
 | 2026-10-08 | `pytest tests/test_tiles_verify.py` | rng 1 | f9c6134 | 16.3 s, 5 passed |
 | 2026-10-08 | `pytest tests/test_tiles*.py tests/test_tile_model.py tests/test_implant_assessment.py tests/test_localization_plumbing.py tests/test_localization_scoring.py` after merging loc/integration (0611ccc) into loc/scoring | per test | f9c6134 | 213 s, 272 passed |
+| 2026-10-08 | `python scripts/validation_realdata_proxies.py --refine none --no-cache --out output/validation_realdata_proxies/none --cache-dir output/validation_realdata_proxies/cache --tag none` | real scans (printed8 + split halves, PostOp, CT 3D printed, DOE thin-cut) | 5073e01 | 111 s |
+| 2026-10-08 | `python scripts/validation_realdata_proxies.py --refine centroid --no-cache --out output/validation_realdata_proxies/centroid --cache-dir output/validation_realdata_proxies/cache --tag centroid` | same | 5073e01 | 103 s |
+| 2026-10-08 | `python scripts/validation_realdata_proxies.py --refine centroid --fuse --no-cache --out output/validation_realdata_proxies/centroid-fuse --cache-dir output/validation_realdata_proxies/cache --tag centroid-fuse` | same | 5073e01 | 102 s |
+| 2026-10-08 | `python scripts/localization_proxies_diag.py --part printed` | printed8 (detection + refinement variants, split halves) | 5073e01 | ~15 s |
+| 2026-10-08 | `python scripts/localization_proxies_diag.py --part thincut` | cached PostOp / DOE runs | 5073e01 | 2 s |
