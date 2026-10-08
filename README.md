@@ -23,7 +23,7 @@ From this folder (`gt.bat` wraps the project venv — no activation needed):
                                     --tiles omitted = the recommended count; --solver greedy|local|sa|milp|continuous
 .\gt view                           either command, phantom mode (synthetic ground truth)
 .\gt demo                           full phantom demo -> output\ (NRRD, PLY meshes, figures, CSV)
-.\gt test                           run the test suite (797 tests)
+.\gt test                           run the test suite (805 tests)
 ```
 
 Planner controls (the same legend is on screen; `?` collapses it):
@@ -245,7 +245,7 @@ gtcore/planner.py  optional PyVista planner
 gtcore/cli.py      the `gt` command
 scripts/           demo + validation studies + paper_figures.py (every data panel)
 docs/figures/data/ committed measurement tables the paper figures read (git add -f: *.csv is ignored)
-tests/             797 tests, all stages scored against phantom ground truth (incl. gtcore.plan, seed refinement)
+tests/             805 tests, all stages scored against phantom ground truth (incl. gtcore.plan, seed refinement)
 docs/              TG-43 physics notes, interference notes, data notes
 output/            generated volumes, meshes, figures (gitignored)
 ```
