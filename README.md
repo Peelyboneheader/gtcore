@@ -23,7 +23,7 @@ From this folder (`gt.bat` wraps the project venv — no activation needed):
                                     --tiles omitted = the recommended count; --solver greedy|local|sa|milp|continuous
 .\gt view                           either command, phantom mode (synthetic ground truth)
 .\gt demo                           full phantom demo -> output\ (NRRD, PLY meshes, figures, CSV)
-.\gt test                           run the test suite (671 tests)
+.\gt test                           run the test suite (797 tests)
 ```
 
 Planner controls (the same legend is on screen; `?` collapses it):
@@ -56,7 +56,16 @@ Planner controls (the same legend is on screen; `?` collapses it):
    largest gap — observed at ~9 mm on a real export).
 2. **`gtcore.seeds`** — seed-candidate detection runs FIRST: threshold →
    26-connected components → intensity-weighted subvoxel centroids → PCA long
-   axes → merged-blob splitting (population-median volume + k-means).
+   axes → merged-blob splitting (median volume of seed-sized blobs, a rod
+   guard so a single bright seed is never cut, intensity-weighted Lloyd
+   split) → on gapped slab exports, a fragment merge that rejoins the two
+   pieces of one seed straddling an unimaged gap (`merge_fragments`, auto).
+   `gtcore.seeds.refine` then re-measures every candidate with a
+   **threshold-free background-subtracted grey-level centroid** over a fixed
+   neighbour-masked window and reports an analytic per-seed covariance
+   (`SeedCandidates.cov_ras`), via `reconstruct(refine_seeds="centroid")`;
+   `"model"` is an experimental maximum-likelihood blurred-line-source fit.
+   `docs/plan-localization.md` and `docs/localization-notes.md`.
    Detection parameters adapt to slice spacing (`seed_detection_params`):
    partial volume halves seed peak HU at 2 mm slices, and elongation is
    degenerate when a capsule spans one slice.
@@ -167,7 +176,7 @@ every stage.
 | Tile pose | centre ≤0.14 mm mean, normal ≤0.9° mean; fit <10 ms |
 | TG-43 v2 vs independent quadrature | ≤1e-9 relative on G_L; tabulated kernel ≤1e-3 vs analytic (r ≥ 2.5 mm); grid 12 seeds/2 mm/100 mm in 0.17 s, 1 mm in 1.1 s |
 | Isodose surface placement (log-dose marching cubes, 2 mm grid) | 0.04 mm rms, 0.09 mm max vs analytic isodose radius |
-| Slice-spacing robustness (adaptive params) | recall 1.00 at 1.4/2.1/2.8 mm (fixed params: 0.58/0/0); figure `output/validation_spacing.png` |
+| Slice-spacing robustness (adaptive params; re-measured 2026-10-08, 5 realizations, commit fe4a1a8 — the 2026-09-01 figure was optimistic) | recall 1.00/1.00/0.97/0.98 at 0.7/1.4/2.1/2.8 mm (fixed params: 0.58/0/0 at ≥ 1.4 mm); detection-only mean seed error 0.20/0.29/0.50/0.70 mm; tile partition 5/5, 4/5, 2/5, 2/5 — see the localization section below for the refined numbers |
 | Inter-seed attenuation (12 seeds, capsules only) | mean -0.27% (flat grid) / -0.65% (conformed) at >=25% rx; worst voxel 0.84; +14-20% runtime |
 | Tile shadowing flag (prescription depth, 5 mm) | coplanar tiles <0.1%, conformed phantom implant 0.56% (both quiet); a tile stacked 4 mm behind another 5.7% (flagged) |
 | Tile-carrier term (unmeasured density) | swings +19% to 0% over rho 0.15->1.00 g/cm^3 — **off by default**; figure `output/validation_interference.png` |
@@ -194,6 +203,26 @@ Per-dataset findings and data-quality caveats: `docs/data-notes.md`.
 
 Not claimed: TG-43 in water; static cavity; tiles modelled as non-overlapping although collagen may stack; surgeon reachability beyond the eligibility mask; clinical case 2 (not on this machine). Open for Jacob: the planner's footprint fit on strongly curved walls (`docs/optimize-notes.md`, "Open decisions").
 
+### Seed localization and tile inference upgrade (2026-10-08; `docs/plan-localization.md`, `docs/localization-notes.md`; every stage behind a pre-declared gate)
+
+Synthetic truth comes from a new analytic seed renderer (`gtcore.phantom.seed_render`: exact 4.5 × 0.8 mm capsule supersampled onto anisotropic grids with PSF, noise, 3071 HU saturation, interpolated gap slices; deliberately not the fit model) on grids G1 0.59×0.59×1.0, G2 0.5×0.5×2.0, G3 PostOp-like 1 mm slabs on a gapped 2 mm grid, G4 0.7×0.7×2.8 mm (200 seeds each), plus the head phantom at 0.7/1.4/2.1/2.8 mm (5 realizations, binary and analytic seeds).
+
+| Stage | Claim | Measured | Shipped as |
+|---|---|---|---|
+| 2 grey-level centroid + analytic covariance | threshold-free sub-voxel seed centre | 3D mean error G1 0.13 → 0.006 mm; z RMS G2 0.40 → 0.24, G4 0.64 → 0.34 mm; head phantom 2.1 mm 0.50 → 0.22 (binary) / 0.54 → 0.14 (analytic), 2.8 mm 0.70 → 0.41 / 0.74 → 0.39, 0.7 mm 0.20 → 0.15 / 0.10 → 0.04; centre shift when the HU threshold changes 0.09–0.52 → 0.00 mm; covariance calibration (NEES) 1.2–1.9 on G1/G2/G4 (fails on gapped G3: 0.3 mm in-plane error not modelled); 1.7–3.4 ms/seed | `reconstruct(refine_seeds="centroid")`, **default off**: the real-data gate was not met (see the two rows below) |
+| 3 merge/split repair | no split-seed duplicates, no false splits | harness FP on G2 29 → 0, G3 80 → 32, G4 20 → 12 with recall identical and error never worse; PostOp unassigned 5 → 3 (the 3 left are real seeds the 1 mm reference also leaves unassigned); printed phantom 32/32, 8/8 unchanged | default on (windowed median, rod guard, weighted split); fragment merge auto on gapped slab exports |
+| 4 one scoring rule | counted = automatic | 30/30 synthetic layouts and 8/8 printed-phantom tiles agree; the printed 25/31 pair: margin 0.27 (chord, flagged) vs 1.87 (bent-tile) | `fit_tiles_prior` uses the bent-tile score; `assess_implant` keeps chord |
+| 5 hierarchical (random-effects) weighted tile fit | tile model pins z on thick slices | gain over refined seeds −1.9 % at 2.1 mm, −8 to −14 % at 2.8 mm; model-only ceiling 9–13 % (78 % of thick-slice error is a per-tile common shift) | **opt-in only** (`fuse_tiles=True`); negative result |
+| 6 uncertainty outputs | pose covariance + partition margin | normal σ monotone in noise; centre covariance within 1.1–1.3× of empirical scatter (equal-noise rows); clean margins ∞, constructed shared-seed case 4e-6 and flagged; 2–6 ms | margins on in the planner's suggest; `DeformableFit.compute_uncertainty()` |
+| 7 blurred line-source ML fit | sub-voxel fit with saturation/gap handling | error vs centroid G2 0.69×, G4 0.48×, G3 0.94×; covariance over-confident on G1/G2 (NEES 3.6–6.4); 11–26 ms/seed; needs a 4.25 mm effective segment (open question for the with-truth phantom) | `refine_seeds="model"`, experimental, covariance labelled uncalibrated |
+| 8 image check of inferred seeds | triplet-completed 4th seed verified in the image | 2.1 mm missed-seed case recovered to 0.71 mm; erased seed → "no image evidence"; 5–7 ms | on with `refine_seeds`; planner note "4th seed recovered / no image evidence"; never promotes tentative |
+| 2 on real scans (no truth) | refinement must not regress and should tighten repeatability | printed 8-tile phantom: 32/32, 8/8 unchanged, but the estimator engages on 1/32 seeds (an air/plastic phantom has a −40 to −550 HU background with 150–700 HU spread, so the flat-background fallbacks fire); split-half 1 mm→2 mm repeatability 1.01 mm 3-D unchanged (criterion ≥ 15 % better: FAIL); PostOp (gapped 2 mm export): engages on 7/50, moves 5 of them away from the 1 mm reference; DOE 1 mm thin-cut (contiguous tissue scan): engages on 27/31, bent-tile RMS 0.39 → 0.32 mm (−18 %); negative-control verdicts unchanged | hence default off; enable on contiguous thin-slice tissue scans; a tissue-equivalent phantom is needed to measure sub-voxel gains on real data |
+| real-data accuracy check: PostOp 2 mm gapped export vs the same patient's 1 mm thin-cut (same frame, 25 matched seeds) | first real accuracy number for a degraded export | detection only: per-axis SD 0.51/0.40/0.63 mm, 3-D median 0.32 mm, P95 1.80, max 2.41; the 22 tile-assigned seeds: SD 0.54/0.36/0.64 mm | reference dataset for the PostOp export (`docs/data-notes.md`) |
+| axis term on coarse slices | drop degenerate PCA axes above 1.2 mm | tile normal error 2–4× better, centres identical, but partition worse on 1–2 of 20 fragment-bearing analytic scans | **off** (`DROP_AXIS_TERM_ON_COARSE = False`); pre-declared gate not met |
+
+Bugs fixed on the way: `reconstruct` dropped `spacing_mm` for automatic tile fitting (coarse scans ran the thin-slice cover tolerance); the counted path reported a plane-fit normal while drawing the bent-tile fit; the `DOEJOHNPOSTCT` scan is the 1 mm thin-cut of the PostOp patient, not a pre-implant control (`docs/data-notes.md`).
+
+
 
 ## Paper figures
 
@@ -216,7 +245,7 @@ gtcore/planner.py  optional PyVista planner
 gtcore/cli.py      the `gt` command
 scripts/           demo + validation studies + paper_figures.py (every data panel)
 docs/figures/data/ committed measurement tables the paper figures read (git add -f: *.csv is ignored)
-tests/             671 tests, all stages scored against phantom ground truth (incl. gtcore.plan)
+tests/             797 tests, all stages scored against phantom ground truth (incl. gtcore.plan, seed refinement)
 docs/              TG-43 physics notes, interference notes, data notes
 output/            generated volumes, meshes, figures (gitignored)
 ```

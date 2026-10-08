@@ -28,13 +28,21 @@ strongly conformed tile is not penalized for the contraction itself.
 Selection is an exact branch-and-bound over candidate quads then candidate
 pairs (candidate counts are small, N <= ~40), maximizing tiles placed first
 and total geometric score second, with a node cap that degrades gracefully to
-the greedy answer on pathological inputs.
+the greedy answer on pathological inputs (reported as
+``TileFitResult.capped``).
+
+``score="deformable"`` (plan-localization stage 4) re-scores every
+gate-passing quad with the bent-tile fit of :mod:`gtcore.tiles.deform`
+exactly as auto mode does (:func:`gtcore.tiles.auto.deformable_score`), so
+the counted and automatic modes rank groupings by ONE rule.  The default
+stays ``"chord"``: :func:`gtcore.pipeline.assess_implant` and the
+calibrated count path were tuned on it.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from itertools import combinations
-from typing import List
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -83,6 +91,11 @@ PAIR_ALIGN_FREE_DEG = 15.0
 W_PAIR_ALIGN = 2.0              # per radian beyond PAIR_ALIGN_FREE_DEG
 
 _SEARCH_NODE_CAP = 200000
+# floor of a bent-tile score in the counted selector: auto mode drops a quad
+# whose deformable score is <= 0, but with the count given the count comes
+# first, so such a quad stays usable (just last) -- "more tiles first" holds
+# because every item keeps a positive score below QUAD_BASE
+_DEF_SCORE_FLOOR = 1e-3
 
 
 # ------------------------------------------------------------------- results
@@ -158,13 +171,29 @@ class TileFitResult:
 
     ``all_assigned`` is True when exactly ``n_full`` full and ``n_half`` half
     tiles were recovered; leftover candidates (clips, bone spikes, decoys) in
-    ``rejected_indices`` do not clear it.
+    ``rejected_indices`` do not clear it.  ``capped`` says the exact search
+    stopped at its node cap (before 2026-10-08 this degraded silently).
     """
 
     tiles: List[TilePose] = field(default_factory=list)
     rejected_indices: List[int] = field(default_factory=list)
     n_expected: int = 0
     all_assigned: bool = False
+    capped: bool = False            # the exact search hit its node cap: the
+                                    # selection is then only "at least greedy"
+    score_rule: str = "chord"       # quad scoring used ("chord"/"deformable")
+    # plan-localization stage 6 (only with ``margins=True``, else None):
+    # tile_id -> best total score minus the best total of the same tile
+    # count WITHOUT that tile (inf: no alternative of that count exists),
+    # and the seed groups of that best alternative.  Selector tiles only
+    # (degraded completions and tentative tiles carry no margin).
+    partition_margins: Optional[Dict[int, float]] = None
+    partition_alternatives: Optional[Dict[int, List[Tuple[int, ...]]]] = None
+    ambiguous_tiles: List[int] = field(default_factory=list)  # margin < 1
+    # plan-localization stage 8 (gtcore.tiles.verify): tile_id -> image
+    # evidence at an inferred 4th seed ("recovered" / "no image evidence");
+    # None until verify_inferred_seeds() ran, {} when nothing was inferred
+    verification: Optional[Dict[int, dict]] = None
 
 
 # ------------------------------------------------------------------ helpers
@@ -351,6 +380,8 @@ class _Selector:
         self.best_value = -1.0
         self.best = ([], [])
         self.nodes = 0
+        self.node_cap = _SEARCH_NODE_CAP   # read at construction (tests patch it)
+        self.capped = False
         # Suffix maxima for optimistic score bounds. Rows are capped at the
         # number of usable slots: without the cap the table is O(M^2) and a
         # dense junk cluster (coarse scans emit thousands of gated quads)
@@ -386,7 +417,8 @@ class _Selector:
 
     def _quad_dfs(self, pos, chosen, used, score):
         self.nodes += 1
-        if self.nodes > _SEARCH_NODE_CAP:
+        if self.nodes > self.node_cap:
+            self.capped = True
             return
         if len(chosen) == self.n_full or pos == len(self.quads):
             self._pair_dfs(0, chosen, [], used, score)
@@ -406,7 +438,8 @@ class _Selector:
 
     def _pair_dfs(self, pos, quads_chosen, pairs_chosen, used, score):
         self.nodes += 1
-        if self.nodes > _SEARCH_NODE_CAP:
+        if self.nodes > self.node_cap:
+            self.capped = True
             return
         if len(pairs_chosen) == self.n_half or pos == len(self.pairs):
             value = (len(quads_chosen) + len(pairs_chosen)) * self._BIG + score
@@ -533,8 +566,43 @@ def _complete_degraded_quads(centers, axes, dist, leftovers, missing_full,
     return missing_full
 
 
+def _counted_margins(quads, pairs, n_full, n_half, chosen_q, chosen_p):
+    """Partition margin of every selected item (plan-localization stage 6).
+
+    The selector is re-run with that one item removed (its seeds stay
+    available to every other grouping); the margin is the best total score
+    minus the best total of the SAME tile count without it.  When removing
+    it lowers the achievable count -- the ``count * 1000`` term of the
+    selector value moves, a margin >= 1000 -- no alternative reading of that
+    count exists and the margin is ``inf``.
+
+    Returns ``({("q"|"p", position): (margin, [seed tuples] or None)},
+    capped)``.
+    """
+    base_n = len(chosen_q) + len(chosen_p)
+    base_s = (sum(quads[i][0] for i in chosen_q)
+              + sum(pairs[i][0] for i in chosen_p))
+    out, capped = {}, False
+    for kind, pos in [("q", i) for i in chosen_q] + [("p", i) for i in chosen_p]:
+        qs = [q for j, q in enumerate(quads) if not (kind == "q" and j == pos)]
+        ps = [p for j, p in enumerate(pairs) if not (kind == "p" and j == pos)]
+        sel = _Selector(qs, ps, n_full, n_half)
+        alt_q, alt_p = sel.run()
+        capped |= sel.capped
+        alt_n = len(alt_q) + len(alt_p)
+        if alt_n < base_n:
+            out[(kind, pos)] = (float("inf"), None)
+            continue
+        alt_s = sum(qs[i][0] for i in alt_q) + sum(ps[i][0] for i in alt_p)
+        groups = sorted([tuple(int(v) for v in qs[i][1]) for i in alt_q]
+                        + [tuple(int(v) for v in ps[i][1]) for i in alt_p])
+        out[(kind, pos)] = (float(base_s - alt_s), groups)
+    return out, capped
+
+
 def fit_tiles(centers_ras, axes_ras, n_full, n_half=0, cavity_center_ras=None,
-              complete_degraded=False, mesh=None):
+              complete_degraded=False, mesh=None, spacing_mm=None,
+              score="chord", margins=False, seed_cov=None):
     """Assign seed candidates to ``n_full`` full and ``n_half`` half tiles.
 
     Parameters
@@ -565,6 +633,21 @@ def fit_tiles(centers_ras, axes_ras, n_full, n_half=0, cavity_center_ras=None,
     mesh : trimesh.Trimesh, optional
         Cavity wall; only used by ``n_full="auto"`` (surface cross-check,
         see :func:`gtcore.tiles.auto.fit_tiles_auto`).
+    score : {"chord", "deformable"}
+        Quad scoring of the counted path.  ``"chord"`` (default, the
+        calibrated rule) scores squareness of the chords; ``"deformable"``
+        re-scores every gate-passing quad with the bent-tile fit,
+        ``max(1e-3, deformable_score(fit_deformable(...)))`` -- auto mode's
+        rule -- attaches the fit as ``pose.deform`` and takes the pose
+        normal / in-plane axis from it.  Pairs keep their chord score;
+        degraded completion is unchanged.  Ignored by ``n_full="auto"``
+        (always deformable).
+    margins : bool
+        Also compute the partition margin of every selected tile (one extra
+        selector run per tile): ``partition_margins``,
+        ``partition_alternatives`` and ``ambiguous_tiles`` (margin below
+        :data:`gtcore.tiles.auto.AMBIGUOUS_MARGIN`).  Margins are in the
+        units of the score rule in force.
 
     Returns
     -------
@@ -572,7 +655,10 @@ def fit_tiles(centers_ras, axes_ras, n_full, n_half=0, cavity_center_ras=None,
         ``tiles`` ordered full-then-half by descending fit score, with any
         degraded-completion fulls appended LAST (after the halves);
         ``rejected_indices`` holds every unassigned candidate (ascending);
-        ``all_assigned`` is True iff the requested tile counts were met.
+        ``all_assigned`` is True iff the requested tile counts were met;
+        ``capped`` is True when the exact search hit its node cap (the
+        selection is then only guaranteed to be at least greedy);
+        ``partition_margins`` etc. are filled only with ``margins=True``.
         Deterministic: identical inputs give identical output.
     """
     if isinstance(n_full, str):
@@ -580,9 +666,16 @@ def fit_tiles(centers_ras, axes_ras, n_full, n_half=0, cavity_center_ras=None,
             raise ValueError("n_full must be an int or 'auto', got %r" % (n_full,))
         from .auto import fit_tiles_auto
 
+        # spacing_mm scales the cover-pass tolerance on coarse scans; it was
+        # dropped here before 2026-10-08, so reconstruct() ran auto mode at
+        # the 1 mm tolerance regardless of slice thickness
         return fit_tiles_auto(centers_ras, axes_ras,
                               cavity_center_ras=cavity_center_ras,
-                              allow_half=bool(n_half), mesh=mesh)
+                              allow_half=bool(n_half), mesh=mesh,
+                              spacing_mm=spacing_mm, margins=margins)
+    if score not in ("chord", "deformable"):
+        raise ValueError("score must be 'chord' or 'deformable', got %r"
+                         % (score,))
     centers = np.asarray(centers_ras, dtype=float).reshape(-1, 3)
     axes = _normalize_axes(axes_ras) if centers.size else \
         np.zeros((0, 3), dtype=float)
@@ -604,6 +697,9 @@ def fit_tiles(centers_ras, axes_ras, n_full, n_half=0, cavity_center_ras=None,
         return TileFitResult(
             tiles=[], rejected_indices=list(range(n)),
             n_expected=n_expected, all_assigned=(n_expected == 0),
+            score_rule=score,
+            partition_margins={} if margins else None,
+            partition_alternatives={} if margins else None,
         )
 
     diff = centers[:, None, :] - centers[None, :, :]
@@ -612,24 +708,80 @@ def fit_tiles(centers_ras, axes_ras, n_full, n_half=0, cavity_center_ras=None,
 
     quads = _enumerate_quads(centers, axes, dist, link) if n_full else []
     pairs = _enumerate_pairs(centers, axes, dist) if n_half else []
+    fits = {}
+    if score == "deformable" and quads:
+        # one scoring rule for both modes: the bent-tile fit auto mode uses
+        # (same call, same score); clamped positive so the count still wins
+        from .auto import _fit_axes, deformable_score, spacing_tolerance
+        from .deform import fit_deformable
+
+        # per-candidate covariances (stage 5 weighting) reach the counted
+        # score too, so counted == auto also when seed_cov is given
+        cov_all = None
+        if seed_cov is not None:
+            cov_all = np.asarray(seed_cov, dtype=float)
+            if cov_all.shape != (centers.shape[0], 3, 3):
+                raise ValueError("seed_cov must be (N, 3, 3), got %r" % (cov_all.shape,))
+        # coarse scans (spacing_mm above AXES_RELIABLE_DZ_MM): the per-seed
+        # PCA axes are degenerate, so the fit drops the axis term, as auto
+        # mode does (auto.DROP_AXIS_TERM_ON_COARSE)
+        use_axes = _fit_axes(cov_all, spacing_tolerance(spacing_mm))
+        rescored = []
+        for _s, idx, _r in quads:
+            fit = fit_deformable(centers[list(idx)], axes[list(idx)],
+                                 kind="full", use_axes=use_axes,
+                                 seed_cov=None if cov_all is None else cov_all[list(idx)])
+            fits[idx] = fit
+            rescored.append((max(_DEF_SCORE_FLOOR, deformable_score(fit)),
+                             idx, fit.rms_mm))
+        quads = rescored
     # Descending score, index tuple as the deterministic tie-break.
     quads.sort(key=lambda q: (-q[0], q[1]))
     pairs.sort(key=lambda p: (-p[0], p[1]))
 
-    chosen_q, chosen_p = _Selector(quads, pairs, n_full, n_half).run()
+    selector = _Selector(quads, pairs, n_full, n_half)
+    chosen_q, chosen_p = selector.run()
+    capped = selector.capped
 
     tiles = []
     assigned = set()
+    tile_of = {}
     for qi in chosen_q:
-        score, idx, residual = quads[qi]
-        tiles.append(_full_pose(len(tiles), idx, centers, axes, residual,
-                                cavity_center))
+        _s, idx, residual = quads[qi]
+        if idx in fits:
+            from .auto import _deformed_pose
+
+            pose = _deformed_pose(len(tiles), idx, centers, fits[idx],
+                                  cavity_center, degraded=False)
+        else:
+            pose = _full_pose(len(tiles), idx, centers, axes, residual,
+                              cavity_center)
+        tile_of[("q", qi)] = pose.tile_id
+        tiles.append(pose)
         assigned.update(idx)
     for pi in chosen_p:
-        score, idx, residual = pairs[pi]
+        _s, idx, residual = pairs[pi]
+        tile_of[("p", pi)] = len(tiles)
         tiles.append(_half_pose(len(tiles), idx, centers, axes, residual,
                                 cavity_center))
         assigned.update(idx)
+
+    part_margins = part_alts = None
+    ambiguous = []
+    if margins:
+        from .auto import AMBIGUOUS_MARGIN
+
+        per_item, c2 = _counted_margins(quads, pairs, n_full, n_half,
+                                        chosen_q, chosen_p)
+        capped = capped or c2
+        part_margins, part_alts = {}, {}
+        for key, (margin, groups) in per_item.items():
+            tid = tile_of[key]
+            part_margins[tid] = margin
+            part_alts[tid] = groups
+            if margin < AMBIGUOUS_MARGIN:
+                ambiguous.append(tid)
+        ambiguous.sort()
 
     n_full_found = len(chosen_q)
     if complete_degraded and n_full_found < n_full:
@@ -649,4 +801,9 @@ def fit_tiles(centers_ras, axes_ras, n_full, n_half=0, cavity_center_ras=None,
         rejected_indices=rejected,
         n_expected=n_expected,
         all_assigned=(n_full_found == n_full and len(chosen_p) == n_half),
+        capped=capped,
+        score_rule=score,
+        partition_margins=part_margins,
+        partition_alternatives=part_alts,
+        ambiguous_tiles=ambiguous,
     )

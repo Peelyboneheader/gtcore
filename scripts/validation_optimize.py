@@ -142,7 +142,7 @@ V4_N = 8
 V5_N = 8
 V5_OFFSETS_MM = (2.25, 3.0, 3.75)
 # Seed-plane offsets: geometry.SEED_PLANE_OFFSET_RANGE_MM endpoints + nominal (re-read below).
-V6_PHANTOM_DIR = r"C:\Users\jacob\OneDrive\Documents\3D-Printed Phantom-8tiles (223)"
+V6_PHANTOM_DIR = r"C:\Users\jacob\Documents\3D-Printed Phantom-8tiles (223)"
 V6_SEED_RADIUS_MM = 35.0
 V6_N = 8
 V6_N_MAX = 12

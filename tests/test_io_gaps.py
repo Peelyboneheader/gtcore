@@ -83,6 +83,9 @@ def test_gapped_series_rebuilt_on_true_grid(tmp_path):
     assert vol.meta["z_gap_interpolated"] is True
     assert vol.meta["slices_present"] == 7
     assert vol.array.shape[0] == 9                       # full 0..8 grid
+    # which grid slices were invented, not just how many
+    assert vol.meta["interpolated_k"] == [3, 6]
+    assert vol.meta["slices_interpolated"] == 2
     assert np.isclose(vol.spacing[2], 1.0, atol=0.01)    # true dz, not extent/N
 
     # z coordinate of voxel (0,0,k) must be the TRUE position k*1mm

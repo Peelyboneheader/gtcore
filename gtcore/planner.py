@@ -228,6 +228,41 @@ def _seed_polydata(pv, tile):
     return polys
 
 
+def _suggest_notes(fit) -> list:
+    """Per-tile tags of the suggest-tiles status line: tentative / crumpled
+    / surface verdicts, and -- when the fit carries partition margins
+    (plan-localization stage 6) -- "ambiguous (margin x.x)" for a tile whose
+    best alternative grouping of the same tile count scores within
+    ``AMBIGUOUS_MARGIN`` of the chosen one."""
+    margins = getattr(fit, "partition_margins", None) or {}
+    ambiguous = set(getattr(fit, "ambiguous_tiles", None) or [])
+    verification = getattr(fit, "verification", None) or {}
+    notes = []
+    for pose in fit.all_tiles:
+        base = "T%d" % (pose.tile_id + 1)
+        tag = base
+        if pose.tentative:
+            tag += " tentative"
+            if pose.inferred_seed_ras is not None:
+                tag += " (1 seed inferred"
+                ver = verification.get(pose.tile_id)
+                if ver is not None:
+                    tag += (": 4th seed recovered" if ver["status"] == "recovered"
+                            else ": no image evidence")
+                tag += ")"
+        elif pose.degraded:
+            tag += " crumpled"
+        if pose.surface is not None and not pose.surface.attached:
+            tag += " DETACHED"
+        elif pose.surface is not None and pose.surface.consistent is False:
+            tag += " inconsistent"
+        if pose.tile_id in ambiguous and pose.tile_id in margins:
+            tag += " ambiguous (margin %.1f)" % margins[pose.tile_id]
+        if tag != base:
+            notes.append(tag)
+    return notes
+
+
 def wall_mesh_for(result: PipelineResult):
     """The surface tiles are conformed to, as ``(mesh, label)``.
 
@@ -1296,9 +1331,19 @@ class _PlannerApp:
         if mesh is not None:
             cavity_center = np.asarray(mesh.vertices, float).mean(axis=0)
         spacing = getattr(getattr(self.result, "volume", None), "spacing", None)
+        # margins: one extra selector run per tile (~5 ms on the 8-tile
+        # printed phantom) to flag groupings the seed cloud does not decide
         fit = fit_tiles_prior(seeds.centers_ras, seeds.axes_ras, self.prior,
                               cavity_center_ras=cavity_center, mesh=mesh,
-                              spacing_mm=spacing)
+                              spacing_mm=spacing, margins=True)
+        # stage 8: ask the raw image about every inferred 4th seed (the
+        # tile stays tentative; the note says recovered / no image evidence)
+        vol_raw = getattr(self.result, "volume", None)
+        if vol_raw is not None and any(p.inferred_seed_ras is not None
+                                       for p in fit.all_tiles):
+            from .tiles.verify import verify_inferred_seeds
+
+            verify_inferred_seeds(fit, vol_raw, seeds)
         placed = to_placed_tiles(fit, seeds.centers_ras, seeds.axes_ras)
         poses = fit.all_tiles
         if placed:
@@ -1319,21 +1364,7 @@ class _PlannerApp:
         self.selected = len(self.tiles) - 1 if placed else self.selected
         self._last_suggestion = fit
         self._mark_unassigned(fit.unassigned_indices)
-        notes = []
-        for pose in poses:
-            tag = "T%d" % (pose.tile_id + 1)
-            if pose.tentative:
-                tag += " tentative"
-                if pose.inferred_seed_ras is not None:
-                    tag += " (1 seed inferred)"
-            elif pose.degraded:
-                tag += " crumpled"
-            if pose.surface is not None and not pose.surface.attached:
-                tag += " DETACHED"
-            elif pose.surface is not None and pose.surface.consistent is False:
-                tag += " inconsistent"
-            if len(tag) > 3:
-                notes.append(tag)
+        notes = _suggest_notes(fit)
         n_sup = len(fit.tiles)
         n_ten = len(fit.tentative_tiles)
         if n_ten:
