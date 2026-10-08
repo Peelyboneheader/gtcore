@@ -80,6 +80,27 @@ implant region is listed in ``unassigned_indices``; candidates far from
 the implant are ``clutter_indices`` (bone, clips, streaks).  Half tiles are
 never created by the cover pass: without the OR's word the safe prior is
 "no half tiles".
+
+Anisotropic seed uncertainty (plan stage 5)
+-------------------------------------------
+``seed_cov`` (``(N, 3, 3)`` per candidate, mm^2) is forwarded to EVERY
+bent-tile fit (supported quads, the loose tier, cover-pass quads and
+triplets, the counted prior's attached fits): residuals are whitened by
+the per-seed normalised ``(Sigma_i + slack^2 I)^(-1/2)`` of
+:mod:`gtcore.tiles.deform`, and every rms gate and the tile score read the
+weighted rms (``DeformableFit.wrms_mm``, mm along each seed's
+best-determined direction), so the calibrated thresholds keep their
+meaning.  ``seed_cov=None`` is bit-identical to the unweighted search.
+The chord / similarity prefilters stay unweighted.
+
+The seed AXES are measurements too, and on a coarse scan their error is
+not small: a capsule inside one 2-3 mm slab has no measurable tilt out of
+the slice (``AXES_RELIABLE_DZ_MM``), so its PCA axis is off by 20-40 deg
+(measured on the head phantom at 2.8 mm) and the axis term, now relatively
+stronger against the down-weighted z residuals, tilts the whole tile.  With
+``seed_cov`` the bent-tile fits therefore leave the axis term out above
+``AXES_RELIABLE_DZ_MM`` -- the rule the cover pass already applies -- while
+the pre-fit axis-coherence gates are unchanged.
 """
 from __future__ import annotations
 
@@ -216,7 +237,7 @@ def deformable_score(fit: DeformableFit) -> float:
     axis_pen = DEF_W_AXIS * float(np.deg2rad(
         max(0.0, fit.axis_err_deg - DEF_AXIS_SOFT_DEG)))
     bend_pen = DEF_W_E * max(0.0, fit.bending_energy - DEF_E_FREE)
-    return QUAD_BASE - DEF_W_RMS * fit.rms_mm - bend_pen - axis_pen
+    return QUAD_BASE - DEF_W_RMS * fit.wrms_mm - bend_pen - axis_pen
 
 
 @dataclass
@@ -370,12 +391,44 @@ class _PerCountSelector:
         self._dfs(pos + 1, chosen, used, score)
 
 
+# ------------------------------------------------- per-seed covariances
+def _check_seed_cov(seed_cov, n):
+    """``None`` or a validated ``(n, 3, 3)`` float array."""
+    if seed_cov is None:
+        return None
+    cov = np.asarray(seed_cov, dtype=float)
+    if cov.shape != (n, 3, 3):
+        raise ValueError("seed_cov must be (%d, 3, 3) (one per candidate), "
+                         "got %r" % (n, cov.shape))
+    return cov
+
+
+def _group_cov(seed_cov, idx, n_inferred=0):
+    """Covariances of candidates ``idx`` (fit order), plus ``n_inferred``
+    rows for inferred seeds: those sit on the model by construction (their
+    residual is ~0 after the fixed point), so they take the mean of their
+    detected mates' covariances -- a neutral choice."""
+    if seed_cov is None:
+        return None
+    cov = seed_cov[list(idx)]
+    if n_inferred:
+        cov = np.concatenate([cov, np.repeat(cov.mean(axis=0)[None],
+                                             n_inferred, axis=0)])
+    return cov
+
+
+def _fit_axes(seed_cov, tol):
+    """Whether bent-tile fits carry the axis term (module docstring): always
+    without seed_cov (historical), else only where axes are reliable."""
+    return seed_cov is None or tol <= AXES_RELIABLE_DZ_MM
+
+
 # ------------------------------------------------------- deformable tier
 def _enumerate_loose_quads(centers, axes, dist, exclude,
                            rms_max=LOOSE_RMS_MAX_MM, e_max=LOOSE_E_MAX,
                            axis_max=LOOSE_AXIS_MAX_DEG,
                            sim_max=LOOSE_SIM_RMS_MAX_MM, subset=None,
-                           use_axes=True):
+                           use_axes=True, seed_cov=None, fit_axes=True):
     """Quads outside the standard chord gates that the bent-tile model still
     explains: loose chord window, quad topology, axis coherence, planar
     extent, a closed-form similarity prefilter, then the deformable fit.
@@ -413,8 +466,9 @@ def _enumerate_loose_quads(centers, axes, dist, exclude,
         sim = fit_rigid(pts, ax, allow_scale=True, scale_range=(0.5, 1.1))
         if sim.rms_mm > sim_max:
             continue
-        fit = fit_deformable(pts, ax)
-        if (fit.rms_mm <= rms_max and fit.bending_energy <= e_max
+        fit = fit_deformable(pts, ax if fit_axes else None,
+                             seed_cov=_group_cov(seed_cov, idx))
+        if (fit.wrms_mm <= rms_max and fit.bending_energy <= e_max
                 and (not use_axes or fit.axis_err_deg <= axis_max)):
             out.append((idx, fit))
     return out
@@ -449,7 +503,7 @@ def _mean_axis(axes):
 
 
 def _enumerate_triplets(centers, axes, dist, pool, tol, forbidden_pts,
-                        use_axes=True):
+                        use_axes=True, seed_cov=None):
     """L-shaped triplets completed to a full tile by the manufactured
     geometry.  Returns ``[(idx3, fourth_ras, DeformableFit, score)]``.
 
@@ -504,17 +558,20 @@ def _enumerate_triplets(centers, axes, dist, pool, tol, forbidden_pts,
             # fitted to the three real seeds predicts it (fixed-point, 3
             # rounds are plenty: the update is a fraction of a millimetre)
             pts = np.vstack([centers[list(idx)], fourth[None, :]])
-            fit = fit_deformable(pts, ax)
+            fit = fit_deformable(pts, ax,
+                                 seed_cov=_group_cov(seed_cov, idx, 1))
             pred = fit.seed_points()[fit.assignment[3]]
             if np.linalg.norm(pred - fourth) < 0.05:
                 break
             fourth = pred
         # the inferred seed sits ON the model by construction, so judge and
         # report the residual over the three real seeds only
-        rms3 = float(np.sqrt(np.mean(np.asarray(fit.residuals_mm)[:3] ** 2)))
+        res = fit.residuals_mm if fit.weighted_residuals_mm is None \
+            else fit.weighted_residuals_mm
+        rms3 = float(np.sqrt(np.mean(np.asarray(res)[:3] ** 2)))
         if rms3 > TRIPLET_RMS_MAX_MM * tol or fit.bending_energy > COVER_E_MAX:
             continue
-        score = (deformable_score(fit) - DEF_W_RMS * (rms3 - fit.rms_mm)
+        score = (deformable_score(fit) - DEF_W_RMS * (rms3 - fit.wrms_mm)
                  - TRIPLET_PENALTY)
         if score > 0.0:
             out.append((idx, fourth, fit, score, rms3))
@@ -522,7 +579,7 @@ def _enumerate_triplets(centers, axes, dist, pool, tol, forbidden_pts,
 
 
 def _cover_pass(centers, axes, dist, pool, cavity_center, tol, lam, n_max,
-                next_tile_id):
+                next_tile_id, seed_cov=None):
     """Explain the leftover seeds ``pool`` with tentative tiles: relaxed
     quads first, then triplet completion on what is still left.  Returns
     ``(poses, assigned_indices, capped)``."""
@@ -534,7 +591,8 @@ def _cover_pass(centers, axes, dist, pool, cavity_center, tol, lam, n_max,
         centers, axes, dist, exclude=set(),
         rms_max=COVER_RMS_MAX_MM * tol, e_max=COVER_E_MAX,
         axis_max=COVER_AXIS_MAX_DEG, sim_max=COVER_SIM_RMS_MAX_MM * tol,
-        subset=pool, use_axes=use_axes) if len(pool) >= 4 else []
+        subset=pool, use_axes=use_axes,
+        seed_cov=seed_cov) if len(pool) >= 4 else []
     items = []
     for idx, fit in quads:
         score = deformable_score(fit)
@@ -557,7 +615,7 @@ def _cover_pass(centers, axes, dist, pool, cavity_center, tol, lam, n_max,
         # the inferred seed must not land on ANY detected candidate
         forbidden = centers
         trips = _enumerate_triplets(centers, axes, dist, rest, tol, forbidden,
-                                    use_axes=use_axes)
+                                    use_axes=use_axes, seed_cov=seed_cov)
         items = [(score, frozenset(idx), idx, fourth, fit, rms3)
                  for idx, fourth, fit, score, rms3 in trips]
         items.sort(key=lambda it: (-it[0], it[2]))
@@ -665,7 +723,8 @@ def fit_tiles_auto(centers_ras, axes_ras, cavity_center_ras=None,
                    allow_half=False, lambda_full=LAMBDA_FULL,
                    lambda_half=LAMBDA_HALF, max_tiles=None,
                    deformable=True, mesh=None, spacing_mm=None,
-                   cover=True, lambda_cover=LAMBDA_COVER) -> AutoFitResult:
+                   cover=True, lambda_cover=LAMBDA_COVER,
+                   seed_cov=None) -> AutoFitResult:
     """Infer the tile configuration from the seed cloud alone.
 
     Parameters
@@ -700,6 +759,10 @@ def fit_tiles_auto(centers_ras, axes_ras, cavity_center_ras=None,
         selection leaves inside the implant region.  Default True.
     lambda_cover : float
         Per-tile penalty of the cover pass.
+    seed_cov : (N, 3, 3) array, optional
+        Per-candidate position covariance (mm^2, indexed like
+        ``centers_ras``).  Forwarded to every bent-tile fit (hierarchical
+        weighting, module docstring); ``None`` = unweighted (historical).
 
     Returns
     -------
@@ -722,8 +785,10 @@ def fit_tiles_auto(centers_ras, axes_ras, cavity_center_ras=None,
         np.asarray(cavity_center_ras, dtype=float).reshape(3)
     n = centers.shape[0]
     n_max = n // 2 if max_tiles is None else int(max_tiles)
+    seed_cov = _check_seed_cov(seed_cov, n)
 
     tol = spacing_tolerance(spacing_mm)
+    fit_axes = _fit_axes(seed_cov, tol)
     result = AutoFitResult(lambda_full=float(lambda_full),
                            lambda_half=float(lambda_half), spacing_tol=tol)
     result.score_curve = [ScorePoint(0, 0.0, 0.0, 0.0, 0, 0)]
@@ -747,14 +812,18 @@ def fit_tiles_auto(centers_ras, axes_ras, cavity_center_ras=None,
     if deformable:
         std = set()
         for _s, idx, _r in quads:
-            fit = fit_deformable(centers[list(idx)], axes[list(idx)])
+            fit = fit_deformable(centers[list(idx)],
+                                 axes[list(idx)] if fit_axes else None,
+                                 seed_cov=_group_cov(seed_cov, idx))
             score = deformable_score(fit)
             std.add(frozenset(idx))
             if score > 0.0:
                 items.append((score, frozenset(idx), float(lambda_full),
                               "full", idx, fit, False))
         if n >= 4:
-            for idx, fit in _enumerate_loose_quads(centers, axes, dist, std):
+            for idx, fit in _enumerate_loose_quads(centers, axes, dist, std,
+                                                   seed_cov=seed_cov,
+                                                   fit_axes=fit_axes):
                 score = deformable_score(fit)
                 if score > 0.0:
                     items.append((score, frozenset(idx), float(lambda_full),
@@ -828,12 +897,13 @@ def fit_tiles_auto(centers_ras, axes_ras, cavity_center_ras=None,
     room = (int(max_tiles) - len(tiles)) if max_tiles is not None \
         else (n - len(assigned)) // 3
     _finish(result, centers, axes, dist, assigned, cavity_center, mesh,
-            cover=cover, tol=tol, lam=lambda_cover, n_max=room)
+            cover=cover, tol=tol, lam=lambda_cover, n_max=room,
+            seed_cov=seed_cov)
     return result
 
 
 def _finish(result, centers, axes, dist, assigned, cavity_center, mesh,
-            cover, tol, lam, n_max):
+            cover, tol, lam, n_max, seed_cov=None):
     """Shared tail of the auto and count-prior paths: cover pass, leftover
     classification, surface cross-check, ``all_assigned``."""
     n = centers.shape[0]
@@ -844,7 +914,7 @@ def _finish(result, centers, axes, dist, assigned, cavity_center, mesh,
     if cover and near and n_max >= 1:
         poses, extra, capped = _cover_pass(
             centers, axes, dist, near, cavity_center, tol, lam, n_max,
-            next_tile_id=len(result.tiles))
+            next_tile_id=len(result.tiles), seed_cov=seed_cov)
         result.tentative_tiles = poses
         result.capped = result.capped or capped
         assigned |= extra
@@ -873,7 +943,7 @@ def _finish(result, centers, axes, dist, assigned, cavity_center, mesh,
 def fit_tiles_prior(centers_ras, axes_ras, prior: ImplantPrior,
                     cavity_center_ras=None, mesh=None, spacing_mm=None,
                     cover=True, lambda_cover=LAMBDA_COVER,
-                    complete_degraded=True) -> AutoFitResult:
+                    complete_degraded=True, seed_cov=None) -> AutoFitResult:
     """Tile inference driven by what the OR team knows (:class:`ImplantPrior`).
 
     * count known -> the count-constrained exact fit
@@ -883,12 +953,16 @@ def fit_tiles_prior(centers_ras, axes_ras, prior: ImplantPrior,
     * count unknown -> :func:`fit_tiles_auto` (no half tiles, cover pass).
 
     Always returns an :class:`AutoFitResult` so callers read one shape.
+    ``seed_cov`` (``(N, 3, 3)``, optional) is forwarded to every bent-tile
+    fit, as in :func:`fit_tiles_auto`; the counted selection itself
+    (:func:`gtcore.tiles.fit.fit_tiles`) does not use it.
     """
     if prior is None or not prior.count_known:
         res = fit_tiles_auto(centers_ras, axes_ras,
                              cavity_center_ras=cavity_center_ras,
                              allow_half=False, mesh=mesh, spacing_mm=spacing_mm,
-                             cover=cover, lambda_cover=lambda_cover)
+                             cover=cover, lambda_cover=lambda_cover,
+                             seed_cov=seed_cov)
         res.prior = prior
         return res
 
@@ -899,6 +973,7 @@ def fit_tiles_prior(centers_ras, axes_ras, prior: ImplantPrior,
         np.zeros((0, 3), dtype=float)
     cavity_center = None if cavity_center_ras is None else \
         np.asarray(cavity_center_ras, dtype=float).reshape(3)
+    seed_cov = _check_seed_cov(seed_cov, centers.shape[0])
     counted = fit_tiles(centers, axes, prior.n_full, prior.n_half,
                         cavity_center_ras=cavity_center,
                         complete_degraded=complete_degraded)
@@ -910,7 +985,10 @@ def fit_tiles_prior(centers_ras, axes_ras, prior: ImplantPrior,
         if pose.deform is None and pose.kind == "full":
             try:
                 c, a = pose.seed_points(centers, axes)
-                pose.deform = fit_deformable(c, a, kind=pose.kind)
+                pose.deform = fit_deformable(
+                    c, a if _fit_axes(seed_cov, tol) else None, kind=pose.kind,
+                    seed_cov=_group_cov(seed_cov, pose.seed_indices,
+                                        len(c) - len(pose.seed_indices)))
             except Exception:
                 pose.deform = None
         if pose.deform is not None:
@@ -937,5 +1015,5 @@ def fit_tiles_prior(centers_ras, axes_ras, prior: ImplantPrior,
     shortfall = max(0, int(prior.n_full) - n_full_found)
     _finish(result, centers, axes, dist, assigned, cavity_center, mesh,
             cover=cover and shortfall > 0, tol=tol, lam=lambda_cover,
-            n_max=shortfall)
+            n_max=shortfall, seed_cov=seed_cov)
     return result

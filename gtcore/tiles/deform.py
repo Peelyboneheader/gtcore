@@ -38,6 +38,30 @@ from a few structured starts (the similarity Kabsch fit, its flipped normal,
 and hinge starts about either tile axis); the correspondence comes from
 :func:`gtcore.tiles.model.fit_rigid`.  Half tiles (2 seeds) cannot support
 a bending fit and fall back to the rigid pose with zero curvature.
+
+Anisotropic seed uncertainty (plan stage 5)
+-------------------------------------------
+With ``seed_cov`` the fit is the marginal form of a random-effects
+(hierarchical) least-squares model: the observed centre is
+``x_i = s_i + e_i``, ``e_i ~ N(0, Sigma_i)`` (localization error, e.g. the
+slab position of a seed inside a thick slice) and the true seed is
+``s_i = m_i(theta) + d_i``, ``d_i ~ N(0, slack^2 I)`` (the seed's deviation
+from the ideal bent sheet).  Eliminating ``s_i`` weights the position
+residual of seed ``i`` by ``C_i^-1``, ``C_i = Sigma_i + slack^2 I`` -- the
+generalized least-squares treatment of anisotropic fiducial localization
+error (Maier-Hein, Fitzpatrick et al., IEEE TPAMI 2012).  The whitening
+is normalised per seed by the smallest eigenvalue of ``C_i`` and its
+anisotropy is clamped (:data:`ANISO_MAX`): the best-determined direction
+keeps unit weight in mm, so every calibrated mm threshold downstream
+(deformable rms gates, ``LOOSE_*`` / ``COVER_*``, the selection penalty)
+keeps its meaning and only the poorly determined directions (z on a thick
+slice) are down-weighted, by at most 1/2.  The per-seed normalisation
+drops the relative precision BETWEEN seeds (exact GLS keeps it); with a
+covariance model that differs between seeds only through the slab term
+this is immaterial, and it is what keeps the gates calibrated.  The
+posterior seed positions of the same model live in
+:mod:`gtcore.tiles.fuse`.  Without ``seed_cov`` the residual vector and
+the result are exactly the historical ones.
 """
 from __future__ import annotations
 
@@ -52,12 +76,22 @@ from .model import RigidTile, TilePose6, fit_rigid
 
 __all__ = ["DeformParams", "DeformableFit", "fit_deformable",
            "deformed_points", "deformed_seed_points", "deformed_footprint",
-           "deformed_surface_grid", "KAPPA_RANGE"]
+           "deformed_surface_grid", "KAPPA_RANGE", "SLACK_MM",
+           "seed_whitening"]
 
 _OFF = _geom.SEED_PLANE_OFFSET_MM                 # 3.0
 KAPPA_RANGE = (-0.08, 0.5)                        # 1/mm on the seed sheet
 _W_AXIS_MM_PER_RAD = 4.0        # axis misalignment weight (mm per radian)
 _W_BEND_MM_MM = 1.5             # regulariser: mm of residual per (1/mm) kappa
+# Random-effects scale of the hierarchical fit (module docstring): 1-sigma
+# isotropic deviation of a seed from the ideal bent sheet -- the placement /
+# deformation tolerance of a seed in its collagen carrier.  A PHYSICAL
+# constant, reported with a 0.1-0.5 mm sensitivity sweep
+# (docs/localization-notes.md, stage 5); never tuned per scan.
+SLACK_MM = 0.3
+# whitening anisotropy clamp: eigenvalue ratio of C_i <= 4, i.e. no
+# direction is weighted below 1/2 of the best-determined one
+ANISO_MAX = 4.0
 
 
 @dataclass
@@ -87,11 +121,35 @@ class DeformableFit:
     residuals_mm: np.ndarray        # (k,) per observed seed
     axis_err_deg: float
     assignment: Tuple[int, ...]     # observed i <-> canonical assignment[i]
+    # with seed_cov (module docstring): per-seed |W_i r_i| (normalised
+    # whitening, mm along the best-determined direction) and r_i' C_i^-1 r_i
+    weighted_residuals_mm: Optional[np.ndarray] = None
+    mahalanobis_sq: Optional[np.ndarray] = None
     n_evals: int = 0
 
     @property
     def bending_energy(self) -> float:
         return self.params.bending_energy
+
+    @property
+    def wrms_mm(self) -> float:
+        """RMS of the normalised-whitened seed residuals in mm (what the
+        weighted fit minimises and what the mm gates read); equal to
+        ``rms_mm`` for an unweighted fit."""
+        if self.weighted_residuals_mm is None:
+            return self.rms_mm
+        w = np.asarray(self.weighted_residuals_mm, dtype=float)
+        return float(np.sqrt(np.mean(w ** 2)))
+
+    @property
+    def chi_rms(self) -> Optional[float]:
+        """Dimensionless ``sqrt(mean_i r_i' C_i^-1 r_i / 3)`` (``None``
+        without seed_cov).  Under the model its square has expectation of
+        about ``(3k - 9) / 3k`` for a full tile (9 fitted parameters,
+        ignoring the axis and curvature terms): ~0.25 for k = 4, not 1."""
+        if self.mahalanobis_sq is None:
+            return None
+        return float(np.sqrt(np.mean(np.asarray(self.mahalanobis_sq)) / 3.0))
 
     def seed_points(self) -> np.ndarray:
         return deformed_seed_points(self.pose, self.params)
@@ -234,11 +292,42 @@ def _unpack(x, R0):
     return R, t, params
 
 
-def _residuals(x, R0, P, A, uv, w_axis, w_bend):
+def seed_whitening(seed_cov, slack_mm=SLACK_MM, aniso_max=ANISO_MAX):
+    """Normalised whitening of each seed's position residual.
+
+    ``C_i = Sigma_i + slack^2 I``; returns ``(W, C_inv)``, both ``(k, 3, 3)``:
+    ``W_i = (C_i / lambda_min(C_i))^(-1/2)`` with the eigenvalue ratio
+    clamped to ``aniso_max`` (weights in ``[1/sqrt(aniso_max), 1]``), and
+    the exact (unclamped) ``C_i^-1`` for the Mahalanobis statistics.
+    """
+    C = np.asarray(seed_cov, dtype=float).reshape(-1, 3, 3)
+    C = 0.5 * (C + np.transpose(C, (0, 2, 1))) \
+        + float(slack_mm) ** 2 * np.eye(3)[None, :, :]
+    evals, evecs = np.linalg.eigh(C)
+    evals = np.maximum(evals, 1e-12)
+    ratio = np.clip(evals / evals[:, :1], 1.0, float(aniso_max))
+    W = np.einsum("kij,kj,klj->kil", evecs, ratio ** -0.5, evecs)
+    C_inv = np.einsum("kij,kj,klj->kil", evecs, 1.0 / evals, evecs)
+    return W, C_inv
+
+
+def _weighted_stats(d, W, C_inv):
+    """Per-seed ``|W_i d_i|`` and ``d_i' C_i^-1 d_i`` of residuals ``d``."""
+    if W is None:
+        return {}
+    wd = np.einsum("kij,kj->ki", W, d)
+    return dict(weighted_residuals_mm=np.linalg.norm(wd, axis=1),
+                mahalanobis_sq=np.einsum("ki,kij,kj->k", d, C_inv, d))
+
+
+def _residuals(x, R0, P, A, uv, w_axis, w_bend, W=None):
     R = R0 @ _rodrigues(x[:3])
     pts, tu = _sheet_and_tangent(uv, x[6], x[7], x[8])
     world = pts @ R.T + x[3:6]
-    res = [(world - P).ravel()]
+    if W is None:
+        res = [(world - P).ravel()]
+    else:
+        res = [np.einsum("kij,kj->ki", W, world - P).ravel()]
     if A is not None:
         ax = tu @ R.T
         # sin(angle) between undirected axes
@@ -263,27 +352,44 @@ def _bowl_sign(P, A, pose, uv):
 
 def fit_deformable(seed_pts, seed_axes=None, kind: Optional[str] = None,
                    kappa_range=KAPPA_RANGE, w_axis=_W_AXIS_MM_PER_RAD,
-                   w_bend=_W_BEND_MM_MM, hinge_starts=True) -> DeformableFit:
+                   w_bend=_W_BEND_MM_MM, hinge_starts=True,
+                   seed_cov=None, slack_mm=SLACK_MM) -> DeformableFit:
     """Fit the bent-tile model to 4 observed seeds (2 -> rigid fallback).
 
     Returns the best of several starts by total cost; ``rms_mm`` is the
     seed-position residual alone (the axis and bending terms are not in it),
     so it is directly comparable to :func:`fit_rigid`'s.
+
+    ``seed_cov`` ``(k, 3, 3)`` (mm^2, same order as ``seed_pts``) turns on
+    the hierarchical weighting of the module docstring with random-effects
+    scale ``slack_mm``; ``wrms_mm`` / ``weighted_residuals_mm`` /
+    ``chi_rms`` then report the weighted residual.  The correspondence and
+    the starts still come from the unweighted similarity fit.  ``None``
+    (default) is bit-identical to the unweighted fit.
     """
     P = np.asarray(seed_pts, dtype=float).reshape(-1, 3)
     k = P.shape[0]
     A = None if seed_axes is None else _unit_rows(seed_axes)
+    W = C_inv = None
+    if seed_cov is not None:
+        seed_cov = np.asarray(seed_cov, dtype=float)
+        if seed_cov.shape != (k, 3, 3):
+            raise ValueError("seed_cov must be (%d, 3, 3), got %r"
+                             % (k, seed_cov.shape))
+        W, C_inv = seed_whitening(seed_cov, slack_mm)
     rigid = fit_rigid(P, A, kind=kind, allow_scale=True,
                       scale_range=(0.6, 1.1))
     kind = rigid.pose.kind
     if k == 2:
         pose = TilePose6(rigid.pose.R, rigid.pose.t, kind, 1.0)
         pts = deformed_seed_points(pose, DeformParams())
-        res = np.linalg.norm(P - pts[list(rigid.assignment)], axis=1)
+        d = P - pts[list(rigid.assignment)]
+        res = np.linalg.norm(d, axis=1)
         return DeformableFit(pose=pose, params=DeformParams(),
                              rms_mm=float(np.sqrt(np.mean(res ** 2))),
                              residuals_mm=res, axis_err_deg=rigid.axis_err_deg,
-                             assignment=rigid.assignment)
+                             assignment=rigid.assignment,
+                             **_weighted_stats(d, W, C_inv))
 
     uv = RigidTile(kind).seed_uv[list(rigid.assignment)]
     # curvature implied by the similarity scale: s = 1 / (1 + 3 kappa)
@@ -324,7 +430,7 @@ def fit_deformable(seed_pts, seed_axes=None, kind: Optional[str] = None,
         x0 = np.concatenate([np.zeros(3), rigid.pose.t, kap])
         try:
             sol = least_squares(_residuals, x0, bounds=(lo, hi),
-                                args=(R0, P, A, uv0, w_axis, w_bend),
+                                args=(R0, P, A, uv0, w_axis, w_bend, W),
                                 method="trf", xtol=1e-7, ftol=1e-7,
                                 x_scale=np.array([0.1] * 3 + [1.0] * 3
                                                  + [0.05, 0.05, 0.3]),
@@ -347,7 +453,8 @@ def fit_deformable(seed_pts, seed_axes=None, kind: Optional[str] = None,
     R, t, params = _unpack(x, R0)
     pose = TilePose6(R, t, kind, 1.0)
     pts, tu = _sheet_and_tangent(uv0, params.kappa1, params.kappa2, params.psi)
-    res = np.linalg.norm(P - (pts @ R.T + t), axis=1)
+    d = P - (pts @ R.T + t)
+    res = np.linalg.norm(d, axis=1)
     aerr = 0.0
     if A is not None:
         ax = tu @ R.T
@@ -360,4 +467,5 @@ def fit_deformable(seed_pts, seed_axes=None, kind: Optional[str] = None,
     return DeformableFit(pose=pose, params=params,
                          rms_mm=float(np.sqrt(np.mean(res ** 2))),
                          residuals_mm=res, axis_err_deg=aerr,
-                         assignment=assignment, n_evals=n_evals)
+                         assignment=assignment, n_evals=n_evals,
+                         **_weighted_stats(d, W, C_inv))
