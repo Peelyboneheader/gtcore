@@ -265,14 +265,17 @@ def verify_check():
     thick = thick_slices(vol, 3)
     cands = _detect_plain(thick)
     tc = np.array([s.center_ras for s in truth.seeds])
-    lost = int(np.argmax(cdist(cands.centers_ras, tc).min(axis=0)))
+    d_truth = cdist(cands.centers_ras, tc).min(axis=0)   # per truth seed
+    lost = int(np.argmax(d_truth))
+    n_found = int((d_truth < 2.5).sum())
     res = fit_tiles_auto(cands.centers_ras, cands.axes_ras,
                          cavity_center_ras=truth.cavity_center_ras,
                          spacing_mm=thick.spacing)
     pose = [p for p in res.all_tiles if p.inferred_seed_ras is not None][0]
-    print("thick volume %s, spacing %s; %d of %d seeds detected, truth seed %d"
-          " inferred" % (thick.array.shape, np.round(thick.spacing, 2),
-                         len(cands), len(tc), lost))
+    print("thick volume %s, spacing %s; %d candidates, %d of %d truth seeds"
+          " detected, truth seed %d inferred" % (
+              thick.array.shape, np.round(thick.spacing, 2), len(cands),
+              n_found, len(tc), lost))
     print("inferred position error vs truth: %.2f mm"
           % np.linalg.norm(pose.inferred_seed_ras - tc[lost]))
     ts = []
