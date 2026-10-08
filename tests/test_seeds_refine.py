@@ -121,7 +121,12 @@ def _render_capsules(spacing, centers, axes, *, n_fine=(3, 3, 7),
         n = i1 - i0
         coarse = fine.reshape(n[0], nf[0], n[1], nf[1], n[2], nf[2]).mean(
             axis=(1, 3, 5))
-        arr[i0[2]:i1[2], i0[1]:i1[1], i0[0]:i1[0]] += metal_hu * coarse.T
+        patch = metal_hu * coarse.T                       # [k, j, i]
+        lo_ = np.maximum(i0, 0)
+        hi_ = np.minimum(i1, np.asarray(arr.shape[::-1]))
+        arr[lo_[2]:hi_[2], lo_[1]:hi_[1], lo_[0]:hi_[0]] += patch[
+            lo_[2] - i0[2]:hi_[2] - i0[2], lo_[1] - i0[1]:hi_[1] - i0[1],
+            lo_[0] - i0[0]:hi_[0] - i0[0]]
     arr += np.random.default_rng(rng).normal(0.0, noise, arr.shape)
     if clip is not None:
         arr = np.minimum(arr, clip)
@@ -431,3 +436,84 @@ def test_pipeline_flag(monkeypatch):
     assert e_ref < e_plain
     with pytest.raises(ValueError):
         pl.reconstruct(vol.copy_with(), verbose=False, refine_seeds="bogus")
+
+
+# ------------------------------------------------- merged-harness follow-ups
+def test_interpolated_slices_are_kept_and_inflate_z():
+    """PostOp-like gap volume: 1 mm slabs kept at irregular 1-3 mm steps and
+    re-gridded by the DICOM loader's rule onto 2 mm with the off-grid slices
+    interpolated (``meta["interpolated_k"]``).  Interpolated voxels stay in
+    the centroid (linear filling preserves the measured slices' first
+    moment) and every seed whose window touches one reports the uniform-slab
+    z variance s_k^2/12."""
+    from gtcore.phantom.seed_render import drop_and_interpolate
+
+    rng = np.random.default_rng(21)
+    centers, axes = _random_layout(3, rng, z_layers=2)
+    fine = _render_capsules((0.5, 0.5, 1.0), centers, axes, n_fine=(3, 3, 5),
+                            metal_hu=8000.0, rng=5)
+    steps = np.random.default_rng(3).choice([1, 2, 3], size=fine.array.shape[0],
+                                            p=[0.25, 0.5, 0.25])
+    keep = np.concatenate([[0], np.cumsum(steps)])
+    keep = keep[keep < fine.array.shape[0]]
+    vol = drop_and_interpolate(fine, keep, grid="loader")
+    assert vol.meta["interpolated_k"] and vol.spacing[2] == pytest.approx(2.0)
+    cands = detect_seed_candidates(vol, hu_threshold=1000.0, min_mm3=0.5,
+                                   max_mm3=60.0)
+    ref = refine_seed_candidates(vol, cands)
+    D = cdist(cands.centers_ras, centers)
+    ti = D.argmin(axis=1)
+    ok = (D.min(axis=1) < 2.0) & (ref.info["refine_status"] == "ok")
+    assert ok.sum() >= 0.6 * len(centers)
+    e0 = np.linalg.norm(cands.centers_ras[ok] - centers[ti[ok]], axis=1)
+    e1 = np.linalg.norm(ref.centers_ras[ok] - centers[ti[ok]], axis=1)
+    print("gap volume: %d seeds refined, mean error %.3f -> %.3f mm"
+          % (ok.sum(), e0.mean(), e1.mean()))
+    assert e1.mean() < e0.mean()
+    interp = set(vol.meta["interpolated_k"])
+    touched = 0
+    for j in np.flatnonzero(ok):
+        k = vol.ras_to_index(ref.centers_ras[j])[2]
+        if any(int(round(k)) + d in interp for d in (-1, 0, 1)):
+            touched += 1
+            assert ref.cov_ras[j][2, 2] >= 2.0 ** 2 / 12.0 - 1e-9
+    assert touched >= 1
+
+
+def test_close_candidates_fall_back_to_detection():
+    """Two candidates 2.6 mm apart on ONE seed (a threshold split): the
+    Voronoi cut would halve the seed, so both keep their detections."""
+    c = np.array([[0.11, -0.07, 0.03]])
+    vol = _render_capsules((0.7, 0.7, 0.7), c, [[1.0, 0.0, 0.0]],
+                           n_fine=(3, 3, 3))
+    frag = np.array([c[0] - [1.3, 0, 0], c[0] + [1.3, 0, 0]])
+    cands = SeedCandidates(np.zeros(vol.array.shape, bool), frag,
+                           np.array([[1.0, 0, 0]] * 2), np.ones(2), np.ones(2))
+    ref = refine_seed_candidates(vol, cands)
+    assert list(ref.info["refine_status"]) == ["fallback:close_neighbour"] * 2
+    assert np.allclose(ref.centers_ras, frag)
+
+
+def test_axes_kept_unless_requested(coarse_2p1):
+    vol, _, cands, ref = coarse_2p1
+    assert np.allclose(ref.axes_ras, cands.axes_ras)
+    ok = ref.info["refine_status"] == "ok"
+    upd = refine_seed_candidates(vol, cands, update_axes=True)
+    assert np.allclose(upd.axes_ras[ok], ref.info["refine_axis_ras"][ok])
+    assert np.allclose(upd.centers_ras, ref.centers_ras)
+
+
+def test_only_the_roi_leaving_the_volume_is_truncation():
+    """A seed whose background shell, but not its ROI, crosses the last
+    slice is refined; one whose ROI crosses it falls back."""
+    s = (0.5, 0.5, 2.0)
+    origin = (-12.0, -12.0, -12.0)
+    shape = (49, 49, 13)                    # k = 0..12 -> z = -12..12 mm
+    for z, expect in ((12.0 - 7.1, "ok"), (12.0 - 1.0, "fallback:roi_truncated")):
+        c = np.array([[0.13, -0.1, z]])
+        vol = _render_capsules(s, c, [[1.0, 0.0, 0.0]], origin=origin,
+                               shape_ijk=shape, n_fine=(3, 3, 10))
+        cands = SeedCandidates(np.zeros(vol.array.shape, bool), c + 0.1,
+                               np.array([[1.0, 0, 0]]), np.ones(1), np.ones(1))
+        ref = refine_seed_candidates(vol, cands)
+        assert ref.info["refine_status"][0] == expect

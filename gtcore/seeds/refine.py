@@ -96,15 +96,33 @@ Voxel-axis terms are rotated into RAS with the affine's direction cosines.
 Calibration is CHECKED with the normalized estimation error squared (NEES)
 on synthetic data with truth, never fitted.
 
+Interpolated slices (``vol.meta["interpolated_k"]``, the DICOM loader's
+fill of z gaps) are linear blends of the measured slices around them and
+carry no independent z information.  Their voxels are KEPT in the centroid
+and the through-slice variance is inflated instead: whenever the window
+touches an interpolated slice, the k-axis sampling variance becomes the
+uniform-slab ``s_k^2/12`` (no sub-slab z information).  Keeping them is
+not a convenience: linear interpolation hands each measured slice to its two
+bracketing grid slices with weights that sum to one and positions that
+average to the measured slice's true z, so the blend preserves the first
+moment of the measured data; and on a loader grid whole runs of grid slices
+can be interpolated (measured slices sitting between grid positions), so
+excluding them removes the seed.  Measured on the harness G3 (PostOp-like
+1 mm slabs at irregular positions on a 2 mm loader grid): excluding left the
+3D error at 0.83 / 0.72 mm (detection 0.86 / 0.78, sparse / crowded) with
+46 % fallbacks; keeping and inflating gave 0.54 / 0.49 mm.
+
 Rule-based steps (disclosed, with sensitivity reported in the notes): the
 3-sigma ROI and 2-sigma exclusion margins, the 1.5 mm background shell, and
 the fallbacks to the detected centre --
 ``shift`` (the refined centre moved more than ``max_shift_mm``),
+``close_neighbour`` (another candidate within one seed length, 4.5 mm:
+usually two fragments of one seed, which the Voronoi cut would halve),
 ``no_signal`` (no positive weight), ``extended`` (the shell holds more than
 half of the ROI's peak contrast: the object, or a background step, reaches
 beyond the seed's 3-sigma window -- a plate, bone), ``background`` (the
 planar-gradient shift ``|delta|`` exceeds ``max_bg_shift_mm`` = 0.1 mm: an
-air level or bone edge inside the window), ``roi_truncated`` (the window runs
+air level or bone edge inside the window), ``roi_truncated`` (the ROI runs
 off the volume).
 """
 from __future__ import annotations
@@ -198,6 +216,11 @@ class _Grid:
         self.r_excl = self.Dseed / 2.0 + EXCL_N_SIGMA * self.sig_eff
         self.quant_cov = self.M @ np.diag([1.0 / 12.0] * 3) @ self.M.T
         self.shape_ijk = np.array(self.arr.shape[::-1])
+        nk = self.arr.shape[0]
+        self.interp = np.zeros(nk, dtype=bool)      # interpolated k slices
+        meta = getattr(vol, "meta", None) or {}
+        ik = np.asarray(list(meta.get("interpolated_k", ()) or ()), dtype=int)
+        self.interp[ik[(ik >= 0) & (ik < nk)]] = True
 
     def to_vox_mm(self, d_ras):
         """RAS offset(s) -> voxel-axis millimetres (``(..., 3)``, ijk order)."""
@@ -272,7 +295,11 @@ def _neighbourhood(grid, center, axis, others_c, others_a, mask="voronoi",
     half = np.ceil(reach / grid.spacing).astype(int) + 1
     pc = np.round(p).astype(int)
     lo, hi = pc - half, pc + half
-    truncated = bool(np.any(lo < 0) or np.any(hi > grid.shape_ijk - 1))
+    # only the ROI running off the volume biases the centroid; a shell cut
+    # by the volume edge just estimates the background from fewer voxels
+    half_roi = np.ceil(np.maximum(reach - shell_t, 0.0) / grid.spacing).astype(int)
+    truncated = bool(np.any(pc - half_roi < 0)
+                     or np.any(pc + half_roi > grid.shape_ijk - 1))
     lo = np.clip(lo, 0, grid.shape_ijk - 1)
     hi = np.clip(hi, 0, grid.shape_ijk - 1)
     sub = grid.arr[lo[2]:hi[2] + 1, lo[1]:hi[1] + 1, lo[0]:hi[0] + 1]
@@ -400,6 +427,14 @@ def _grey_centroid(grid, center, axis, others_c, others_a, *, n_iter=3,
                             n_roi, n_sat, "fallback:" + reason,
                             bg_shift=bg_shift)
 
+    if len(others_c):
+        # another candidate closer than one seed length: the two windows
+        # overlap and the Voronoi cut runs through the signal of at least
+        # one of them -- typically two fragments of ONE seed split by the
+        # threshold (stage 3); the cut halves it and each half's centroid is
+        # biased by up to L/4, so the detection is kept
+        if float(np.linalg.norm(others_c - c0[None, :], axis=1).min()) < grid.L:
+            return fail("close_neighbour")
     n_iter = max(1, int(n_iter))
     for it in range(n_iter):
         # the first pass of the capsule window runs orientation-free: a
@@ -449,6 +484,10 @@ def _grey_centroid(grid, center, axis, others_c, others_a, *, n_iter=3,
             and float(np.linalg.norm(bg_shift)) > float(max_bg_shift_mm)):
         return fail("background", n_sat, bg_shift)
     var_ijk = grid.slab_var(ax, slab)
+    if grid.interp[np.unique(nb.kji[:, 0])].any():
+        # the window touches an interpolated slice: no sub-slab z information
+        var_ijk = var_ijk.copy()
+        var_ijk[2] = max(var_ijk[2], grid.spacing[2] ** 2 / 12.0)
     cov = cov_noise + grid.vox_to_ras_cov(var_ijk) + np.outer(bg_shift, bg_shift)
     return GreyCentroid(c, ax, cov, b, sig_n, wsum, int(nb.in_roi.sum()), n_sat,
                         "ok", cov_noise=cov_noise, slab_var_ijk=var_ijk,
@@ -488,17 +527,26 @@ def refine_seed_candidates(vol, cands: SeedCandidates, method="centroid",
                            max_shift_mm=1.5, psf_sigma_mm=PSF_SIGMA_MM, *,
                            n_iter=3, bg_shell_mm=BG_SHELL_MM, mask="voronoi",
                            roi="capsule", slab="bound",
-                           max_bg_shift_mm=MAX_BACKGROUND_SHIFT_MM
-                           ) -> SeedCandidates:
+                           max_bg_shift_mm=MAX_BACKGROUND_SHIFT_MM,
+                           update_axes=False) -> SeedCandidates:
     """Re-localize every candidate on the RAW (not metal-inpainted) volume.
 
     Returns a new :class:`SeedCandidates` (every other field carried by
-    ``subset``) with refined ``centers_ras`` / ``axes_ras``, ``cov_ras``
-    (N, 3, 3) and per-seed diagnostics in ``info``: ``refine_status``
-    ("ok" / "fallback:<reason>"), ``refine_shift_mm``,
-    ``refine_background_hu``, ``refine_sigma_noise_hu``,
+    ``subset``) with refined ``centers_ras``, ``cov_ras`` (N, 3, 3) and
+    per-seed diagnostics in ``info``: ``refine_status`` ("ok" /
+    "fallback:<reason>"), ``refine_shift_mm``, ``refine_axis_ras`` (the
+    grey-level axis), ``refine_background_hu``, ``refine_sigma_noise_hu``,
     ``refine_bg_shift_mm``, ``refine_n_saturated``; plus ``refine_method``
     and ``saturation_hu`` (the detected clip ceiling or ``None``).
+
+    ``axes_ras`` keeps the DETECTION axes unless ``update_axes=True``.  The
+    grey-level axis is the more accurate one (head phantom median error
+    8.9 vs 16.4 deg at 2.1 mm, 12.7 vs 23.9 deg at 2.8 mm), but the tile
+    fitter's gates and scores were calibrated on detection axes, and handing
+    it the new axes cost one correct tile partition out of five at 2.1 mm
+    (analytic phantom) and at 2.8 mm (binary), while refined centres with
+    detection axes gained one at 2.1 / 2.8 mm (binary) and 2.8 mm (analytic)
+    -- re-tuning those gates is outside this stage.
 
     A candidate falls back to its detected centre and axis, with the
     voxel-quantization covariance ``s_a^2/12``, when the grey centroid is not
@@ -515,7 +563,7 @@ def refine_seed_candidates(vol, cands: SeedCandidates, method="centroid",
     grid = _Grid(vol, psf_sigma_mm)
     centers = np.array(cands.centers_ras, dtype=float).reshape(-1, 3)
     axes = np.array(cands.axes_ras, dtype=float).reshape(-1, 3)
-    new_c, new_a = centers.copy(), axes.copy()
+    new_c, new_a, ref_a = centers.copy(), axes.copy(), axes.copy()
     cov = np.zeros((n, 3, 3))
     status = []
     shift, bg, sig = np.zeros(n), np.zeros(n), np.zeros(n)
@@ -531,7 +579,10 @@ def refine_seed_candidates(vol, cands: SeedCandidates, method="centroid",
                            max_shift_mm=max_shift_mm)
         st = r.status
         if st == "ok":
-            new_c[i], new_a[i], cov[i] = r.center_ras, r.axis_ras, r.cov_ras
+            new_c[i], cov[i] = r.center_ras, r.cov_ras
+            ref_a[i] = r.axis_ras
+            if update_axes:
+                new_a[i] = r.axis_ras
             shift[i] = float(np.linalg.norm(r.center_ras - centers[i]))
         else:
             cov[i] = grid.quantization_cov()
@@ -548,6 +599,7 @@ def refine_seed_candidates(vol, cands: SeedCandidates, method="centroid",
         refine_sigma_noise_hu=sig,
         refine_bg_shift_mm=bgs,
         refine_n_saturated=nsat,
+        refine_axis_ras=ref_a,
     )
     out.centers_ras, out.axes_ras, out.cov_ras, out.info = new_c, new_a, cov, info
     return out
