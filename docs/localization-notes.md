@@ -262,3 +262,31 @@ Reading:
 |---|---|---|---|---|
 | 2026-10-08 | `python scripts/validation_fuse.py --mc --csv ...` (stage 5, stand-in covariance) | phantom rng 0-4; MC rng 0 | b09cb39 | 166 s |
 | 2026-10-08 | `pytest tests/test_tiles_fuse.py` (13 tests) + `tests/test_tiles*.py tests/test_localization_plumbing.py` | fixed | b09cb39 | 17 s; 151 passed in 147 s |
+
+### Coordinator decision on stage 5 (2026-10-08, after loc/hwls merged at 04b4d20)
+
+Gate ("head phantom 2.1/2.8 mm mean 3D error ≥ 15 % better than raw seeds"):
+**not met** at 2.1 mm (−0.3 %), **just met** at 2.8 mm (−15.2 %); z error −1 %
+and −24 %. The agent's model-only Monte-Carlo ceiling (exact bent-tile model,
+exact covariance) is 9–10 % at 2.1 mm and 10–13 % at 2.8 mm, so the plan's
+15 % gate sat above what the method can deliver on these cavities: 78 % of
+the thick-slice error is a shift common to all four seeds of a tile, which
+the tile pose absorbs and no tile-based estimator can see. This is the
+3-redundant-DOF caveat from the plan, now measured.
+
+Decision: stage 5 ships **opt-in only** (`reconstruct(fuse_tiles=False)`,
+`fit_deformable(seed_cov=None)` default, bit-identical to before). It is
+re-evaluated once stage 2 supplies real per-seed covariances; if the 2.1 mm
+gain stays below the ceiling-adjusted bar of 8 %, the paper reports it as a
+negative result with the ceiling analysis. The conditional posterior
+covariance is over-confident (NEES 2–3 on thick slices); the pose-error-
+propagated covariance (`cov_mode="pev"`) is calibrated and will be the
+default if the stage ever ships.
+
+Separate gated item opened (owner: coordinator, after stage 4/6 merge): on
+scans thicker than 1.2 mm the DEFAULT unweighted bent-tile fit still uses the
+degenerate PCA seed axes; dropping the axis term there (as the cover pass
+already does) cut tile normal error from 6.4° to 2.9° at 2.8 mm in the
+weighted path. Changing the default alters the calibrated selection, so it
+gets its own before/after gate on `tests/test_tiles_auto.py` cases and the
+real scans.
