@@ -35,8 +35,8 @@ from gtcore.seeds import detect_seed_candidates  # noqa: E402
 from gtcore.tiles import fit_tiles  # noqa: E402
 from gtcore.tiles.fit import _orient_normal, _plane_fit  # noqa: E402
 
-DEFAULT_PHANTOM8 = r"C:\Users\jacob\OneDrive\Documents\3D-Printed Phantom-8tiles (223)"
-DEFAULT_POSTOP = r"C:\Users\jacob\OneDrive\Documents\PostOp CT"
+DEFAULT_PHANTOM8 = r"C:\Users\jacob\Documents\3D-Printed Phantom-8tiles (223)"
+DEFAULT_POSTOP = r"C:\Users\jacob\Documents\PostOp CT"
 
 
 def _angle(a, b):

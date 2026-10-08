@@ -109,9 +109,12 @@ def assess_implant(centers_ras, axes_ras=None):
     out["n_tile_evidence"] = int(n_tiles)
 
     # An implant is ONE cavity's lining: its tiles group within a cavity-
-    # sized region. Chance quads from physiologic calcifications (pineal,
-    # choroid plexus, falx -- measured on the pre-implant negative control:
-    # 6 quads with genuinely tile-like geometry) scatter across the head.
+    # sized region, whereas chance quads from physiologic calcifications
+    # (pineal, choroid plexus, falx) would scatter across the head.  NOTE
+    # (2026-10-08, docs/data-notes.md): the scan once used as the
+    # "pre-implant negative control" turned out to be the 1 mm thin-cut of
+    # the PostOp patient, so its "6 calcification quads" were the implant;
+    # the chance-quad risk is currently UNMEASURED on a true pre-implant scan.
     grouped = 0
     if n_tiles:
         from scipy.spatial.distance import cdist
@@ -433,11 +436,11 @@ def reconstruct(vol: Volume, verbose: bool = True,
                                len(status) - n_ok))
 
     # Implant assessment uses only candidates AWAY from bone: dense inner-
-    # table spots pass every filter and even form chance quads with tile-like
-    # geometry (measured on the pre-implant negative control: 6 quads,
-    # residuals 0.2-0.7 mm, axis coherence 0.94-0.98 -- indistinguishable
-    # from real tiles), but they sit ON the skull, while implanted seeds sit
-    # in tissue lining the cavity.
+    # table spots pass every filter and could form chance quads with
+    # tile-like geometry, but they sit ON the skull, while implanted seeds
+    # sit in tissue lining the cavity.  (The "6 quads, residuals 0.2-0.7 mm"
+    # once attributed to a pre-implant control were real tiles on the PostOp
+    # patient's thin-cut; see docs/data-notes.md, corrected 2026-10-08.)
     # (Checking against masks["skull"] does NOT work: segment_head carves the
     # metal mask out of the bone mask, so candidate locations are holes in
     # it. Instead, probe the INPAINTED volume on a 4 mm shell around each

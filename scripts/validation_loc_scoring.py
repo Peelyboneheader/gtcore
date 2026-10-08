@@ -35,7 +35,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-DEFAULT_PHANTOM8 = r"C:\Users\jacob\OneDrive\Documents\3D-Printed Phantom-8tiles (223)"
+DEFAULT_PHANTOM8 = r"C:\Users\jacob\Documents\3D-Printed Phantom-8tiles (223)"
 CACHE = os.path.join("output", "loc_scoring", "cache", "phantom8_seeds.pkl")
 
 

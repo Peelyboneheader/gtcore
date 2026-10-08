@@ -29,10 +29,10 @@ import numpy as np
 from scipy import ndimage
 
 SCANS = {
-    "postop": r"C:\Users\jacob\OneDrive\Documents\PostOp CT",
-    "phantom8": r"C:\Users\jacob\OneDrive\Documents\3D-Printed Phantom-8tiles (223)",
-    "tilefree": r"C:\Users\jacob\OneDrive\Documents\CT 3D printed",
-    "doe": r"C:\Users\jacob\OneDrive\Documents\DOEJOHNPOSTCT",
+    "postop": r"C:\Users\jacob\Documents\PostOp CT",
+    "phantom8": r"C:\Users\jacob\Documents\3D-Printed Phantom-8tiles (223)",
+    "tilefree": r"C:\Users\jacob\Documents\CT 3D printed",
+    "doe": r"C:\Users\jacob\Documents\DOEJOHNPOSTCT",
 }
 CACHE = os.path.join("output", "loc_mergesplit", "cache")
 
