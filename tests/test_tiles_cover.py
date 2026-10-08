@@ -18,6 +18,7 @@ import pytest
 from scipy.spatial.distance import cdist
 
 from gtcore.phantom import make_head_phantom
+from gtcore.phantom.seed_render import thick_slices
 from gtcore.pipeline import filter_seed_shaped, seed_detection_params
 from gtcore.seeds import detect_seed_candidates
 from gtcore.tiles import (
@@ -29,7 +30,6 @@ from gtcore.tiles import (
     spacing_tolerance,
     to_placed_tiles,
 )
-from gtcore.volume import Volume
 
 
 def _detect(vol):
@@ -42,15 +42,10 @@ def _detect(vol):
     return np.array(cands.centers_ras), np.array(cands.axes_ras)
 
 
-def _thick_slices(vol, factor):
-    """Block-average along k (partial-volume simulation of thick slices);
-    mirrors scripts/validation_spacing.py."""
-    nk = (vol.array.shape[0] // factor) * factor
-    arr = vol.array[:nk].reshape(-1, factor, *vol.array.shape[1:]).mean(axis=1)
-    affine = vol.affine.copy()
-    affine[:3, 2] *= factor
-    affine[:3, 3] += vol.affine[:3, 2] * (factor - 1) / 2.0
-    return Volume(arr.astype(np.float32), affine, dict(vol.meta))
+# Block-average along k (partial-volume simulation of thick slices); the one
+# implementation lives in gtcore.phantom.seed_render (also re-exported by
+# scripts/validation_spacing.py).
+_thick_slices = thick_slices
 
 
 @pytest.fixture(scope="module")
