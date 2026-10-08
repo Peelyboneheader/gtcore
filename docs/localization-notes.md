@@ -722,3 +722,35 @@ real scans.
 | 2026-10-08 | `python scripts/validation_spacing.py --refine none --realizations 5` | phantom rng 0–4 | fe4a1a8 | 7 s |
 | 2026-10-08 | `python scripts/validation_spacing.py --refine none --realizations 5 --seed-render analytic` | phantom rng 0–4 | fe4a1a8 | 8 s |
 | 2026-10-08 | `python scripts/validation_realdata_proxies.py --no-cache` | real scans (printed8, PostOp, CT 3D printed, DOE) | fe4a1a8 | 101 s |
+
+### Coordinator decisions on the stage-0 open items (2026-10-08, loc/integration 4d3f833)
+
+- **Contrast target for the harness.** Keep `METAL_HU_POSTOP` (median peak
+  ≈ 1700 HU at 0.5×0.5×2.0 mm) as the default for G2–G4: it is the harder
+  case and matches what the data-notes recorded for the interpolated PostOp
+  slices. Report `METAL_HU_POSTOP_MEASURED` (10 900 HU, reproduces the
+  measured-slice median 2936 HU and 18 % saturation) as a secondary row in
+  every harness table so the paper can state the sensitivity to contrast.
+  G1 uses `METAL_HU_PRINTED` (96 % saturation, as the real printed phantom:
+  31/32 at 3071 HU).
+- **G3 definition.** The PostOp-like G3 (1 mm slabs at irregular positions,
+  rebuilt onto the loader's 2 mm grid, interpolated slices flagged in
+  `meta["interpolated_k"]`) is the primary G3; the literal "every other slice
+  interpolated at 1 mm" stays as `--grids G3L` and is reported once, with
+  the note that the thin-slice threshold tier makes it a detection, not a
+  localization, test.
+- **Negative controls.** The DOE pre-implant scan is "confirmed" before any
+  change (documented calcification limitation, data-notes). The gate for
+  every stage is therefore **"verdict unchanged on both negative controls"**
+  (tile-free printed scan: absent, 0 candidates; DOE: confirmed), not
+  "not confirmed".
+- **Near-flat threshold for the 10 mm-pitch proxy.** |κ| ≤ 0.04 /mm admits
+  only 2 of the 8 printed-phantom tiles; the proxy is reported for ALL tiles
+  as "measured chord minus bent-tile-predicted chord" (0.07 ± 0.63 mm at
+  baseline), which is curvature-corrected and uses every tile. The raw
+  near-flat row is kept for transparency.
+- **Baseline correction.** The 2026-09-01 `output/validation_spacing.csv`
+  was optimistic (partition 5/5 at 1.4 and 2.1 mm; now 4/5 and 2/5 at
+  fe4a1a8; recall 0.97/0.98 at 2.1/2.8 mm, not 1.00). The README validation
+  row "slice-spacing robustness" must be re-stated from the fresh baseline
+  when this feature merges to main.
