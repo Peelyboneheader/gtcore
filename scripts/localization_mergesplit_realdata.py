@@ -105,7 +105,7 @@ def reconstruct_cached(scan, merge, legacy_split=False, **kw):
     orig = pipeline.detect_seed_candidates
     if legacy_split:
         pipeline.detect_seed_candidates = functools.partial(
-            orig, split_window=False, split_guard=False)
+            orig, split_window=False, split_guard=False, split_weighted=False)
     try:
         res = pipeline.reconstruct(vol, verbose=True, **kwargs)
     finally:
